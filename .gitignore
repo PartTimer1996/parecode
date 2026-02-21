@@ -1,0 +1,6 @@
+/target
+.forge/
+*.env
+.env.*
+*.txt
+.claude

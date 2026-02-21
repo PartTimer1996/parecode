@@ -1,0 +1,28 @@
+[package]
+name = "Forge"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal coding agent built for token efficiency and local model reliability"
+repository = "https://github.com/PartTimer1996/Forge"
+homepage = "https://github.com/PartTimer1996/Forge"
+license = "MIT"
+keywords = ["ai", "coding-agent", "llm", "ollama", "mcp"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "Forge"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.13.2", features = ["json", "stream"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9.8"
+anyhow = "1"
+futures-util = "0.3"
+chrono = "0.4"
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+unicode-width = "0.2.2"
