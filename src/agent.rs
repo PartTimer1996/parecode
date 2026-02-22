@@ -18,7 +18,9 @@ const SYSTEM_PROMPT_BASE: &str = r#"You are Forge, a focused coding assistant. Y
 Guidelines:
 - Be direct and efficient — use the minimum tool calls needed
 - Read files before editing them
-- Prefer edit_file over write_file for existing files (preserves unchanged content)
+- NEVER use write_file on a file that already exists — always use edit_file to modify existing files
+- write_file is ONLY for creating brand-new files that do not exist yet
+- When adding tests, functions, or code to an existing file: use edit_file to append or insert — never rewrite the whole file
 - After editing source files, verify the change compiles before declaring done
 - For replacement tasks (e.g. "replace X with Y"), use search to confirm no instances of X remain before declaring done
 - When a task is complete, say so clearly and stop calling tools
@@ -323,6 +325,60 @@ pub async fn run_tui(
         output_tokens: total_output_tokens,
         tool_calls: tool_call_count,
         compressed_count: history.compressed_count(),
+    });
+
+    Ok(())
+}
+
+/// Quick mode — single API call, no multi-turn loop, minimal context.
+/// Targets < 2k tokens total. No file loading, no session history.
+/// Allows at most 1 tool call before returning (edit_file, search, bash read-only).
+pub async fn run_quick(
+    task: &str,
+    client: &Client,
+    config: &AgentConfig,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+) -> Result<()> {
+    const QUICK_SYSTEM: &str = "You are Forge in quick mode. Answer concisely in one response. \
+If a tool call is needed, make exactly one — prefer edit_file or search. \
+Do not read files unless strictly necessary. Keep responses short.";
+
+    // Lean tool list — only the tools that make sense for quick tasks
+    let quick_tools: Vec<crate::client::Tool> = tools::all_definitions()
+        .into_iter()
+        .filter(|t| matches!(t.name.as_str(), "edit_file" | "search" | "read_file" | "bash"))
+        .collect();
+
+    let messages = vec![Message {
+        role: "user".to_string(),
+        content: MessageContent::from(task.to_string()),
+    }];
+
+    let tx_clone = ui_tx.clone();
+    let response = client
+        .chat(QUICK_SYSTEM, &messages, &quick_tools, move |chunk| {
+            let _ = tx_clone.send(UiEvent::Chunk(chunk.to_string()));
+        })
+        .await?;
+
+    let total_input = response.input_tokens;
+    let total_output = response.output_tokens;
+
+    // Execute at most one tool call
+    if let Some(tc) = response.tool_calls.first() {
+        let mut cache = FileCache::default();
+        let history = History::default();
+        let raw = execute_tool(tc, config, &mut cache, &history, &ui_tx, &config.mcp).await;
+        let _ = ui_tx.send(UiEvent::ToolResult {
+            summary: raw.lines().take(5).collect::<Vec<_>>().join("\n"),
+        });
+    }
+
+    let _ = ui_tx.send(UiEvent::AgentDone {
+        input_tokens: total_input,
+        output_tokens: total_output,
+        tool_calls: response.tool_calls.len().min(1),
+        compressed_count: 0,
     });
 
     Ok(())

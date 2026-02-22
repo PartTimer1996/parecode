@@ -39,6 +39,9 @@ pub struct Profile {
     /// MCP servers to connect for this profile
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Optional: cost per 1M input tokens in USD, used for plan cost estimates.
+    /// Example: 0.25 for Haiku, 3.0 for Sonnet, 15.0 for Opus.
+    pub cost_per_mtok_input: Option<f64>,
 }
 
 fn default_context_tokens() -> u32 {
@@ -54,6 +57,7 @@ impl Default for Profile {
             api_key: None,
             planner_model: None,
             mcp_servers: Vec::new(),
+            cost_per_mtok_input: None,
         }
     }
 }
@@ -121,6 +125,8 @@ pub struct ResolvedConfig {
     pub planner_model: Option<String>,
     /// MCP servers configured for this profile
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Optional cost per 1M input tokens in USD (for plan estimates)
+    pub cost_per_mtok_input: Option<f64>,
 }
 
 impl ResolvedConfig {
@@ -156,6 +162,7 @@ impl ResolvedConfig {
             profile_name,
             planner_model: base.planner_model,
             mcp_servers: base.mcp_servers,
+            cost_per_mtok_input: base.cost_per_mtok_input,
         }
     }
 }
@@ -203,10 +210,11 @@ context_tokens = 32768
 
 # ── Anthropic Claude ─────────────────────────────────────────────────────────
 # [profiles.claude]
-# endpoint       = "https://api.anthropic.com/v1"
-# model          = "claude-sonnet-4-6"
-# context_tokens = 200000
-# api_key        = "sk-ant-..."
+# endpoint             = "https://api.anthropic.com/v1"
+# model                = "claude-sonnet-4-6"
+# context_tokens       = 200000
+# api_key              = "sk-ant-..."
+# cost_per_mtok_input  = 3.0   # USD per 1M input tokens — enables cost estimates in /plan
 
 # ── Anthropic Claude — Opus planner + Haiku executor ─────────────────────────
 # Uses Opus for planning (high reasoning, low token count) and Haiku for

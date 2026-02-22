@@ -5,6 +5,7 @@ mod client;
 mod config;
 mod history;
 mod index;
+mod init;
 mod mcp;
 mod plan;
 mod sessions;
@@ -46,6 +47,10 @@ struct Args {
     /// Show tool calls without executing them
     #[arg(long)]
     dry_run: bool,
+
+    /// Quick mode — single API call, no multi-turn loop, minimal context
+    #[arg(long)]
+    quick: bool,
 
     /// Show extra token / compression detail
     #[arg(short, long)]
@@ -94,7 +99,11 @@ async fn main() -> Result<()> {
 
     // ── Single-shot mode (non-TUI) ────────────────────────────────────────────
     if let Some(task) = args.task {
-        run_single_shot(task, file, resolved, args.verbose, args.dry_run).await?;
+        if args.quick {
+            run_single_shot_quick(task, resolved, args.verbose).await?;
+        } else {
+            run_single_shot(task, file, resolved, args.verbose, args.dry_run).await?;
+        }
         return Ok(());
     }
 
@@ -199,6 +208,46 @@ fn print_event_plain(ev: &tui::UiEvent) {
         | UiEvent::PlanComplete { .. }
         | UiEvent::PlanFailed { .. } => {}
     }
+}
+
+// ── Quick single-shot (plain stdout, no TUI, no loop) ─────────────────────────
+
+async fn run_single_shot_quick(
+    task: String,
+    resolved: ResolvedConfig,
+    verbose: bool,
+) -> Result<()> {
+    use tokio::sync::mpsc;
+
+    println!();
+    println!("  ⚡ forge quick  {}  ·  {}", resolved.profile_name, resolved.model);
+    println!();
+
+    let mut client = client::Client::new(resolved.endpoint.clone(), resolved.model.clone());
+    if let Some(key) = &resolved.api_key {
+        client.set_api_key(key.clone());
+    }
+    let mcp = mcp::McpClient::new(&resolved.mcp_servers).await;
+    let config = agent::AgentConfig {
+        verbose,
+        dry_run: false,
+        context_tokens: resolved.context_tokens,
+        profile_name: resolved.profile_name.clone(),
+        model: resolved.model.clone(),
+        show_timestamps: false,
+        mcp,
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<tui::UiEvent>();
+    let agent_handle = tokio::spawn(async move {
+        agent::run_quick(&task, &client, &config, tx).await
+    });
+
+    while let Some(ev) = rx.recv().await {
+        print_event_plain(&ev);
+    }
+    agent_handle.await??;
+    Ok(())
 }
 
 // ── Profiles listing (non-TUI) ────────────────────────────────────────────────

@@ -119,6 +119,55 @@ impl Plan {
     pub fn completed_count(&self) -> usize {
         self.steps.iter().filter(|s| s.status == StepStatus::Pass).count()
     }
+
+    /// Estimate token cost for this plan.
+    /// Heuristic: base_tokens(500) + instruction_len/4 + file_sizes/4 per step,
+    /// summed and multiplied by 1.3 to account for tool results and model responses.
+    /// Returns (low_estimate, high_estimate) in tokens.
+    pub fn estimate_tokens(&self) -> (usize, usize) {
+        let base_per_step = 500usize;
+        let overhead_factor_low = 10;  // ×1.0 — minimum
+        let overhead_factor_high = 13; // ×1.3 — with tool results + model responses
+
+        let raw: usize = self.steps.iter().map(|step| {
+            let instruction_tokens = step.instruction.chars().count() / 4;
+            let file_tokens: usize = step.files.iter().map(|f| {
+                // Estimate file size from disk — fall back to 1000 tokens if unreadable
+                std::fs::read_to_string(f)
+                    .map(|c| c.chars().count() / 4)
+                    .unwrap_or(1000)
+            }).sum();
+            base_per_step + instruction_tokens + file_tokens
+        }).sum();
+
+        let low = raw * overhead_factor_low / 10;
+        let high = raw * overhead_factor_high / 10;
+        (low, high)
+    }
+
+    /// Format the cost estimate as a compact string for display.
+    /// e.g. "est. 8k–12k tokens"
+    pub fn estimate_display(&self, cost_per_mtok: Option<f64>) -> String {
+        let (low, high) = self.estimate_tokens();
+
+        fn fmt_k(n: usize) -> String {
+            if n >= 1000 { format!("{}k", n / 1000) } else { n.to_string() }
+        }
+
+        let token_str = format!("est. {}–{} tokens", fmt_k(low), fmt_k(high));
+
+        if let Some(rate) = cost_per_mtok {
+            let usd_low  = (low  as f64 / 1_000_000.0) * rate;
+            let usd_high = (high as f64 / 1_000_000.0) * rate;
+            if usd_high < 0.01 {
+                format!("{token_str}  ·  <$0.01")
+            } else {
+                format!("{token_str}  ·  ~${:.2}–${:.2}", usd_low, usd_high)
+            }
+        } else {
+            token_str
+        }
+    }
 }
 
 // ── Plan persistence ──────────────────────────────────────────────────────────

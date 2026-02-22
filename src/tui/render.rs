@@ -288,7 +288,7 @@ fn build_items(state: &AppState, term_width: u16) -> Vec<ListItem<'static>> {
             }
 
             ConversationEntry::PlanCard => {
-                items.extend(build_plan_card_items(state));
+                items.extend(build_plan_card_items(state, state.cost_per_mtok_input));
             }
 
             ConversationEntry::TaskComplete {
@@ -334,7 +334,7 @@ fn build_items(state: &AppState, term_width: u16) -> Vec<ListItem<'static>> {
     items
 }
 
-fn build_plan_card_items(state: &AppState) -> Vec<ListItem<'static>> {
+fn build_plan_card_items(state: &AppState, cost_per_mtok: Option<f64>) -> Vec<ListItem<'static>> {
     let Some(pr) = &state.plan_review else { return vec![] };
     let plan = &pr.plan;
     let running = matches!(state.mode, Mode::PlanRunning);
@@ -360,6 +360,19 @@ fn build_plan_card_items(state: &AppState) -> Vec<ListItem<'static>> {
         ),
         Span::styled(plan.task.clone(), Style::default().fg(task_fg)),
     ])));
+
+    // Cost estimate line (only in review mode before execution)
+    if !running && !complete {
+        let estimate = plan.estimate_display(cost_per_mtok);
+        let step_count = plan.steps.len();
+        out.push(ListItem::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{step_count} step{}  ·  {estimate}", if step_count == 1 { "" } else { "s" }),
+                Style::default().fg(Color::Rgb(80, 75, 100)),
+            ),
+        ])));
+    }
 
     // Divider
     out.push(ListItem::new(Line::from(vec![

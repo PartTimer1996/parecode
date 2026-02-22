@@ -240,12 +240,121 @@ Full Model Context Protocol client (`src/mcp.rs`):
 
 ---
 
-## Phase 6b — Growth & Distribution
+## Phase 6b — Distribution & First-Run Experience 
 
-These are the next moves that turn Forge from a strong tool into a platform.
+The Rust binary is Forge's biggest distribution advantage. Every competitor requires a language runtime: OpenCode and Claude Code need Node.js, Aider needs Python, oh-my-opencode needs both. Forge is a single static binary — zero dependencies, starts in <10ms. The goal: install to productive in under 60 seconds, better than any competitor.
 
-### 6b-i. Benchmarking suite
-Run on the tasks that caused Qwen3 14B to loop in OpenCode. Record token counts, tool calls, success rate, wall time. Publish results.
+### 6b-i. Binary releases with cargo-dist FOURTH NEXT! - TEST MYSELF - install setup, qwen scenarios, then Claude
+
+**cargo-dist** automates the entire release pipeline from a single `dist init`. On every version tag push, GitHub Actions builds all targets, produces platform installers, updates the Homebrew tap, and creates the GitHub Release — zero manual steps.
+
+**Target matrix:**
+| Target | Platform | Notes |
+|---|---|---|
+| `x86_64-unknown-linux-musl` | Linux x86_64 | Statically linked — works on any Linux, any glibc version |
+| `aarch64-unknown-linux-musl` | Linux ARM64 | AWS Graviton, Raspberry Pi, ARM servers |
+| `x86_64-apple-darwin` | macOS Intel | Older Macs |
+| `aarch64-apple-darwin` | macOS Apple Silicon | M1/M2/M3 — now majority of Macs |
+| `x86_64-pc-windows-msvc` | Windows x86_64 | Primary Windows target |
+
+**musl is non-negotiable for Linux.** Statically linked = no "error while loading shared libraries" ever. This eliminates the most common class of post-install failures on Linux.
+
+**Cargo.toml / dist.toml configuration:**
+```toml
+[workspace.metadata.dist]
+cargo-dist-version = "0.30.4"
+ci = ["github"]
+installers = ["shell", "powershell", "homebrew"]
+tap = "PartTimer1996/homebrew-forge"
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+publish-jobs = ["homebrew"]
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
+```
+
+**Release process:** `git tag v0.1.0 && git push --tags` — that's it.
+
+**What cargo-dist produces automatically:**
+- GitHub Release with 5 platform binaries + SHA256 checksums for each
+- Shell installer script (`forge-installer.sh`) with checksum validation
+- PowerShell installer script (`forge-installer.ps1`) for Windows
+- Homebrew formula pushed to `PartTimer1996/homebrew-forge` tap
+
+### 6b-ii. Install methods (README-ready)
+
+```bash
+# macOS / Linux — one-liner, zero dependencies
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/PartTimer1996/Forge/releases/latest/download/forge-installer.sh | sh
+
+# macOS — Homebrew
+brew install PartTimer1996/forge/forge
+
+# Windows — PowerShell
+irm https://github.com/PartTimer1996/Forge/releases/latest/download/forge-installer.ps1 | iex
+```
+
+**Competitive install comparison:**
+| Tool | Install command | Requires |
+|---|---|---|
+| **Forge** | `curl ... \| sh` | Nothing |
+| OpenCode | `npm install -g opencode` | Node.js |
+| oh-my-opencode | npm + manual agent config | Node.js + setup time |
+| Claude Code | `npm install -g @anthropic-ai/claude-code` | Node.js |
+| Aider | `pip install aider-chat` | Python |
+| Plandex | `curl ... \| bash` | Nothing (also compiled binary) |
+
+Forge and Plandex are the only zero-dependency installs in the category.
+
+### 6b-iii. Distribution channel rollout
+
+**Week 1 (ship with first release):**
+- GitHub Releases (cargo-dist, automated)
+- Shell installer (cargo-dist, automated)
+- Homebrew tap (cargo-dist, automated)
+
+**Week 2:**
+- **AUR** (`forge-bin`) — binary PKGBUILD, targets Arch Linux developers. Highly technical early-adopter audience. Minimal maintenance: update `pkgver` + `sha256sums` on each release.
+- **WinGet** — pre-installed on Windows 11. `wingetcreate new <release-url>` generates the manifest; `vedantmgoyal9/winget-releaser` GitHub Action automates future updates.
+- **Shell completions** — generate for bash/zsh/fish via clap's `generate` feature. Included in the tarball, install instructions in README. Makes Forge feel native.
+
+**Later (when users ask):**
+- `flake.nix` for Nix users — provide in repo, they can `nix profile install github:PartTimer1996/Forge`
+- nixpkgs submission — often happens organically when the tool gains traction
+- deb/rpm — only worth building if significant Ubuntu/Fedora user base requests it
+
+**Do not bother:**
+- Snap (sandboxing breaks tool, wrong audience)
+- Flatpak (designed for GUI apps)
+- Docker (not a server application)
+- npm/pip wrappers (adds maintenance surface for marginal gain)
+
+### 6b-iv. `forge update` self-upgrade command
+
+curl-installed users have no package manager to update through. `forge update` re-runs the install script against latest, replaces the binary in-place.
+
+```
+$ forge update
+Checking for updates... forge 0.1.0 → 0.2.1 available
+Downloading forge 0.2.1 for aarch64-apple-darwin... ✓
+Verifying checksum... ✓
+Replacing /home/user/.local/bin/forge... ✓
+forge 0.2.1 installed.
+```
+
+Implementation: `src/main.rs` — `--update` subcommand, fetches GitHub API `/releases/latest`, compares version, re-runs platform-specific installer script.
+
+### 6b-v. Benchmarking suite
+
+Run on the tasks that caused Qwen3 14B to loop in OpenCode. Record token counts, tool calls, success rate, wall time. Publish results — this is the "viral moment" that proves the token efficiency claim.
 
 | Task | Target |
 |---|---|
@@ -253,17 +362,114 @@ Run on the tasks that caused Qwen3 14B to loop in OpenCode. Record token counts,
 | `"rename columns → allColumns in data-table.component.ts"` | No re-reads, clean 1-shot |
 | `"reorganise SCSS in header.component.scss"` | < 3k tokens |
 
-Model matrix: Qwen3 14B (Ollama), Mistral 7B, DeepSeek-Coder, Claude Sonnet (API).
+Model matrix: Qwen3 14B (Ollama), Mistral 7B, DeepSeek-Coder, Claude Sonnet (API). Publish side-by-side with OpenCode numbers.
 
-### 6b-ii. Expose Forge as an MCP server (`--mcp` flag)
+### 6b-vi. Expose Forge as an MCP server (`--mcp` flag)
 - JSON-RPC over stdin/stdout, `--mcp` flag
 - Makes Forge usable as a backend from any MCP-compatible IDE (Cursor, Zed, etc.)
 - Reuses all existing tool infrastructure
 
-### 6b-iii. VSCode extension (trivial packaging, large surface area)
+### 6b-vii. VSCode extension (trivial packaging, large surface area)
 - `package.json` + launch Forge subprocess + pipe events to webview
 - Reuses all existing TUI event infrastructure
 - Gives access to VSCode's file tree, git integration, diff viewer
+
+---
+
+## Phase 6c THIRD NEXT! — First-Run Experience (install → productive in 60 seconds)
+
+**The target flow:**
+```
+install → forge → interactive setup → working
+```
+
+**Nobody's current flow:**
+```
+install → run → error: no config → read docs → create config → run again → maybe works
+```
+
+Forge should be the tool that just works.
+
+### 6c-i. First-run detection and setup wizard
+
+When `forge` is launched with no config file present, run an interactive setup wizard instead of erroring:
+
+```
+Welcome to Forge ⚒
+
+No config found at ~/.config/forge/config.toml. Let's get you set up.
+
+? How do you want to run Forge?
+  ❯ Local (Ollama) — free, private, works offline
+    Anthropic Claude — best quality, requires API key
+    OpenAI — GPT-4o, requires API key
+    OpenRouter — any model, one API key
+    Skip — I'll configure manually
+
+[If Ollama selected — after silently probing localhost:11434]
+  Checking for Ollama... ✓ found (3 models installed)
+
+? Which model?
+  ❯ qwen3:14b   (recommended for coding tasks)
+    qwen2.5-coder:14b
+    llama3.1:8b
+
+Config written to ~/.config/forge/config.toml ✓
+Running /init to detect project context... ✓ written to .forge/conventions.md
+
+Ready. What would you like to build?
+▶
+```
+
+**Auto-detection shortcuts (skip the wizard entirely):**
+- If `ANTHROPIC_API_KEY` env var present → auto-configure Claude profile, skip wizard
+- If `OPENAI_API_KEY` env var present → auto-configure OpenAI profile, skip wizard
+- If Ollama responds at `localhost:11434` with models → default to local, only ask which model
+- If only one model installed → skip even that question, just use it
+
+**Implementation:**
+- `src/setup.rs` — `run_setup_wizard() -> ResolvedConfig` — terminal prompts (no TUI, runs before TUI starts)
+- `src/main.rs` — check `config_path().exists()` before launching TUI; if missing, run wizard first
+- Wizard uses `dialoguer` crate for interactive prompts (or hand-rolled crossterm prompts to avoid extra dependency)
+
+### 6c-ii. Ollama auto-detection
+
+On every startup (not just first run), silently probe `localhost:11434/api/tags` (100ms timeout). If Ollama is running:
+- Show `◉ Ollama` indicator in TUI status bar when using local profile
+- If user is on a cloud profile but Ollama is also running: show soft hint `◉ Local models available — /profile local to switch`
+- On first run: Ollama presence triggers local-first default in the wizard
+
+### 6c-iii. `/init` auto-prompt on new project
+
+On first `forge` launch in a directory with no `.forge/` folder:
+
+```
+No project conventions found.
+Run /init to prime Forge with your project's stack and style? [Y/n]
+```
+
+If Y: runs `/init` inline (see Phase 6i), shows result, asks to save. If N: continues normally, can run `/init` later.
+
+### 6c-iv. `forge update` and version awareness
+
+Status bar shows version and available update indicator:
+```
+forge 0.1.0 · new version 0.2.1 available — run `forge update`
+```
+
+Checked once per session against GitHub API (cached for 24h in `~/.local/share/forge/update-check`). Never blocks startup.
+
+### 6c-v. Shell completion install hint
+
+On first run after install, if completions aren't installed:
+```
+Tip: install shell completions for tab-completion of commands and flags:
+  forge --completions zsh > ~/.zfunc/_forge   # zsh
+  forge --completions bash > ~/.bash_completion.d/forge  # bash
+  forge --completions fish > ~/.config/fish/completions/forge.fish  # fish
+```
+
+Shown once, suppressed after. Completions generated via clap's `generate` feature, shipped in release tarballs.
 
 ### ✅ 6d. Smarter file selection — COMPLETE
 
@@ -289,6 +495,232 @@ Model matrix: Qwen3 14B (Ollama), Mistral 7B, DeepSeek-Coder, Claude Sonnet (API
   - Dimmed/purple palette so it doesn't compete with active status bar
   - Budget enforcement count and peak context % tracked separately
 - Foundation for a hosted dashboard / benchmarking comparisons
+
+---
+
+## Phase 6g — NEXT! Hash-Anchored Edits (correctness)
+
+**The single biggest correctness improvement available.** Inspired by oh-my-opencode's hash-anchored edit validation, which moved task success from 6.7% → 68.3% on complex tasks. Stale-line edits — where the file has shifted since it was read — are the most common silent failure mode.
+
+**How it works:**
+- `read_file` output annotates each line with a short content hash: `42#a3f: fn validate_token(...)`
+- Hashes are compact (4–5 chars), placed at the start of the line number field — subtle, not noisy
+- `edit_file` accepts an optional `anchor` hash alongside `old_str`
+- Before applying: verify the hash still matches the line at the expected position
+- If hash mismatch → return error: `"Anchor mismatch at line 42 — file has changed since last read. Re-read to get current hashes."`
+- If no anchor provided → fall through to existing fuzzy matching (backwards compatible)
+
+**Implementation:**
+- `src/tools/read.rs` — hash generation (CRC32 or FNV-1a of the line content, base36, 4 chars)
+- `src/tools/edit.rs` — anchor verification before fuzzy match
+- `src/cache.rs` — cache stores hashes alongside content; invalidated on write/edit
+- Hash format: `{line_num}#{hash}:` prefix — stripped before content is used
+
+**Design constraints:**
+- Hashes must be invisible to the model's reasoning (it should use them for anchoring, not describe them)
+- System prompt addition: `"Each line in read_file output is prefixed {line}#{hash}: — use the hash as an anchor in edit_file calls to prevent stale-line errors"`
+- Backwards compatible: anchor param is optional; existing edit calls continue to work
+
+---
+
+## Phase 6h — SECOND NEXT! Hooks System
+
+**First-class workflow automation.** Config-driven pre/post hooks that run deterministic shell commands at key points in the agent lifecycle. The UX priority: hooks should feel instant and integrated, not like a CI config bolted on.
+
+**Hook events:**
+| Event | Trigger | Common use |
+|---|---|---|
+| `on_task_done` | After every completed agent run | `cargo test`, `npm test` |
+| `on_edit` | After any `write_file` or `edit_file` call | `cargo check`, `tsc --noEmit` |
+| `on_plan_step_done` | After each plan step completes | lint, format |
+| `on_session_start` | TUI startup | `git pull`, environment check |
+| `on_session_end` | TUI quit or `/new` | `git status` summary |
+
+**Config (per-profile or global):**
+```toml
+[hooks]
+on_edit      = ["cargo check -q"]
+on_task_done = ["cargo test --quiet 2>&1 | tail -5"]
+on_session_end = ["git status --short"]
+```
+
+**UX behaviour:**
+- Hook output shown inline in conversation history as a dimmed `⚙ hook:` block — not mixed with agent output
+- If hook exits non-zero: output shown in amber, model NOT automatically reinvoked (user decides)
+- Hooks run with a 30s timeout; timeout shown as warning not error
+- `/hooks` slash command lists configured hooks and their last exit codes
+- Hooks can be disabled per-session: `/hooks off`
+
+**Implementation:**
+- `src/hooks.rs` — `HookRunner { config: HookConfig }`, `run(event: HookEvent) -> HookResult`
+- `src/config.rs` — `HookConfig` struct added to `Profile`
+- `src/tui/mod.rs` — fire hooks at `AgentDone`, post tool dispatch, session start/end
+- Hook output sent as `AppEvent::HookOutput { event, stdout, exit_code }` to render layer
+
+---
+
+## ✅ Phase 6i — `/init` Command — COMPLETE
+
+**One-shot project context priming.** Walks the project and auto-generates `.forge/conventions.md` from existing project files. Eliminates manual conventions setup for new projects.
+
+**Sources (in priority order):**
+1. `README.md` — first 50 lines (project description, stack, install)
+2. `Cargo.toml` / `package.json` / `pyproject.toml` / `go.mod` — name, language, key dependencies
+3. `AGENTS.md` / `CLAUDE.md` — if already exists, merge rather than overwrite
+4. `.eslintrc` / `rustfmt.toml` / `pyproject.toml [tool.ruff]` — style rules detected
+5. Test directory structure — infer test runner from `jest.config`, `pytest.ini`, `#[cfg(test)]`
+
+**Output format (`.forge/conventions.md`):**
+```markdown
+# Project: my-app
+Language: TypeScript (Bun runtime)
+Test runner: `bun test` — tests in `src/__tests__/`
+Lint: `eslint src/` — run after edits
+Key dependencies: React 19, Drizzle ORM, Hono
+
+## Style
+- Prefer `const` over `let`
+- No default exports
+- Zod for all external input validation
+```
+
+**TUI integration:**
+- `/init` slash command — runs inline, shows progress, opens result in pager overlay for review/edit before saving
+- On first `forge` run in a new directory (no `.forge/` present): prompt "No conventions found. Run `/init` to prime project context? [y/N]"
+- `forge --init` CLI flag (already exists for config) — extend to also run project init if in a project directory
+
+**Implementation:**
+- `src/init.rs` — `run_project_init(cwd) -> String` — pure text extraction, no model calls
+- `src/tui/mod.rs` — `/init` command handler, first-run prompt
+
+---
+
+## ✅ Phase 6j — Cost Estimation in Plan Overlay — COMPLETE
+
+**Pre-task cost transparency.** Before running a plan, show an estimated token cost and (optionally) API cost. Nobody does this. Users burned $638+ in 6 weeks on AI agents without forewarning.
+
+**Estimation method (no model call, heuristic):**
+- Per step: `base_tokens (500) + sum(file_sizes_in_step / 4) + instruction_len / 4`
+- Total: `sum(step_estimates) × 1.3` (overhead factor for tool results and responses)
+- API cost: `total_tokens × rate_per_token` — rates configured per-profile, or use known defaults (Haiku: $0.25/Mtok input)
+
+**Plan overlay addition:**
+```
+┌─ Plan: add JWT authentication ────────────────────────┐
+│ 4 steps  ·  est. 12k–18k tokens  ·  ~$0.004 at Haiku │
+│                                                        │
+│ ▶ Step 1: Add JWT dependency to Cargo.toml            │
+│   Step 2: Implement token validation middleware        │
+│   ...                                                  │
+```
+
+**Config:**
+```toml
+[profiles.claude]
+cost_per_mtok_input  = 0.25   # optional, enables cost display
+cost_per_mtok_output = 1.25
+```
+
+**Implementation:**
+- `src/plan.rs` — `estimate_plan_cost(plan, index) -> CostEstimate { tokens_low, tokens_high, usd }`
+- `src/tui/render.rs` — add estimate row to plan overlay header
+- `src/config.rs` — `cost_per_mtok_input/output` optional fields on `Profile`
+
+---
+
+## ✅ Phase 6k — Quick Mode / Tiered Autonomy — COMPLETE
+
+**Right-sized agent for right-sized tasks.** The full agent loop (plan → load context → multi-turn tool loop → verify) is overkill for a one-line fix. Quick mode skips the overhead entirely.
+
+**Trigger:**
+- `forge --quick "task"` — explicit flag
+- Auto-detect heuristic (opt-in via config `auto_quick = true`): task < 20 words, no file `@` attachments, no `/plan` prefix → quick mode
+- `/quick "task"` in TUI
+
+**Quick mode behaviour:**
+- Single API call — no multi-turn loop
+- No plan generation, no step isolation
+- Context: system prompt + task only (no file loading, no session history)
+- Tools available: `edit_file`, `bash` (read-only commands only), `search`
+- Max 1 tool call before returning to user
+- Token target: < 2k tokens total
+- TUI: shows `⚡ quick` badge in status bar instead of spinner
+
+**When NOT to use quick mode:**
+- Task contains words like "refactor", "add feature", "implement", "plan" → warn and suggest normal mode
+- Task references multiple files → warn
+
+**Implementation:**
+- `src/agent.rs` — `run_quick(task, config) -> AgentResult` — simplified single-shot path
+- `src/main.rs` — `--quick` flag, auto-detect logic
+- `src/tui/mod.rs` — `/quick` command, badge in status bar
+
+---
+
+## Phase 7 — Advanced Orchestration
+
+### 7a. Automatic model routing by category
+
+Extend `planner_model` into a full `model_routes` table. Tasks and plan steps declare a category; the harness picks the right model automatically.
+
+**Categories:**
+| Category | Profile model example | When used |
+|---|---|---|
+| `deep` | `claude-opus-4-6` | Complex multi-file refactors, architecture decisions |
+| `standard` | `claude-sonnet-4-6` | Default — most coding tasks |
+| `quick` | `claude-haiku-4-5-20251001` | Single-file edits, quick queries |
+| `search` | cheapest available | Web search, grep, read-only research |
+
+**Config:**
+```toml
+[profiles.claude.model_routes]
+deep     = "claude-opus-4-6"
+standard = "claude-sonnet-4-6"
+quick    = "claude-haiku-4-5-20251001"
+search   = "claude-haiku-4-5-20251001"
+```
+
+**Integration with plan steps:**
+- Plan generation adds a `category` field to each step based on instruction complexity
+- Agent loop selects model per step rather than once per session
+- Quick mode auto-routes to `quick` category
+
+### 7b. Background parallel plan steps
+
+Execute independent plan steps concurrently. Sequential by default; parallel only when steps have no file overlap.
+
+**Dependency analysis (static, no model call):**
+- Build a directed graph: step A → step B if B lists a file that A modifies
+- Steps with no shared files and no dependency edge → eligible for parallel execution
+- Max concurrency: configurable `parallel_steps = 3` in config (default: 1 = sequential)
+
+**Execution:**
+- `tokio::spawn` per eligible step group
+- Each step gets its own `McpClient` scope (MCP connections not shared across parallel steps)
+- Results collected in order; step summaries merged before next sequential step
+- TUI shows parallel steps as a grouped block with individual ✓/✗ per step
+
+**Constraints:**
+- Steps that call `bash` with side effects are always sequential (conservative)
+- File write conflicts → pause, surface to user for resolution
+- Requires 7a (model routing) to be useful — parallel steps should use `quick`/`search` routes
+
+### 7c. MCP skill scoping
+
+Scope MCP servers to specific plan step categories or task keywords rather than loading all servers globally.
+
+**Config:**
+```toml
+[[profiles.local.mcp_servers]]
+name    = "playwright"
+command = ["npx", "-y", "@playwright/mcp"]
+scope   = ["visual", "frontend", "test-e2e"]   # only loaded for these categories
+```
+
+**Behaviour:**
+- At plan step start: check step category against each server's `scope`
+- Only matching servers included in tool list for that step
+- Reduces tool list size by 60-80% for non-matching steps — keeps model focused
 
 ---
 

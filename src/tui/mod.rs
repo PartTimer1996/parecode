@@ -307,6 +307,8 @@ pub struct AppState {
     pub stats: SessionStats,
     /// First line of the current/most-recent task message (for telemetry records)
     pub current_task_preview: String,
+    /// Optional cost per 1M input tokens (from profile config) for plan estimates
+    pub cost_per_mtok_input: Option<f64>,
 }
 
 impl AppState {
@@ -340,6 +342,7 @@ impl AppState {
             mcp,
             stats: SessionStats::default(),
             current_task_preview: String::new(),
+            cost_per_mtok_input: None,
         }
     }
 
@@ -565,6 +568,8 @@ struct PaletteCommand {
 fn palette_commands() -> Vec<PaletteCommand> {
     vec![
         PaletteCommand { key: "/plan",        label: "Generate and review a plan for a task" },
+        PaletteCommand { key: "/quick",       label: "Run a lightweight single-shot query" },
+        PaletteCommand { key: "/init",        label: "Generate .forge/conventions.md for this project" },
         PaletteCommand { key: "/cd",          label: "Change working directory" },
         PaletteCommand { key: "/profile",     label: "Switch profile" },
         PaletteCommand { key: "/profiles",    label: "List profiles" },
@@ -638,6 +643,7 @@ async fn event_loop(
 ) -> Result<()> {
     let mcp = McpClient::new(&resolved.mcp_servers).await;
     let mut state = AppState::new(&resolved, show_timestamps, mcp);
+    state.cost_per_mtok_input = resolved.cost_per_mtok_input;
 
     // Auto-resume the most recent session for this cwd (load turns for context + display)
     let cwd = cwd_str();
@@ -976,7 +982,28 @@ fn handle_key(
                 state.palette_query.clear();
                 if !cmd.is_empty() {
                     let input = if cmd.starts_with('/') { cmd } else { format!("/{cmd}") };
-                    execute_command(&input, state, resolved, file)?;
+                    // /plan and /quick need ui_tx — handle them here before execute_command
+                    if input.starts_with("/plan ") || input == "/plan" {
+                        let task = input.trim_start_matches("/plan").trim().to_string();
+                        if task.is_empty() {
+                            state.push(ConversationEntry::SystemMsg(
+                                "usage: /plan \"describe the task\"".to_string(),
+                            ));
+                        } else {
+                            generate_and_show_plan(task, state, resolved, ui_tx.clone());
+                        }
+                    } else if input.starts_with("/quick ") || input == "/quick" {
+                        let task = input.trim_start_matches("/quick").trim().to_string();
+                        if task.is_empty() {
+                            state.push(ConversationEntry::SystemMsg(
+                                "usage: /quick \"task\"".to_string(),
+                            ));
+                        } else {
+                            launch_quick(task, state, resolved, verbose, dry_run, ui_tx)?;
+                        }
+                    } else {
+                        execute_command(&input, state, resolved, file)?;
+                    }
                 }
             }
             KeyCode::Backspace => {
@@ -1042,6 +1069,15 @@ fn handle_key(
                             ));
                         } else {
                             generate_and_show_plan(task, state, resolved, ui_tx.clone());
+                        }
+                    } else if input.starts_with("/quick ") || input == "/quick" {
+                        let task = input.trim_start_matches("/quick").trim().to_string();
+                        if task.is_empty() {
+                            state.push(ConversationEntry::SystemMsg(
+                                "usage: /quick \"task\"".to_string(),
+                            ));
+                        } else {
+                            launch_quick(task, state, resolved, verbose, dry_run, ui_tx)?;
                         }
                     } else if input.starts_with('/') {
                         let keep = execute_command(&input, state, resolved, file)?;
@@ -1193,7 +1229,7 @@ fn execute_command(
         }
         "/help" | "/h" => {
             state.push(ConversationEntry::SystemMsg(
-                "Commands: /plan \"task\"  /cd  /profile  /profiles  /ts  /clear  /sessions  /resume [n]  /rollback [n]  /new  /quit\nCtrl+H  session history  ·  Ctrl+P  command palette\nIn plan review: ↑↓ navigate  e annotate  d clear note  a approve & run  Esc cancel".to_string(),
+                "Commands: /plan \"task\"  /quick \"task\"  /init  /cd  /profile  /profiles  /ts  /clear  /sessions  /resume [n]  /rollback [n]  /new  /quit\nCtrl+H  session history  ·  Ctrl+P  command palette\nIn plan review: ↑↓ navigate  e annotate  d clear note  a approve & run  Esc cancel".to_string(),
             ));
         }
         "/clear" => {
@@ -1313,6 +1349,23 @@ fn execute_command(
                 }
             }
         }
+        "/init" => {
+            let cwd = std::path::PathBuf::from(cwd_str());
+            let content = crate::init::run_project_init(&cwd);
+            match crate::init::save_conventions(&cwd, &content) {
+                Ok(path) => {
+                    state.push(ConversationEntry::SystemMsg(
+                        format!("✓ conventions written to {}", path.display()),
+                    ));
+                    // Show a compact preview
+                    let preview: String = content.lines().take(10).collect::<Vec<_>>().join("\n");
+                    state.push(ConversationEntry::SystemMsg(preview));
+                }
+                Err(e) => {
+                    state.push(ConversationEntry::SystemMsg(format!("/init error: {e}")));
+                }
+            }
+        }
         "/ts" => {
             state.show_timestamps = !state.show_timestamps;
             let s = if state.show_timestamps { "on" } else { "off" };
@@ -1361,6 +1414,7 @@ fn execute_command(
                     state.profile = resolved.profile_name.clone();
                     state.model = resolved.model.clone();
                     state.context_tokens = resolved.context_tokens;
+                    state.cost_per_mtok_input = resolved.cost_per_mtok_input;
                     state.push(ConversationEntry::SystemMsg(format!(
                         "✓ {} · {} · {}k ctx",
                         resolved.profile_name, resolved.model, resolved.context_tokens / 1000
@@ -1442,6 +1496,60 @@ fn launch_agent(
     tokio::spawn(async move {
         tokio::select! {
             result = crate::agent::run_tui(&task, &client, &agent_config, attached, prior_context, ui_tx.clone()) => {
+                if let Err(e) = result {
+                    let _ = ui_tx.send(UiEvent::AgentError(e.to_string()));
+                }
+            }
+            _ = async move {
+                let _ = cancel_rx.await;
+            } => {
+                let _ = ui_tx.send(UiEvent::AgentError("cancelled".to_string()));
+            }
+        }
+    });
+
+    Ok(())
+}
+
+// ── Quick mode launcher ───────────────────────────────────────────────────────
+
+fn launch_quick(
+    task: String,
+    state: &mut AppState,
+    resolved: &ResolvedConfig,
+    verbose: bool,
+    dry_run: bool,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+) -> Result<()> {
+    state.push(ConversationEntry::UserMessage(format!("⚡ {task}")));
+    state.current_task_preview = task.lines().next().unwrap_or(&task).chars().take(80).collect();
+    state.mode = Mode::AgentRunning;
+    state.ctx_used = 0;
+    state.ctx_compressed = false;
+
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    state.cancel_tx = Some(cancel_tx);
+
+    let mut client = Client::new(resolved.endpoint.clone(), resolved.model.clone());
+    if let Some(key) = &resolved.api_key {
+        client.set_api_key(key.clone());
+    }
+    let agent_config = AgentConfig {
+        verbose,
+        dry_run,
+        context_tokens: resolved.context_tokens,
+        profile_name: resolved.profile_name.clone(),
+        model: resolved.model.clone(),
+        show_timestamps: state.show_timestamps,
+        mcp: state.mcp.clone(),
+    };
+
+    state.collecting_response.clear();
+    state.collecting_tools.clear();
+
+    tokio::spawn(async move {
+        tokio::select! {
+            result = crate::agent::run_quick(&task, &client, &agent_config, ui_tx.clone()) => {
                 if let Err(e) = result {
                     let _ = ui_tx.send(UiEvent::AgentError(e.to_string()));
                 }
