@@ -244,7 +244,7 @@ Full Model Context Protocol client (`src/mcp.rs`):
 
 The Rust binary is Forge's biggest distribution advantage. Every competitor requires a language runtime: OpenCode and Claude Code need Node.js, Aider needs Python, oh-my-opencode needs both. Forge is a single static binary — zero dependencies, starts in <10ms. The goal: install to productive in under 60 seconds, better than any competitor.
 
-### 6b-i. Binary releases with cargo-dist FOURTH NEXT! - TEST MYSELF - install setup, qwen scenarios, then Claude
+### 6b-i. Binary releases with cargo-dist SECOND NEXT - TEST MYSELF - install setup, qwen scenarios, then Claude
 
 **cargo-dist** automates the entire release pipeline from a single `dist init`. On every version tag push, GitHub Actions builds all targets, produces platform installers, updates the Homebrew tap, and creates the GitHub Release — zero manual steps.
 
@@ -376,7 +376,7 @@ Model matrix: Qwen3 14B (Ollama), Mistral 7B, DeepSeek-Coder, Claude Sonnet (API
 
 ---
 
-## Phase 6c THIRD NEXT! — First-Run Experience (install → productive in 60 seconds)
+## Phase 6c NEXT! — First-Run Experience (install → productive in 60 seconds)
 
 **The target flow:**
 ```
@@ -523,39 +523,59 @@ Shown once, suppressed after. Completions generated via clap's `generate` featur
 
 ---
 
-## Phase 6h — SECOND NEXT! Hooks System
+## ✅ Phase 6h — Hooks System — COMPLETE
 
-**First-class workflow automation.** Config-driven pre/post hooks that run deterministic shell commands at key points in the agent lifecycle. The UX priority: hooks should feel instant and integrated, not like a CI config bolted on.
+**First-class workflow automation.** Config-driven pre/post hooks that run deterministic shell commands at key points in the agent lifecycle. The key innovation beyond a simple CI config: `on_edit` output is **injected directly into the model's tool result**, so the model sees compile/lint errors immediately and can self-correct without an extra read-file round-trip.
 
 **Hook events:**
-| Event | Trigger | Common use |
-|---|---|---|
-| `on_task_done` | After every completed agent run | `cargo test`, `npm test` |
-| `on_edit` | After any `write_file` or `edit_file` call | `cargo check`, `tsc --noEmit` |
-| `on_plan_step_done` | After each plan step completes | lint, format |
-| `on_session_start` | TUI startup | `git pull`, environment check |
-| `on_session_end` | TUI quit or `/new` | `git status` summary |
+| Event | Trigger | Injection | Common use |
+|---|---|---|---|
+| `on_edit` | After any `write_file` or `edit_file` call | ✓ Injected into tool result | `cargo check -q`, `tsc --noEmit` |
+| `on_task_done` | After every completed agent run | TUI only | `cargo test -q 2>&1 \| tail -5` |
+| `on_plan_step_done` | After each plan step completes | TUI only | lint, format |
+| `on_session_start` | TUI startup | TUI only | `git pull`, environment check |
+| `on_session_end` | TUI quit | stderr only | `git status --short` |
 
-**Config (per-profile or global):**
+**Auto-detection (the key UX win):**
+
+On first run with no hooks in config, Forge scans the project root for language markers and auto-configures sensible defaults — no manual setup required:
+| Marker | `on_edit` | `on_task_done` |
+|---|---|---|
+| `Cargo.toml` | `cargo check -q` | `cargo test -q 2>&1 \| tail -5` |
+| `tsconfig.json` | `tsc --noEmit` | — |
+| `go.mod` | `go build ./...` | — |
+| `pyproject.toml` / `setup.py` + ruff in PATH | `ruff check .` | — |
+
+Detection runs **once** then writes a `[profiles.{name}.hooks]` section into `~/.config/forge/config.toml` (append-only, preserving all comments). The written block includes active detected commands plus all 5 event types commented out as examples — so users can see and edit every option. Subsequent startups read from config; detection never repeats.
+
+**Config (per-profile):**
 ```toml
-[hooks]
+[profiles.local.hooks]
 on_edit      = ["cargo check -q"]
-on_task_done = ["cargo test --quiet 2>&1 | tail -5"]
-on_session_end = ["git status --short"]
+on_task_done = ["cargo test -q 2>&1 | tail -5"]
+# on_plan_step_done = []
+# on_session_start  = []
+# on_session_end    = []
 ```
 
+Set `hooks_disabled = true` in a profile to permanently suppress all hooks including auto-detected ones.
+
 **UX behaviour:**
-- Hook output shown inline in conversation history as a dimmed `⚙ hook:` block — not mixed with agent output
-- If hook exits non-zero: output shown in amber, model NOT automatically reinvoked (user decides)
-- Hooks run with a 30s timeout; timeout shown as warning not error
-- `/hooks` slash command lists configured hooks and their last exit codes
-- Hooks can be disabled per-session: `/hooks off`
+- Startup: `⚙ hooks  on_edit: cargo check -q  ·  on_task_done: cargo test -q …  (/list-hooks for details)` shown as a system message so hooks are never invisible
+- `on_edit` output appended inline to the model's tool result — model sees `⚙ \`cargo check -q\` (exit 1): error[E0308]: …` and self-corrects immediately
+- Hook output rendered in TUI as dimmed `⚙` block; amber on non-zero exit
+- 30s timeout per hook; 50-line output cap to avoid context bloat
+- `/hooks on|off` — per-session toggle (survives across tasks within a session)
+- `/hooks` alone shows current status and usage hint
+- `/list-hooks` — full breakdown of all 5 event types with their commands, toggle state, and profile-level disabled status; includes config file edit hint
+- `hooks_disabled = true` in profile → permanent kill switch, overrides `/hooks on`
 
 **Implementation:**
-- `src/hooks.rs` — `HookRunner { config: HookConfig }`, `run(event: HookEvent) -> HookResult`
-- `src/config.rs` — `HookConfig` struct added to `Profile`
-- `src/tui/mod.rs` — fire hooks at `AgentDone`, post tool dispatch, session start/end
-- Hook output sent as `AppEvent::HookOutput { event, stdout, exit_code }` to render layer
+- `src/hooks.rs` — `HookConfig { on_edit, on_task_done, on_plan_step_done, on_session_start, on_session_end }`, `HookResult { output, exit_code }`, `detect_language_hooks()`, `write_hooks_to_config(profile_name)`, `run_hook(cmd) -> HookResult`; `HookConfig::summary()` (one-liner for startup), `HookConfig::detail()` (multi-line for `/list-hooks`)
+- `src/config.rs` — `hooks: HookConfig` and `hooks_disabled: bool` added to `Profile` and `ResolvedConfig`, both `#[serde(default)]` for backwards compatibility
+- `src/agent.rs` — `AgentConfig { hooks: Arc<HookConfig>, hooks_enabled: bool }`; after each successful mutating tool call, runs `on_edit` hooks and appends output to `result_content`; after the main loop runs `on_task_done` hooks (TUI display only)
+- `src/tui/mod.rs` — `UiEvent::HookOutput { event, output, exit_code }`, `ConversationEntry::HookOutput { event, output, success }`, `AppState.hooks_enabled`; hook bootstrap in `event_loop` (calls `write_hooks_to_config`, updates `resolved.hooks` in-place); `resolve_hooks()` helper gates on `hooks_enabled`/`hooks_disabled`; `on_session_start` hooks fire as `tokio::spawn` after `ui_tx` created; `on_session_end` hooks run synchronously before returning; `on_plan_step_done` hooks fire in `launch_plan` after each passing step
+- `src/tui/render.rs` — `ConversationEntry::HookOutput` rendered as dimmed `⚙ on_edit ✓` / amber `⚙ on_edit ✗` with up to 10 lines of output
 
 ---
 
@@ -655,6 +675,275 @@ cost_per_mtok_output = 1.25
 - `src/main.rs` — `--quick` flag, auto-detect logic
 - `src/tui/mod.rs` — `/quick` command, badge in status bar
 
+
+## Phase 6l 
+
+Simple for / autocomplete show options, similar to @, simple yet massive for UX 
+
+---
+
+## Phase 6m — Git Integration — ESSENTIAL
+
+**The single most critical missing feature.** Every competitor has git integration. Aider's entire edit model is built on git diffs. Claude Code auto-commits. OpenCode has git tools. For a tool that modifies files, not having automatic checkpoints is a safety gap users will notice immediately — one bad edit with no easy undo and you've lost a user forever.
+
+**Core capabilities:**
+
+### 6m-i. Auto-checkpoint before tasks
+- Before every agent run (normal or plan step), auto-create a git stash or checkpoint commit on a detached/temp branch
+- Message format: `forge: checkpoint before "<task summary>"`
+- If working tree is dirty, stash first, then checkpoint — user's uncommitted work is never lost
+- Zero config — works automatically if `cwd` is inside a git repo
+- Skip silently if not in a git repo (don't force git on non-git projects)
+
+### 6m-ii. Post-task diff display
+- After every completed agent run, show `git diff --stat` summary in TUI
+- Expandable: `d` key to show full diff in a scrollable overlay (ratatui pager)
+- For plan mode: cumulative diff shown after all steps complete, per-step diffs available in step detail view
+- Diff output also available via `/diff` slash command at any time
+
+### 6m-iii. Undo via git
+- `/undo` slash command — reverts to the last checkpoint
+- Implementation: `git checkout -- .` to the checkpoint ref, or `git stash pop` if stashed
+- Confirmation prompt: `"Revert all changes from last task? [y/N]"`
+- Multiple undo levels: `/undo 2` reverts last 2 task checkpoints
+- Rollback (session) + undo (files) = complete state recovery
+
+### 6m-iv. Auto-commit on task success (opt-in)
+- Config: `auto_commit = true` in profile (default: false)
+- On successful task completion: `git add -A && git commit -m "forge: <task summary>"`
+- For plan mode: one commit per plan (not per step) with full plan summary as commit message
+- `auto_commit_prefix = "forge: "` configurable
+
+### 6m-v. Git-aware context
+- `git status --short` output available to the model as lightweight context ("these files have uncommitted changes")
+- `git log --oneline -5` available for recent project context
+- `git diff --cached` available when user has staged changes — model knows what's about to be committed
+- Exposed as a `git_context` tool or injected into system prompt preamble (TBD — tool is more flexible, preamble is cheaper)
+
+**Implementation:**
+- `src/git.rs` — `GitRepo { root: PathBuf }`, `checkpoint()`, `undo()`, `diff_stat()`, `diff_full()`, `auto_commit()`, `status_short()`, `is_git_repo(path) -> bool`
+- Uses `std::process::Command` calling `git` directly (no libgit2 dependency — keeps the binary lean and avoids linking headaches on musl)
+- `src/agent.rs` — call `checkpoint()` before agent loop, `diff_stat()` after
+- `src/tui/mod.rs` — `/undo`, `/diff` commands, diff overlay, post-task diff display
+- `src/config.rs` — `auto_commit: bool`, `auto_commit_prefix: String` on `Profile`
+
+**Config:**
+```toml
+[profiles.local]
+auto_commit = false        # default — don't auto-commit
+auto_commit_prefix = "forge: "  # prefix for auto-commit messages
+```
+
+---
+
+## Phase 6n — Diff/Patch Edit Mode
+
+**More token-efficient editing for multi-hunk changes.** The current `edit_file` tool uses search-and-replace (`old_str` → `new_str`), which works well for single edits but becomes expensive for multi-hunk changes — the model must send the full old content and full new content for each hunk. A unified-diff mode sends only the changes, which aligns directly with Forge's efficiency thesis.
+
+**Aider proved this works.** Their unified-diff edit format reduced token usage by 30-50% on multi-hunk edits compared to search-and-replace, with comparable accuracy on capable models. The key insight: models are already trained on diff output — it's a natural format for them.
+
+### 6n-i. `patch_file` tool (new tool, alongside `edit_file`)
+
+**Schema:**
+```json
+{
+  "name": "patch_file",
+  "parameters": {
+    "path": "string (required)",
+    "patch": "string (required) — unified diff format",
+    "anchor": "string (optional) — hash anchor from read_file"
+  }
+}
+```
+
+**Unified diff format the model produces:**
+```diff
+--- a/src/auth.rs
++++ b/src/auth.rs
+@@ -15,7 +15,9 @@
+ fn validate_token(token: &str) -> Result<Claims> {
+-    let claims = decode(token)?;
++    let claims = decode(token)
++        .map_err(|e| AuthError::InvalidToken(e.to_string()))?;
++    log::info!("token validated for user: {}", claims.sub);
+     Ok(claims)
+ }
+```
+
+**Application:**
+- Parse unified diff hunks from the `patch` string
+- For each hunk: locate the context lines in the target file, verify they match, apply the `-`/`+` changes
+- If context lines don't match: return error with the mismatched region (same as edit_file failure hint)
+- Hash anchor verification (from Phase 6g) applies to the first line of each hunk if provided
+
+### 6n-ii. Adaptive tool selection
+- System prompt guidance: "Use `edit_file` for single-location changes. Use `patch_file` for multi-hunk edits or when changing multiple related locations in the same file."
+- Both tools remain available — model chooses based on task
+- Token budget tracking records per-tool efficiency: if `patch_file` consistently uses fewer tokens for equivalent edits, surface this in telemetry
+
+### 6n-iii. Fuzzy patch application
+- Same cascade as `edit_file`: exact match → whitespace-normalised → trimmed
+- Context lines (lines without `+` or `-` prefix) used for anchoring — if context matches but line numbers are off, apply at the matched location
+- This is critical for local models that may produce slightly incorrect line numbers in the `@@` header
+
+**Implementation:**
+- `src/tools/patch.rs` — `PatchTool`, `parse_unified_diff()`, `apply_hunks()`, fuzzy context matching
+- `src/tools/mod.rs` — register `patch_file` in tool list
+- System prompt addition in `src/agent.rs`
+
+**Why not replace `edit_file` entirely?**
+- `edit_file` is simpler and more reliable for single edits, especially on small models
+- Local 14B models produce cleaner search-and-replace than unified diffs
+- The two tools serve different complexity tiers — let the model choose
+
+---
+
+## Phase 6o — Multi-File Awareness via Git
+
+**Leverages Phase 6m's git integration to detect and handle cross-file breakage.** Currently, when a model edits `auth.rs` and breaks `handler.rs`, the only detection mechanism is the `cargo check` hook — which only works for languages with fast type-checkers. This phase makes cross-file impact visible to the model proactively.
+
+### 6o-i. Change-impact analysis (git-powered)
+- After each file edit, run `git diff --name-only` against the checkpoint to get the full list of modified files
+- Cross-reference modified files against the project symbol index (`src/index.rs`): which symbols in modified files are imported/used by other files?
+- If a modified symbol is referenced in files not yet touched by the model → inject a warning into the tool result:
+  `"⚠ Modified \`validate_token\` in src/auth.rs — referenced by: src/handler.rs:14, src/middleware.rs:8. Consider updating these files."`
+- Zero model calls — pure deterministic analysis using the symbol index + basic import/use scanning
+
+### 6o-ii. Scope-aware file loading in plan mode
+- When generating a plan, use git history to identify co-change patterns: files that are frequently modified together
+- `git log --name-only --pretty=format: -50` → parse file co-occurrence matrix
+- If a plan step targets `auth.rs` and history shows `auth.rs` + `handler.rs` are modified together in 60%+ of commits → auto-include `handler.rs` in the step's file list
+- Surfaces as a suggestion in the plan review overlay: `"history suggests handler.rs is usually modified alongside auth.rs — include? [y/N]"`
+
+### 6o-iii. Post-task validation sweep
+- After a full agent run or plan execution completes, run a lightweight validation:
+  1. `git diff --name-only` → list all modified files
+  2. For each modified file: check if any exported symbol's signature changed
+  3. For each changed signature: grep for usages in non-modified files
+  4. If stale references found → report: `"⚠ 3 files may need updates: src/handler.rs, src/test_auth.rs, src/middleware.rs"`
+- Model can then be prompted to fix these, or user can review manually
+- This catches the cross-file breakage that single-file hooks miss
+
+### 6o-iv. Git blame for context
+- When reading a file for editing, optionally show recent git blame annotations for the target region
+- Helps the model understand code authorship and recency: recently-changed code is more likely to be the target of a bug fix
+- Exposed as `read_file` parameter: `blame: true` → adds `(3 days ago, user)` annotations to relevant lines
+- Lightweight: only fetches blame for the requested line range, not the entire file
+
+**Implementation:**
+- `src/git.rs` — `changed_files()`, `co_change_matrix()`, `blame_range()`, `changed_symbols()`
+- `src/index.rs` — extend with `find_usages(symbol, exclude_files) -> Vec<(path, line)>` for cross-reference scanning
+- `src/agent.rs` — post-edit change-impact warning injection, post-task validation sweep
+- `src/plan.rs` — co-change suggestions in plan generation
+- `src/tools/read.rs` — optional `blame` parameter
+
+**GIT WARNING** 
+Git integration complexity. 6m is marked ESSENTIAL and it is, but git is a minefield. Dirty working trees, detached HEAD, submodules, shallow clones, worktrees, repos with 100k+ files. The "works automatically if in a git repo, skips silently if not" design is correct, but the edge cases will take real-world testing to flush out. Keep the initial implementation conservative — checkpoint via commit on a temp branch is safer than stash (stash has more failure modes).
+
+### Check in with token usage - we are aiming to lead the market in efficiency
+System prompt size. You're now injecting: conventions, session context, step carry-forward summaries, git status, change-impact warnings, hook descriptions, and tool schemas. On a 32k local model, that preamble could consume 20-30% of the window before the user even types. You may need a preamble budget that mirrors the token budget — prioritize and compress injected context, not just conversation history.
+
+---
+
+## Version 1 — Publish, Validate, and Gate Phase 7
+
+> **This is the quality gate.** Phase 7 does not start until every benchmark category below passes. The goal is publishable evidence that Forge's efficiency claims are real, and a regression baseline that protects them going forward.
+
+**Prerequisites before starting validation:**
+- Phase 6b (distribution / cargo-dist) complete — test on a clean install, not a dev build
+- Phase 6c (first-run wizard) complete — test the real new-user flow, not a hand-configured setup
+- All 6a–6o phases building and shipping in the release binary
+
+**Metrics to record for every test run** (telemetry captures most of this automatically in `.forge/telemetry.jsonl`):
+
+| Metric | How to get it |
+|---|---|
+| Input tokens | `-v` flag or telemetry stats bar |
+| Output tokens | same |
+| Tool calls | telemetry `tool_calls` field |
+| Wall time | telemetry `duration_secs` |
+| Re-reads | count `read_file` calls on already-seen paths |
+| Loops | count repeated `(tool, args)` pairs |
+| Success | did the task complete correctly with no user intervention? |
+
+Save the telemetry snapshot after each run. These become the regression baseline — any Phase 7 change that regresses these numbers by >10% is a blocker.
+
+---
+
+### V1-A. Baseline: Qwen3 14B (Ollama, local)
+
+> The hardest test. If Forge guides a messy 14B model better than OpenCode, that's the headline claim validated.
+
+**Setup:** `tsc --noEmit` hook auto-detected and active for TypeScript tasks. Run the same tasks in OpenCode first and record its numbers — the diff is the publishable story.
+
+| Task | OpenCode result (record before testing Forge) | Forge target |
+|---|---|---|
+| Replace all instances of a term project-wide | Loops, re-reads, often fails | ≤ 4 tool calls, 0 re-reads, correct |
+| Update HTML + SCSS: change colours, improve styling | Loses context mid-task, wrong file edits | Completes in ≤ 6 tool calls, hook catches TSC errors |
+| Angular: migrate `input` binding to `@input()` decorator | Classic OpenCode death — loops on search | ≤ 5 tool calls, uses search to verify no instances remain |
+
+For each task record the full metric set above. The `tsc --noEmit` hook injection is the key thing to observe — does the model read the error output and self-correct in the same loop without a re-read?
+
+---
+
+### V1-B. Hooks self-correction validation (Claude Sonnet)
+
+> This is the money shot for the hooks system. A capable model that reads `⚙ cargo check -q (exit 1): error[E0308]…` and self-corrects in the same tool loop — no extra read_file round-trip — is the proof that on_edit injection works as designed.
+
+**Setup:** Claude Sonnet profile with `cargo check -q` hook (Forge Rust codebase, or any real Rust project).
+
+| Test | What to observe |
+|---|---|
+| Make a deliberate type error, ask Forge to add a function | Does Claude see the hook output and fix the error without re-reading? |
+| Multi-step plan on a real feature | Do all steps pass verification? Do step carry-forward summaries give Claude correct context? |
+| Edit a file that has shifted since last read | Does the hash anchor mismatch fire? Does Claude re-read and retry correctly? |
+| Compare token count: Forge+Claude vs Claude Code on same task | Record both. This is the efficiency headline. |
+
+Hash-anchored edits (Phase 6g) are specifically worth testing here — Claude will actually use the optional `anchor` parameter, Qwen 14B likely ignores it.
+
+---
+
+### V1-C. Cloud mid-range: Qwen3-Coder 72B (OpenRouter)
+
+> The realistic ceiling for users who want local-model quality without Anthropic pricing. If Forge makes 72B usable for complex multi-file tasks, that's a strong story for the cost-conscious segment.
+
+**Setup:** OpenRouter profile. Tests validate that lean schemas and context management work across provider backends — OpenRouter wraps the API differently from Ollama.
+
+| Test | Target |
+|---|---|
+| Same Angular migration task as V1-A | Compare tool call count and success rate vs Qwen3 14B. Expect meaningful improvement. |
+| Multi-file refactor (rename a type used across 5+ files) | Should complete with plan mode. Record step count and carry-forward summary accuracy. |
+| Schema compatibility | Confirm all tools dispatch correctly — OpenRouter backends sometimes reject strict schemas |
+
+---
+
+### V1-D. MCP integration (Claude Sonnet + web search)
+
+> MCP is not validated by unit tests. The interesting failure mode is the model hitting a knowledge boundary mid-task and either not reaching for web search, or using it incorrectly. This must work cleanly before Phase 7 adds more complexity on top.
+
+**Setup:** Claude Sonnet profile with `brave` or `fetch` MCP server configured.
+
+| Test | What to validate |
+|---|---|
+| "Update this library to use the v4 API" (where v4 released after training cutoff) | Does Claude autonomously call web search? Does it use the result to inform the edit? |
+| Multi-step plan where one step requires fetching a doc | Does MCP dispatch work correctly inside plan step context isolation? |
+| Two MCP servers active simultaneously | No cross-contamination, both tools visible in tool list |
+| MCP server that fails to start | Silently skipped, rest of session unaffected |
+
+The key signal: web search should feel like a natural tool call, not a special case. If the model hesitates or fails to use it when it clearly should, that's a system prompt or tool schema issue to fix before Phase 7.
+
+---
+
+### V1-E. Regression baseline
+
+After V1-A through V1-D pass:
+
+1. **Save telemetry snapshots** — copy `.forge/telemetry.jsonl` to `benchmarks/v1-baseline-{model}.jsonl` for each model tested
+2. **Document the passing task set** — these become the fixed regression suite; any future change that causes a previously-passing task to fail or regress by >10% in tokens/tool-calls is a blocker before merge
+3. **Publish results** — the token efficiency comparison (Forge vs OpenCode on the same tasks) is the viral moment. Even a blog post or README table is enough for early traction.
+
+**Phase 7 is gated on:** all four test categories above showing clean results, regression baseline saved, and at least the Qwen3 14B + Claude Sonnet comparisons documented.
+
 ---
 
 ## Phase 7 — Advanced Orchestration
@@ -722,6 +1011,43 @@ scope   = ["visual", "frontend", "test-e2e"]   # only loaded for these categorie
 - Only matching servers included in tool list for that step
 - Reduces tool list size by 60-80% for non-matching steps — keeps model focused
 
+### 7d. Image/multimodal support
+
+**Increasingly table-stakes.** "Fix this CSS — here's a screenshot" is a real workflow. Not critical for V1, but competitors are adding it and user expectations are shifting. Multimodal input turns Forge from a text-only coding agent into a visual-aware development partner.
+
+**Core capabilities:**
+
+**7d-i. Image input in TUI:**
+- Drag-and-drop or paste image into the TUI input (terminal image protocols: iTerm2 inline images, Kitty graphics protocol, Sixel)
+- `@screenshot.png` file attachment — same `@` picker as text files, but detected as image by extension
+- `/screenshot` command — capture the current terminal or a region and attach automatically
+- Images encoded as base64 and sent via the `image_url` content block in the OpenAI-compatible API (supported by Claude, GPT-4o, Gemini, and increasingly by local multimodal models)
+
+**7d-ii. Use cases:**
+| Scenario | Value |
+|---|---|
+| "Fix this CSS — here's what it looks like" | Visual debugging without describing layout issues in words |
+| "Implement this design" (attach mockup) | Design-to-code from a screenshot or Figma export |
+| "What's wrong with this error?" (attach terminal screenshot) | Non-text error formats (stack traces with colour, GUI error dialogs) |
+| "Match the style of this component" (attach reference) | Visual consistency without manual style description |
+
+**7d-iii. Implementation:**
+- `src/client.rs` — extend `MessageContent` to support `image_url` content blocks alongside text
+- `src/tui/mod.rs` — image attachment via `@` picker (filter by image extensions: png, jpg, jpeg, gif, webp, svg), base64 encoding on attach
+- `src/agent.rs` — pass image content blocks through to API call, strip images from context on budget compression (images are expensive — ~1k tokens per image, and stale images should be evicted first)
+- `src/budget.rs` — images get a higher compression priority (evict old images before old text)
+- Fallback: if the model/endpoint doesn't support vision, return a clear error: `"This model does not support image input. Switch to a vision-capable model (Claude Sonnet, GPT-4o, etc.)"`
+
+**7d-iv. Model compatibility:**
+| Model | Vision support |
+|---|---|
+| Claude Sonnet/Opus | ✓ |
+| GPT-4o | ✓ |
+| Gemini Pro/Flash | ✓ |
+| Qwen-VL (local) | ✓ (Ollama) |
+| Qwen3 14B (text-only) | ✗ — clear error message |
+| Most local coding models | ✗ — clear error message |
+
 ---
 
 ## File Structure (current)
@@ -748,8 +1074,10 @@ src/
     ├── edit.rs        # edit_file (fuzzy matching, ±15 line failure hint)
     ├── bash.rs        # bash execution (async, timeout, 200-line cap)
     ├── recall.rs      # retrieve full stored output by id or tool name
+    ├── patch.rs       # patch_file — unified diff application, fuzzy context matching
     ├── search.rs      # ripgrep wrapper (zero-match → declare done)
     └── list.rs        # list_files
+├── git.rs            # git integration — checkpoint, undo, diff, blame, co-change analysis
 tui/
 ├── mod.rs            # TUI state, event loop, session browser, plan review, slash commands
 └── render.rs         # ratatui draw
