@@ -178,13 +178,32 @@ pub fn build_prior_context(turns: &[ConversationTurn]) -> Option<String> {
                 response_preview,
             )
         } else {
-            format!(
-                "[Turn {}]\nUser: {}\nTools used: {}\nAssistant: {}\n",
-                turn.turn_index + 1,
-                user_preview,
-                turn.tool_summary,
-                response_preview,
-            )
+            // Separate edit/write actions from read/search for clearer context
+            let actions: Vec<&str> = turn.tool_summary.split(", ").collect();
+            let mut modified: Vec<&str> = Vec::new();
+            let mut other: Vec<&str> = Vec::new();
+            for a in &actions {
+                if a.starts_with("edit_file") || a.starts_with("write_file") {
+                    modified.push(a);
+                } else {
+                    other.push(a);
+                }
+            }
+            let mut lines = vec![format!("[Turn {}]", turn.turn_index + 1)];
+            lines.push(format!("User: {}", user_preview));
+            if !modified.is_empty() {
+                // Deduplicate paths to keep it concise
+                let mut seen = std::collections::HashSet::new();
+                let deduped: Vec<&str> = modified.iter().copied()
+                    .filter(|a| seen.insert(*a))
+                    .collect();
+                lines.push(format!("Files modified: {}", deduped.join(", ")));
+            }
+            if !other.is_empty() {
+                lines.push(format!("Tools used: {}", other.join(", ")));
+            }
+            lines.push(format!("Assistant: {}", response_preview));
+            format!("{}\n", lines.join("\n"))
         };
 
         if used + entry.len() > char_budget {

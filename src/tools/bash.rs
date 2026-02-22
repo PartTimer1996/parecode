@@ -4,7 +4,7 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 /// Max lines of output to return inline. Rest is truncated.
-const MAX_OUTPUT_LINES: usize = 200;
+const MAX_OUTPUT_LINES: usize = 500;
 
 pub fn definition() -> Value {
     serde_json::json!({

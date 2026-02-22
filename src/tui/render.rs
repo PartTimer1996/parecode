@@ -213,6 +213,31 @@ fn build_items(state: &AppState, term_width: u16) -> Vec<ListItem<'static>> {
                 items.push(ListItem::new(Line::raw("")));
             }
 
+            ConversationEntry::ThinkingChunk(text) => {
+                // Render model reasoning dimmed and indented — visually distinct from response
+                let wrap_width = (term_width as usize).saturating_sub(10).max(20);
+                let think_fg = Color::Rgb(100, 100, 130); // muted purple-grey
+                let mut first = true;
+                for src_line in text.lines() {
+                    for w in wrap_text(src_line, wrap_width) {
+                        if first {
+                            first = false;
+                            items.push(ListItem::new(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled("think ", Style::default().fg(think_fg).add_modifier(Modifier::ITALIC)),
+                                Span::styled(w, Style::default().fg(think_fg).add_modifier(Modifier::ITALIC)),
+                            ])));
+                        } else {
+                            items.push(ListItem::new(Line::from(vec![
+                                Span::raw("        "),
+                                Span::styled(w, Style::default().fg(think_fg).add_modifier(Modifier::ITALIC)),
+                            ])));
+                        }
+                    }
+                }
+                items.push(ListItem::new(Line::raw("")));
+            }
+
             ConversationEntry::AssistantChunk(text) => {
                 // Word-wrap each source line to terminal width
                 // "        " indent = 8 cols
@@ -260,12 +285,34 @@ fn build_items(state: &AppState, term_width: u16) -> Vec<ListItem<'static>> {
             }
 
             ConversationEntry::ToolResult(summary) => {
-                let first = summary.lines().next().unwrap_or(summary.as_str()).to_string();
-                items.push(ListItem::new(Line::from(vec![
-                    Span::raw("    "),
-                    Span::styled("→ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(first, Style::default().fg(Color::DarkGray)),
-                ])));
+                let mut line_iter = summary.lines();
+                // First line gets the "→ " prefix
+                if let Some(first) = line_iter.next() {
+                    let color = if first.starts_with('✗') || first.contains("failed") || first.contains("error") {
+                        Color::Red
+                    } else {
+                        Color::DarkGray
+                    };
+                    items.push(ListItem::new(Line::from(vec![
+                        Span::raw("    "),
+                        Span::styled("→ ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(first.to_string(), Style::default().fg(color)),
+                    ])));
+                    // Subsequent lines indented to align with first, up to 20 lines
+                    for line in line_iter.take(20) {
+                        let color = if line.contains("error[") || line.starts_with("error") {
+                            Color::Red
+                        } else if line.contains("warning") {
+                            Color::Yellow
+                        } else {
+                            Color::DarkGray
+                        };
+                        items.push(ListItem::new(Line::from(vec![
+                            Span::raw("      "),
+                            Span::styled(line.to_string(), Style::default().fg(color)),
+                        ])));
+                    }
+                }
             }
 
             ConversationEntry::CacheHit(path) => {
@@ -319,16 +366,62 @@ fn build_items(state: &AppState, term_width: u16) -> Vec<ListItem<'static>> {
                 items.push(ListItem::new(Line::from(spans)));
                 items.push(ListItem::new(Line::raw("")));
             }
+
+            ConversationEntry::HookOutput { event, output, success } => {
+                let (mark, color) = if *success {
+                    ("✓", Color::Rgb(60, 60, 80))
+                } else {
+                    ("✗", Color::Rgb(200, 140, 60))
+                };
+                let label = format!("  ⚙ {event} {mark}");
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(label, Style::default().fg(color)),
+                ])));
+                for line in output.lines().take(10) {
+                    items.push(ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("    {line}"),
+                            Style::default().fg(color),
+                        ),
+                    ])));
+                }
+            }
         }
     }
 
     if matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning) {
-        let (glyph, msg, color) = spinner_frame(state.spinner_tick);
-        items.push(ListItem::new(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{glyph} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-            Span::styled(msg.to_string(), Style::default().fg(color)),
-        ])));
+        let glyph = SPINNER_GLYPHS[(state.spinner_tick as usize) % SPINNER_GLYPHS.len()];
+        let live = state.last_stream_text.trim();
+        // Show last line of streamed text (strip newlines, truncate to fit)
+        let display_text: String = live
+            .lines()
+            .last()
+            .unwrap_or("")
+            .chars()
+            .take(60)
+            .collect();
+        if display_text.is_empty() {
+            // Nothing streamed yet — fall back to rotating status message
+            let (_, msg, color) = spinner_frame(state.spinner_tick);
+            items.push(ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{glyph} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(msg.to_string(), Style::default().fg(color)),
+            ])));
+        } else if state.stream_in_think {
+            items.push(ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{glyph} "), Style::default().fg(Color::Rgb(120, 100, 180)).add_modifier(Modifier::BOLD)),
+                Span::styled("think  ", Style::default().fg(Color::Rgb(80, 70, 130))),
+                Span::styled(display_text, Style::default().fg(Color::Rgb(130, 115, 170)).add_modifier(Modifier::ITALIC | Modifier::DIM)),
+            ])));
+        } else {
+            items.push(ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{glyph} "), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(display_text, Style::default().fg(Color::Rgb(180, 220, 255))),
+            ])));
+        }
     }
 
     items

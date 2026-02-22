@@ -89,6 +89,9 @@ struct StreamChoice {
 #[derive(Debug, Deserialize)]
 struct Delta {
     content: Option<String>,
+    /// Reasoning/thinking tokens from models that return them as a separate field
+    /// (DeepSeek-R1, Qwen3 with thinking enabled, etc.)
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
@@ -201,6 +204,14 @@ impl Client {
         let mut input_tokens = 0u32;
         let mut output_tokens = 0u32;
         let mut leftover = String::new();
+        // Track whether we're mid-reasoning-block (for models that use reasoning_content field)
+        let mut reasoning_open = false;
+
+        // Debug log — raw stream to /tmp/forge-stream.log for diagnosing model output
+        let mut debug_log: Option<std::fs::File> = std::fs::OpenOptions::new()
+            .create(true).append(true)
+            .open("/tmp/forge-stream.log")
+            .ok();
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
@@ -236,10 +247,42 @@ impl Client {
 
                 for choice in chunk_val.choices.unwrap_or_default() {
                     if let Some(delta) = choice.delta {
+                        // Debug log: write raw delta JSON so we can see what the model emits
+                        if let Some(f) = &mut debug_log {
+                            use std::io::Write as _;
+                            let _ = writeln!(f, "{json_str}");
+                        }
+
+                        // reasoning_content field (DeepSeek-R1, Qwen3 thinking mode, etc.)
+                        // Wrap in <think> tags so the agent's splitter routes it correctly
+                        if let Some(rc) = delta.reasoning_content {
+                            if !rc.is_empty() {
+                                if !reasoning_open {
+                                    on_text("<think>");
+                                    reasoning_open = true;
+                                }
+                                on_text(&rc);
+                            }
+                        } else if reasoning_open {
+                            // reasoning_content stopped arriving — close the tag
+                            on_text("</think>");
+                            reasoning_open = false;
+                        }
+
                         // Accumulate text
                         if let Some(text) = delta.content {
-                            on_text(&text);
-                            text_buf.push_str(&text);
+                            if reasoning_open {
+                                // Some models send content="" alongside last reasoning chunk
+                                if !text.is_empty() {
+                                    on_text("</think>");
+                                    reasoning_open = false;
+                                    on_text(&text);
+                                    text_buf.push_str(&text);
+                                }
+                            } else {
+                                on_text(&text);
+                                text_buf.push_str(&text);
+                            }
                         }
 
                         // Accumulate tool call deltas
@@ -265,6 +308,17 @@ impl Client {
                     }
                 }
             }
+        }
+
+        // Close any still-open reasoning block
+        if reasoning_open {
+            on_text("</think>");
+        }
+
+        // Write separator to debug log
+        if let Some(f) = &mut debug_log {
+            use std::io::Write as _;
+            let _ = writeln!(f, "---END---");
         }
 
         let tool_calls = pending

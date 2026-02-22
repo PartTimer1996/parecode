@@ -42,8 +42,10 @@ use crate::telemetry::{self, SessionStats};
 
 #[derive(Debug, Clone)]
 pub enum UiEvent {
-    /// A streamed text chunk from the model
+    /// A streamed text chunk from the model (visible response)
     Chunk(String),
+    /// A streamed thinking/reasoning chunk (inside <think>...</think>)
+    ThinkingChunk(String),
     /// A tool call is about to execute
     ToolCall { name: String, args_summary: String },
     /// Result of a tool call
@@ -88,6 +90,8 @@ pub enum UiEvent {
     PlanComplete { total: usize },
     /// Plan execution stopped at a failed step
     PlanFailed { step: usize, error: String },
+    /// A hook ran (on_edit, on_task_done, on_plan_step_done, on_session_start, on_session_end)
+    HookOutput { event: String, output: String, exit_code: i32 },
 }
 
 // ── ConversationEntry — displayable items in history ─────────────────────────
@@ -95,11 +99,13 @@ pub enum UiEvent {
 #[derive(Debug, Clone)]
 pub enum ConversationEntry {
     UserMessage(String),
-    AssistantChunk(String),    // accumulated streaming text
+    AssistantChunk(String),    // accumulated streaming text (final response)
+    ThinkingChunk(String),     // model reasoning inside <think>...</think>
     ToolCall { name: String, args_summary: String },
     ToolResult(String),
     CacheHit(String),
     SystemMsg(String),         // warnings, budget notices, etc.
+    HookOutput { event: String, output: String, success: bool },
     TaskComplete {
         input_tokens: u32,
         output_tokens: u32,
@@ -309,6 +315,12 @@ pub struct AppState {
     pub current_task_preview: String,
     /// Optional cost per 1M input tokens (from profile config) for plan estimates
     pub cost_per_mtok_input: Option<f64>,
+    /// Last streamed text snippet (for live status bar display while model is thinking)
+    pub last_stream_text: String,
+    /// True if the model is currently in a <think> block
+    pub stream_in_think: bool,
+    /// When false, hooks are suppressed for this session (/hooks off)
+    pub hooks_enabled: bool,
 }
 
 impl AppState {
@@ -343,6 +355,9 @@ impl AppState {
             stats: SessionStats::default(),
             current_task_preview: String::new(),
             cost_per_mtok_input: None,
+            last_stream_text: String::new(),
+            stream_in_think: false,
+            hooks_enabled: true,
         }
     }
 
@@ -359,14 +374,41 @@ impl AppState {
         }
     }
 
+    fn append_thinking(&mut self, chunk: &str) {
+        if let Some(ConversationEntry::ThinkingChunk(s)) = self.entries.last_mut() {
+            s.push_str(chunk);
+        } else {
+            self.push(ConversationEntry::ThinkingChunk(chunk.to_string()));
+        }
+    }
+
     fn apply_event(&mut self, ev: UiEvent) {
         match ev {
             UiEvent::Chunk(c) => {
                 self.collecting_response.push_str(&c);
                 self.append_chunk(&c);
+                self.stream_in_think = false;
+                // Keep last ~60 chars of streamed text for the live status indicator
+                self.last_stream_text.push_str(&c);
+                let len = self.last_stream_text.len();
+                if len > 80 {
+                    self.last_stream_text = self.last_stream_text[len - 60..].to_string();
+                }
+            }
+            UiEvent::ThinkingChunk(c) => {
+                self.append_thinking(&c);
+                self.stream_in_think = true;
+                self.last_stream_text.push_str(&c);
+                let len = self.last_stream_text.len();
+                if len > 80 {
+                    self.last_stream_text = self.last_stream_text[len - 60..].to_string();
+                }
             }
             UiEvent::ToolCall { name, args_summary } => {
-                self.collecting_tools.push(name.clone());
+                // Build a compact action string for the session turn record:
+                // "edit_file(src/foo.rs)" rather than just "edit_file"
+                let action = compact_tool_action(&name, &args_summary);
+                self.collecting_tools.push(action);
                 self.push(ConversationEntry::ToolCall { name, args_summary });
             }
             UiEvent::ToolResult { summary } => {
@@ -411,6 +453,8 @@ impl AppState {
                     compressed_count,
                 });
                 self.finalize_turn();
+                self.last_stream_text.clear();
+                self.stream_in_think = false;
                 if self.mode == Mode::PlanRunning {
                     self.mode = Mode::PlanRunning; // step_done_tx will drive transition
                 } else {
@@ -421,6 +465,8 @@ impl AppState {
             UiEvent::AgentError(e) => {
                 self.push(ConversationEntry::SystemMsg(format!("✗ {e}")));
                 self.finalize_turn();
+                self.last_stream_text.clear();
+                self.stream_in_think = false;
                 if self.mode == Mode::PlanRunning {
                     self.mode = Mode::PlanRunning; // step_done_tx will drive transition
                 } else {
@@ -510,6 +556,10 @@ impl AppState {
                 ));
                 self.mode = Mode::Normal;
             }
+            UiEvent::HookOutput { event, output, exit_code } => {
+                let success = exit_code == 0;
+                self.push(ConversationEntry::HookOutput { event, output, success });
+            }
         }
     }
 }
@@ -574,6 +624,8 @@ fn palette_commands() -> Vec<PaletteCommand> {
         PaletteCommand { key: "/profile",     label: "Switch profile" },
         PaletteCommand { key: "/profiles",    label: "List profiles" },
         PaletteCommand { key: "/ts",          label: "Toggle timestamps" },
+        PaletteCommand { key: "/hooks",       label: "Toggle hooks on/off (or /hooks on|off)" },
+        PaletteCommand { key: "/list-hooks",  label: "Show all configured hooks and their status" },
         PaletteCommand { key: "/clear",       label: "Clear conversation" },
         PaletteCommand { key: "/sessions",    label: "List recent sessions  (or Ctrl+H)" },
         PaletteCommand { key: "/resume",      label: "Resume a previous session" },
@@ -642,8 +694,28 @@ async fn event_loop(
     show_timestamps: bool,
 ) -> Result<()> {
     let mcp = McpClient::new(&resolved.mcp_servers).await;
+
+    // ── Hook bootstrap ────────────────────────────────────────────────────────
+    // If the active profile has no hooks configured and hooks aren't disabled,
+    // detect the project language, write a hooks section into the config file
+    // (once, with commented examples for all events), and update resolved so
+    // all subsequent calls read from config rather than re-detecting.
+    if !resolved.hooks_disabled && resolved.hooks.is_empty() {
+        let detected = crate::hooks::write_hooks_to_config(&resolved.profile_name);
+        if !detected.is_empty() {
+            resolved.hooks = detected;
+        }
+    }
+
     let mut state = AppState::new(&resolved, show_timestamps, mcp);
     state.cost_per_mtok_input = resolved.cost_per_mtok_input;
+
+    // ── Hook startup summary ──────────────────────────────────────────────────
+    if resolved.hooks_disabled {
+        state.push(ConversationEntry::SystemMsg("⚙ hooks disabled for this profile".to_string()));
+    } else if let Some(summary) = resolved.hooks.summary() {
+        state.push(ConversationEntry::SystemMsg(format!("⚙ hooks  {summary}  (/list-hooks for details)")));
+    }
 
     // Auto-resume the most recent session for this cwd (load turns for context + display)
     let cwd = cwd_str();
@@ -691,6 +763,25 @@ async fn event_loop(
     // Channel: agent → TUI
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
 
+    // Fire on_session_start hooks (non-blocking — output shown in TUI)
+    {
+        let session_hooks = resolve_hooks(&resolved, state.hooks_enabled);
+        if !session_hooks.on_session_start.is_empty() {
+            let tx = ui_tx.clone();
+            let cmds = session_hooks.on_session_start.clone();
+            tokio::spawn(async move {
+                for cmd in &cmds {
+                    let hr = crate::hooks::run_hook(cmd).await;
+                    let _ = tx.send(UiEvent::HookOutput {
+                        event: "on_session_start".to_string(),
+                        output: hr.output,
+                        exit_code: hr.exit_code,
+                    });
+                }
+            });
+        }
+    }
+
     let mut crossterm_events = EventStream::new();
     let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(120));
 
@@ -735,6 +826,16 @@ async fn event_loop(
                 }
                 terminal.draw(|f| render::draw(f, &state))?;
             }
+        }
+    }
+
+    // Fire on_session_end hooks synchronously before returning
+    let session_end_hooks = resolve_hooks(&resolved, state.hooks_enabled);
+    for cmd in &session_end_hooks.on_session_end {
+        let hr = crate::hooks::run_hook(cmd).await;
+        // Hooks run after TUI teardown — just print to stderr so they're visible
+        if !hr.output.trim().is_empty() {
+            eprintln!("⚙ hook (on_session_end): {}", hr.output);
         }
     }
 
@@ -1229,7 +1330,39 @@ fn execute_command(
         }
         "/help" | "/h" => {
             state.push(ConversationEntry::SystemMsg(
-                "Commands: /plan \"task\"  /quick \"task\"  /init  /cd  /profile  /profiles  /ts  /clear  /sessions  /resume [n]  /rollback [n]  /new  /quit\nCtrl+H  session history  ·  Ctrl+P  command palette\nIn plan review: ↑↓ navigate  e annotate  d clear note  a approve & run  Esc cancel".to_string(),
+                "Commands: /plan \"task\"  /quick \"task\"  /init  /cd  /profile  /profiles  /ts  /hooks [on|off]  /list-hooks  /clear  /sessions  /resume [n]  /rollback [n]  /new  /quit\nCtrl+H  session history  ·  Ctrl+P  command palette\nIn plan review: ↑↓ navigate  e annotate  d clear note  a approve & run  Esc cancel".to_string(),
+            ));
+        }
+        "/hooks" => {
+            let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            match arg {
+                "off" => {
+                    state.hooks_enabled = false;
+                    state.push(ConversationEntry::SystemMsg("hooks off".to_string()));
+                }
+                "on" => {
+                    state.hooks_enabled = true;
+                    state.push(ConversationEntry::SystemMsg("hooks on".to_string()));
+                }
+                _ => {
+                    let status = if state.hooks_enabled { "on" } else { "off" };
+                    state.push(ConversationEntry::SystemMsg(
+                        format!("hooks {status}  (usage: /hooks on | /hooks off | /list-hooks)"),
+                    ));
+                }
+            }
+        }
+        "/list-hooks" => {
+            let status = if resolved.hooks_disabled {
+                "disabled (hooks_disabled = true in profile)".to_string()
+            } else if state.hooks_enabled {
+                "on".to_string()
+            } else {
+                "off (toggled off this session)".to_string()
+            };
+            let detail = resolved.hooks.detail();
+            state.push(ConversationEntry::SystemMsg(
+                format!("Hooks — {status}\n{detail}\nEdit ~/.config/forge/config.toml to change. /hooks on|off to toggle."),
             ));
         }
         "/clear" => {
@@ -1435,6 +1568,18 @@ fn execute_command(
     Ok(true)
 }
 
+// ── Hook resolver ─────────────────────────────────────────────────────────────
+
+/// Determine which hooks to use for this run.
+/// By startup time, `resolved.hooks` is always populated (either from config
+/// or from the bootstrap write). This just gates on hooks_enabled.
+fn resolve_hooks(resolved: &ResolvedConfig, hooks_enabled: bool) -> crate::hooks::HookConfig {
+    if !hooks_enabled || resolved.hooks_disabled {
+        return crate::hooks::HookConfig::default();
+    }
+    resolved.hooks.clone()
+}
+
 // ── Agent launcher ────────────────────────────────────────────────────────────
 
 fn launch_agent(
@@ -1459,6 +1604,7 @@ fn launch_agent(
     if let Some(key) = &resolved.api_key {
         client.set_api_key(key.clone());
     }
+    let resolved_hooks = resolve_hooks(resolved, state.hooks_enabled);
     let agent_config = AgentConfig {
         verbose,
         dry_run,
@@ -1467,6 +1613,8 @@ fn launch_agent(
         model: resolved.model.clone(),
         show_timestamps: state.show_timestamps,
         mcp: state.mcp.clone(),
+        hooks: std::sync::Arc::new(resolved_hooks),
+        hooks_enabled: state.hooks_enabled,
     };
 
     let attached: Vec<(String, String)> = state.attached_files
@@ -1534,6 +1682,7 @@ fn launch_quick(
     if let Some(key) = &resolved.api_key {
         client.set_api_key(key.clone());
     }
+    // Quick mode: no on_edit hooks (single shot, no mutation loop)
     let agent_config = AgentConfig {
         verbose,
         dry_run,
@@ -1542,6 +1691,8 @@ fn launch_quick(
         model: resolved.model.clone(),
         show_timestamps: state.show_timestamps,
         mcp: state.mcp.clone(),
+        hooks: std::sync::Arc::new(crate::hooks::HookConfig::default()),
+        hooks_enabled: false,
     };
 
     state.collecting_response.clear();
@@ -1639,6 +1790,7 @@ fn launch_plan(
     if let Some(key) = &resolved.api_key {
         client.set_api_key(key.clone());
     }
+    let resolved_hooks = resolve_hooks(resolved, state.hooks_enabled);
     let agent_config = AgentConfig {
         verbose,
         dry_run,
@@ -1647,6 +1799,8 @@ fn launch_plan(
         model: resolved.model.clone(),
         show_timestamps: state.show_timestamps,
         mcp: state.mcp.clone(),
+        hooks: std::sync::Arc::new(resolved_hooks),
+        hooks_enabled: state.hooks_enabled,
     };
 
     tokio::spawn(async move {
@@ -1691,6 +1845,17 @@ fn launch_plan(
                         passed: true,
                         error: None,
                     });
+                    // on_plan_step_done hooks — shown in TUI
+                    if agent_config.hooks_enabled {
+                        for cmd in &agent_config.hooks.on_plan_step_done {
+                            let hr = crate::hooks::run_hook(cmd).await;
+                            let _ = ui_tx.send(UiEvent::HookOutput {
+                                event: "on_plan_step_done".to_string(),
+                                output: hr.output,
+                                exit_code: hr.exit_code,
+                            });
+                        }
+                    }
                 }
                 Err(e) => {
                     active_plan.steps[step_idx].status = StepStatus::Fail;
@@ -1731,6 +1896,30 @@ fn expand_tilde(path: &str) -> String {
         path.replacen("~", &home, 1)
     } else {
         path.to_string()
+    }
+}
+
+// ── Tool action summariser ────────────────────────────────────────────────────
+
+/// Build a compact action label for session history, e.g. `edit_file(src/foo.rs)`.
+/// Extracts the path from args_summary (format: `path="src/foo.rs", ...`).
+fn compact_tool_action(name: &str, args_summary: &str) -> String {
+    // Try to extract path="..." from the args_summary string
+    let path = args_summary
+        .split(',')
+        .find_map(|part| {
+            let part = part.trim();
+            if part.starts_with("path=") {
+                let val = part.trim_start_matches("path=").trim_matches('"');
+                // Strip leading "./" for cleanliness
+                Some(val.trim_start_matches("./").to_string())
+            } else {
+                None
+            }
+        });
+    match path {
+        Some(p) if !p.is_empty() => format!("{name}({p})"),
+        _ => name.to_string(),
     }
 }
 

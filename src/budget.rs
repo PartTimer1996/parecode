@@ -206,8 +206,9 @@ pub struct LoopDetector {
 impl LoopDetector {
     /// Record a tool call. Returns true if a loop is detected.
     pub fn record(&mut self, tool_name: &str, args: &str) -> bool {
-        // Fingerprint: tool name + first 200 chars of args (cheap, good enough)
-        let fp = format!("{tool_name}::{}", &args[..args.len().min(200)]);
+        // Fingerprint: tool name + full args (truncated to 400 chars).
+        // Use enough of args that read_file with different line_ranges doesn't false-positive.
+        let fp = format!("{tool_name}::{}", &args[..args.len().min(400)]);
 
         // Keep last 5
         self.recent.push((tool_name.to_string(), fp.clone()));
@@ -225,3 +226,67 @@ impl LoopDetector {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_budget_config_from_context_tokens() {
+        let config = BudgetConfig::from_context_tokens(1000);
+        assert_eq!(config.response_headroom, 150);
+    }
+
+    #[test]
+    fn test_budget_config_usable() {
+        let config = BudgetConfig {
+            total_context: 1000,
+            response_headroom: 150,
+        };
+        assert_eq!(config.usable(), 850);
+    }
+
+    #[test]
+    fn test_budget_config_compression_threshold() {
+        let config = BudgetConfig::from_context_tokens(1000);
+        // usable = 1000 - 150 = 850, threshold = floor(850 * 0.80) = 680
+        assert_eq!(config.compression_threshold(), 680);
+    }
+
+    #[test]
+    fn test_estimate_tokens() {
+        let text = "Hello, world!"; // 13 chars → 13/4 + 10 = 13
+        assert_eq!(estimate_tokens(text), 13);
+    }
+
+    #[test]
+    fn test_estimate_messages() {
+        let messages = vec![Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Text("Test message".to_string()),
+        }];
+        // "Test message" = 12 chars → 12/4 + 10 = 13
+        assert_eq!(estimate_messages(&messages), 13);
+    }
+
+    #[test]
+    fn test_loop_detector_record() {
+        let mut detector = LoopDetector::default();
+        assert!(!detector.record("read_file", "path=src/budget.rs"));
+        assert!(detector.record("read_file", "path=src/budget.rs"));
+    }
+
+    #[test]
+    fn test_loop_detector_clear() {
+        let mut detector = LoopDetector::default();
+        detector.record("read_file", "path=src/budget.rs");
+        detector.clear();
+        assert!(detector.recent.is_empty());
+    }
+
+    #[test]
+    fn test_compress_tool_content() {
+        let content = "[src/budget.rs — 228 lines total, showing ...]";
+        assert!(compress_tool_content(content).starts_with("[content compressed — ✓ Read "));
+    }
+}

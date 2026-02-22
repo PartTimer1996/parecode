@@ -4,6 +4,7 @@ mod cache;
 mod client;
 mod config;
 mod history;
+mod hooks;
 mod index;
 mod init;
 mod mcp;
@@ -133,6 +134,12 @@ async fn run_single_shot(
         client.set_api_key(key.clone());
     }
     let mcp = mcp::McpClient::new(&resolved.mcp_servers).await;
+    // Single-shot path: read from config (populated by prior TUI run) or detect+write now
+    let hook_config = if !resolved.hooks_disabled && resolved.hooks.is_empty() {
+        hooks::write_hooks_to_config(&resolved.profile_name)
+    } else {
+        resolved.hooks.clone()
+    };
     let config = agent::AgentConfig {
         verbose,
         dry_run,
@@ -141,6 +148,8 @@ async fn run_single_shot(
         model: resolved.model.clone(),
         show_timestamps: false,
         mcp,
+        hooks: std::sync::Arc::new(hook_config),
+        hooks_enabled: !resolved.hooks_disabled,
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<tui::UiEvent>();
@@ -166,6 +175,7 @@ fn print_event_plain(ev: &tui::UiEvent) {
             print!("{c}");
             let _ = std::io::Write::flush(&mut std::io::stdout());
         }
+        UiEvent::ThinkingChunk(_) => {} // thinking blocks not shown in plain mode
         UiEvent::ToolCall { name, args_summary } => {
             println!("\n  {} {name} {args_summary}", ui::tool_glyph(name));
         }
@@ -200,6 +210,12 @@ fn print_event_plain(ev: &tui::UiEvent) {
             println!("  · i:{input} o:{output} ∑i:{total_input} ∑o:{total_output}");
         }
         UiEvent::ContextUpdate { .. } => {} // skip in plain mode
+        UiEvent::HookOutput { event, output, exit_code } => {
+            if !output.trim().is_empty() {
+                let mark = if *exit_code == 0 { "✓" } else { "✗" };
+                println!("  ⚙ {event} {mark}: {}", output.lines().next().unwrap_or(""));
+            }
+        }
         // Plan lifecycle events only occur in TUI mode — ignore here
         UiEvent::PlanReady(_)
         | UiEvent::PlanGenerateFailed(_)
@@ -236,6 +252,8 @@ async fn run_single_shot_quick(
         model: resolved.model.clone(),
         show_timestamps: false,
         mcp,
+        hooks: std::sync::Arc::new(hooks::HookConfig::default()),
+        hooks_enabled: false,
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<tui::UiEvent>();

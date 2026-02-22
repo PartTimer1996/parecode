@@ -42,6 +42,12 @@ pub struct Profile {
     /// Optional: cost per 1M input tokens in USD, used for plan cost estimates.
     /// Example: 0.25 for Haiku, 3.0 for Sonnet, 15.0 for Opus.
     pub cost_per_mtok_input: Option<f64>,
+    /// Explicit hook commands per event. If all empty, auto-detection kicks in.
+    #[serde(default)]
+    pub hooks: crate::hooks::HookConfig,
+    /// Set to true to disable all hooks for this profile, including auto-detected ones.
+    #[serde(default)]
+    pub hooks_disabled: bool,
 }
 
 fn default_context_tokens() -> u32 {
@@ -58,6 +64,8 @@ impl Default for Profile {
             planner_model: None,
             mcp_servers: Vec::new(),
             cost_per_mtok_input: None,
+            hooks: crate::hooks::HookConfig::default(),
+            hooks_disabled: false,
         }
     }
 }
@@ -127,6 +135,10 @@ pub struct ResolvedConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     /// Optional cost per 1M input tokens in USD (for plan estimates)
     pub cost_per_mtok_input: Option<f64>,
+    /// Hook commands from profile config (may be empty — auto-detect handles that)
+    pub hooks: crate::hooks::HookConfig,
+    /// When true, all hooks are suppressed including auto-detected ones
+    pub hooks_disabled: bool,
 }
 
 impl ResolvedConfig {
@@ -163,6 +175,8 @@ impl ResolvedConfig {
             planner_model: base.planner_model,
             mcp_servers: base.mcp_servers,
             cost_per_mtok_input: base.cost_per_mtok_input,
+            hooks: base.hooks,
+            hooks_disabled: base.hooks_disabled,
         }
     }
 }

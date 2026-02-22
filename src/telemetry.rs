@@ -164,3 +164,52 @@ pub fn load_recent(limit: usize) -> Vec<TaskRecord> {
         .rev()
         .collect()
 }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        
+        #[test]
+        fn test_task_record_serialization() {
+            let record = TaskRecord {
+                timestamp: 1625145600,
+                session_id: "test_session".to_string(),
+                task_preview: "test task".to_string(),
+                input_tokens: 100,
+                output_tokens: 200,
+                tool_calls: 5,
+                compressed_count: 2,
+                compression_ratio: 0.4,
+                model: "test_model".to_string(),
+                profile: "test_profile".to_string(),
+            };
+            
+            let json = serde_json::to_string(&record).unwrap();
+            let deserialized: TaskRecord = serde_json::from_str(&json).unwrap();
+            
+            assert_eq!(record.timestamp, deserialized.timestamp);
+            assert_eq!(record.session_id, deserialized.session_id);
+            assert_eq!(record.task_preview, deserialized.task_preview);
+            assert_eq!(record.input_tokens, deserialized.input_tokens);
+            assert_eq!(record.output_tokens, deserialized.output_tokens);
+            assert_eq!(record.tool_calls, deserialized.tool_calls);
+            assert_eq!(record.compressed_count, deserialized.compressed_count);
+            assert_eq!(record.compression_ratio, deserialized.compression_ratio);
+            assert_eq!(record.model, deserialized.model);
+            assert_eq!(record.profile, deserialized.profile);
+        }
+        
+        #[test]
+        fn test_session_stats_initial_state() {
+            let stats = SessionStats::default();
+            
+            assert_eq!(stats.tasks_completed, 0);
+            assert_eq!(stats.total_input_tokens, 0);
+            assert_eq!(stats.total_output_tokens, 0);
+            assert_eq!(stats.total_tool_calls, 0);
+            assert_eq!(stats.total_compressed, 0);
+            assert_eq!(stats.budget_enforcements, 0);
+            assert_eq!(stats.peak_context_pct, 0);
+            assert!(stats.records.is_empty());
+        }
+    }

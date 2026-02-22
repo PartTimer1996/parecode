@@ -498,11 +498,11 @@ Shown once, suppressed after. Completions generated via clap's `generate` featur
 
 ---
 
-## Phase 6g — NEXT! Hash-Anchored Edits (correctness)
+## ✅ Phase 6g — Hash-Anchored Edits (correctness) — COMPLETE
 
 **The single biggest correctness improvement available.** Inspired by oh-my-opencode's hash-anchored edit validation, which moved task success from 6.7% → 68.3% on complex tasks. Stale-line edits — where the file has shifted since it was read — are the most common silent failure mode.
 
-**How it works:**
+**How it works:**a
 - `read_file` output annotates each line with a short content hash: `42#a3f: fn validate_token(...)`
 - Hashes are compact (4–5 chars), placed at the start of the line number field — subtle, not noisy
 - `edit_file` accepts an optional `anchor` hash alongside `old_str`

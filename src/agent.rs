@@ -7,6 +7,7 @@ use crate::budget::{Budget, LoopDetector};
 use crate::cache::FileCache;
 use crate::client::{Client, ContentPart, Message, MessageContent, Tool, ToolCall};
 use crate::history::History;
+use crate::hooks::{self, HookConfig};
 use crate::mcp::McpClient;
 use crate::tools;
 use crate::tui::UiEvent;
@@ -24,8 +25,12 @@ Guidelines:
 - After editing source files, verify the change compiles before declaring done
 - For replacement tasks (e.g. "replace X with Y"), use search to confirm no instances of X remain before declaring done
 - When a task is complete, say so clearly and stop calling tools
-- Do not re-read files you have already read in this session
+- edit_file returns a fresh excerpt of the file around the edit site after every successful edit — use those hashes directly for follow-up edits; do NOT call read_file again to verify an edit you just made
 - For large files: use read_file with symbols=true to get a function/class index first, then read_file with line_range=[start,end] to fetch only the section you need
+- read_file output lines are prefixed `N [hash] | content` — the 4-char hash in brackets is the anchor for edit_file. Example: from `  42 [a3f2] | fn foo()`, pass anchor="a3f2" (just the 4 chars, no brackets, no line number). This prevents stale-line errors if the file changed between read and edit.
+- append=true adds content after the LAST LINE of the file. Only use it when the file has no relevant closing block yet (e.g. creating the very first test module in a file that has none at all). If you can see a test block, a class, or any closing brace at the end of the file — use old_str to insert inside it, not append=true.
+- To add to an existing block: use old_str matching the closing brace of that block (e.g. the final `}` plus the line before it) and replace it with the new content plus the closing brace.
+- In plan mode, the "Completed steps" preamble describes what changed but its line numbers are STALE. Always read anchors and line positions from the pre-loaded file content shown in the attached files section — never from the completed steps summary.
 - Tool outputs are summarised in history to save context. Use the recall tool to retrieve the full output of any previous tool call when you need it.
 - Do not ask for permission mid-task. If something is clearly required (adding a dependency, creating a file, running a command), do it and report what you did. Only stop to ask if there are genuinely multiple valid approaches that change the outcome significantly."#;
 
@@ -134,6 +139,10 @@ pub struct AgentConfig {
     pub model: String,
     pub show_timestamps: bool,
     pub mcp: Arc<McpClient>,
+    /// Resolved hook commands (may be from explicit config or auto-detected).
+    pub hooks: Arc<HookConfig>,
+    /// When false, all hooks are suppressed for this run (set by `/hooks off`).
+    pub hooks_enabled: bool,
 }
 
 /// Run agent, emitting UiEvents to a ratatui TUI over `ui_tx`.
@@ -224,12 +233,73 @@ pub async fn run_tui(
         });
 
         // ── Call the model ────────────────────────────────────────────────────
+        // Split <think>...</think> tokens into ThinkingChunk events so the TUI
+        // can render model reasoning separately from the actual response text.
         let tx_clone = ui_tx.clone();
+        let in_think = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let think_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let in_think_c = in_think.clone();
+        let think_buf_c = think_buf.clone();
         let response = client
             .chat(system_prompt, &messages, &tools, move |chunk| {
-                let _ = tx_clone.send(UiEvent::Chunk(chunk.to_string()));
+                // Accumulate into a small lookahead buffer to handle tags split across chunks
+                think_buf_c.lock().unwrap().push_str(chunk);
+                loop {
+                    let buf = think_buf_c.lock().unwrap().clone();
+                    if in_think_c.load(std::sync::atomic::Ordering::Relaxed) {
+                        // Looking for </think>
+                        if let Some(pos) = buf.find("</think>") {
+                            let thinking = &buf[..pos];
+                            if !thinking.is_empty() {
+                                let _ = tx_clone.send(UiEvent::ThinkingChunk(thinking.to_string()));
+                            }
+                            *think_buf_c.lock().unwrap() = buf[pos + 8..].to_string();
+                            in_think_c.store(false, std::sync::atomic::Ordering::Relaxed);
+                        } else {
+                            // No close tag yet — flush all but last 8 chars (tag might be split)
+                            let keep = buf.len().saturating_sub(8);
+                            if keep > 0 {
+                                let _ = tx_clone.send(UiEvent::ThinkingChunk(buf[..keep].to_string()));
+                                *think_buf_c.lock().unwrap() = buf[keep..].to_string();
+                            }
+                            break;
+                        }
+                    } else {
+                        // Looking for <think>
+                        if let Some(pos) = buf.find("<think>") {
+                            let before = &buf[..pos];
+                            if !before.is_empty() {
+                                let _ = tx_clone.send(UiEvent::Chunk(before.to_string()));
+                            }
+                            *think_buf_c.lock().unwrap() = buf[pos + 7..].to_string();
+                            in_think_c.store(true, std::sync::atomic::Ordering::Relaxed);
+                        } else {
+                            // No open tag — flush all but last 7 chars.
+                            // saturating_sub gives a byte offset; step back to a
+                            // char boundary so multi-byte chars (e.g. em-dash) don't panic.
+                            let keep_bytes = buf.len().saturating_sub(7);
+                            let keep = buf.floor_char_boundary(keep_bytes);
+                            if keep > 0 {
+                                let _ = tx_clone.send(UiEvent::Chunk(buf[..keep].to_string()));
+                                *think_buf_c.lock().unwrap() = buf[keep..].to_string();
+                            }
+                            break;
+                        }
+                    }
+                }
             })
             .await?;
+        // Flush any remaining buffer content
+        {
+            let remainder = think_buf.lock().unwrap().clone();
+            if !remainder.is_empty() {
+                if in_think.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = ui_tx.send(UiEvent::ThinkingChunk(remainder));
+                } else {
+                    let _ = ui_tx.send(UiEvent::Chunk(remainder));
+                }
+            }
+        }
 
         total_input_tokens += response.input_tokens;
         total_output_tokens += response.output_tokens;
@@ -254,55 +324,114 @@ pub async fn run_tui(
         }
 
         // ── Execute tool calls ────────────────────────────────────────────────
+        // All tool calls from a single response are executed and all results
+        // returned together (required by the OpenAI API spec).
+        //
+        // Dependency guard: if the model batches multiple mutating calls
+        // targeting the same file, only the first is executed. The rest get a
+        // stub result telling the model to re-plan after seeing that result.
+        // This prevents speculative chaining (e.g. append then edit the
+        // just-appended content with stale anchors).
+        //
+        // Read-only calls (read_file, search, list_files, bash) are always
+        // executed regardless — they don't mutate state so batching is safe.
         let mut tool_results: Vec<ContentPart> = Vec::new();
+        // Track which files have been mutated in this batch
+        let mut mutated_files: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for tc in &response.tool_calls {
             tool_call_count += 1;
 
-            // Loop detection
-            if loop_detector.record(&tc.name, &tc.arguments) {
+            // Extract the target path for mutation-detection (edit/write/append ops)
+            let is_mutating = matches!(tc.name.as_str(), "edit_file" | "write_file");
+            let target_path = if is_mutating {
+                serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                    .ok()
+                    .and_then(|v| v["path"].as_str().map(|s| s.to_string()))
+            } else {
+                None
+            };
+
+            // Stub out dependent mutations: same file already mutated this batch
+            let content = if let Some(ref path) = target_path {
+                if mutated_files.contains(path) {
+                    let stub = format!(
+                        "[Not executed: '{}' was already modified by an earlier call in this \
+                         batch. Re-plan this edit after seeing that result — use fresh line \
+                         numbers and hashes from the post-edit context above.]",
+                        path
+                    );
+                    let _ = ui_tx.send(UiEvent::ToolResult {
+                        summary: format!("⚠ skipped dependent edit on {path}"),
+                    });
+                    tool_results.push(ContentPart::ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: stub,
+                    });
+                    continue;
+                }
+            } else { () };
+            let _ = content; // suppress unused warning
+
+            let mut result_content = if loop_detector.record(&tc.name, &tc.arguments) {
                 let _ = ui_tx.send(UiEvent::LoopWarning { tool_name: tc.name.clone() });
-                let msg = format!(
+                format!(
                     "[Loop detected: {} called with identical arguments. \
                      Try a different approach or more specific arguments.]",
                     tc.name
-                );
-                tool_results.push(ContentPart::ToolResult {
-                    tool_use_id: tc.id.clone(),
-                    content: msg,
-                });
-                continue;
-            }
-
-            let mut raw_output = execute_tool(tc, config, &mut cache, &history, &ui_tx, &config.mcp).await;
-
-            // Auto build-check after successful file edits
-            if !config.dry_run && is_file_mutating(&tc.name, &raw_output) {
-                if let Some(check) = run_build_check().await {
-                    let _ = ui_tx.send(UiEvent::ToolResult { summary: check.clone() });
-                    raw_output.push_str(&format!("\n\n[auto build check]\n{check}"));
-                }
-            }
-
-            let (model_output, display_summary) = if config.dry_run {
-                (raw_output.clone(), raw_output.clone())
+                )
             } else {
-                let (full, display) = history.record(&tc.id, &tc.name, &raw_output);
-                (full, display)
+                let raw_output = execute_tool(tc, config, &mut cache, &history, &ui_tx, &config.mcp).await;
+
+                let (model_output, display_summary) = if config.dry_run {
+                    (raw_output.clone(), raw_output.clone())
+                } else {
+                    let (full, display) = history.record(&tc.id, &tc.name, &raw_output);
+                    (full, display)
+                };
+
+                let _ = ui_tx.send(UiEvent::ToolResult { summary: display_summary });
+
+                if config.verbose {
+                    let extra: Vec<&str> = model_output.lines().skip(1).take(4).collect();
+                    for line in extra {
+                        let _ = ui_tx.send(UiEvent::ToolResult { summary: format!("  {line}") });
+                    }
+                }
+
+                model_output
             };
 
-            let _ = ui_tx.send(UiEvent::ToolResult { summary: display_summary });
-
-            if config.verbose {
-                let extra: Vec<&str> = model_output.lines().skip(1).take(4).collect();
-                for line in extra {
-                    let _ = ui_tx.send(UiEvent::ToolResult { summary: format!("  {line}") });
+            // ── on_edit hooks ─────────────────────────────────────────────────
+            // Run after each successful mutating call. Output is appended
+            // directly into the tool result so the model sees compile/lint
+            // errors and can self-correct immediately.
+            if is_mutating && config.hooks_enabled && !config.hooks.on_edit.is_empty() {
+                for cmd in &config.hooks.on_edit {
+                    let hr = hooks::run_hook(cmd).await;
+                    let success = hr.exit_code == 0;
+                    let hook_line = if success && hr.output.trim().is_empty() {
+                        format!("\n\n⚙ `{cmd}` ✓")
+                    } else {
+                        format!("\n\n⚙ `{cmd}` (exit {}):\n{}", hr.exit_code, hr.output)
+                    };
+                    result_content.push_str(&hook_line);
+                    let _ = ui_tx.send(UiEvent::HookOutput {
+                        event: "on_edit".to_string(),
+                        output: hr.output,
+                        exit_code: hr.exit_code,
+                    });
                 }
+            }
+
+            // Record mutation after successful execution
+            if let Some(path) = target_path {
+                mutated_files.insert(path);
             }
 
             tool_results.push(ContentPart::ToolResult {
                 tool_use_id: tc.id.clone(),
-                content: model_output,
+                content: result_content,
             });
         }
 
@@ -310,6 +439,19 @@ pub async fn run_tui(
             role: "tool".to_string(),
             content: MessageContent::Parts(tool_results),
         });
+    }
+
+    // ── on_task_done hooks ────────────────────────────────────────────────────
+    // Run after the agent loop. Output goes to TUI only — not into context.
+    if config.hooks_enabled && !config.hooks.on_task_done.is_empty() {
+        for cmd in &config.hooks.on_task_done {
+            let hr = hooks::run_hook(cmd).await;
+            let _ = ui_tx.send(UiEvent::HookOutput {
+                event: "on_task_done".to_string(),
+                output: hr.output,
+                exit_code: hr.exit_code,
+            });
+        }
     }
 
     // ── Task complete ─────────────────────────────────────────────────────────
@@ -370,7 +512,7 @@ Do not read files unless strictly necessary. Keep responses short.";
         let history = History::default();
         let raw = execute_tool(tc, config, &mut cache, &history, &ui_tx, &config.mcp).await;
         let _ = ui_tx.send(UiEvent::ToolResult {
-            summary: raw.lines().take(5).collect::<Vec<_>>().join("\n"),
+            summary: raw.lines().take(30).collect::<Vec<_>>().join("\n"),
         });
     }
 
@@ -432,9 +574,12 @@ async fn execute_tool(
         }
         "read_file" => {
             let path = args["path"].as_str().unwrap_or("");
+            let is_symbols = args["symbols"].as_bool().unwrap_or(false);
+            let has_range = !args["line_range"].is_null();
 
-            // Cache hit
-            if args["line_range"].is_null() {
+            // Cache only serves/stores full-content reads (no line_range, no symbols).
+            // Symbol-index reads are navigation-only and must not be cached as content.
+            if !has_range && !is_symbols {
                 if let Some(hit) = cache.check(path) {
                     let _ = ui_tx.send(UiEvent::CacheHit { path: path.to_string() });
                     return hit.into_message();
@@ -443,7 +588,8 @@ async fn execute_tool(
 
             match tools::dispatch("read_file", &args) {
                 Ok(output) => {
-                    if args["line_range"].is_null() {
+                    // Only cache full-content reads
+                    if !has_range && !is_symbols {
                         cache.store(path, output.clone());
                     }
                     output
@@ -494,71 +640,6 @@ async fn execute_tool(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Returns true if this tool call successfully mutated source files.
-fn is_file_mutating(tool_name: &str, output: &str) -> bool {
-    match tool_name {
-        "write_file" | "edit_file" => output.starts_with('✓'),
-        "bash" => {
-            // Bash mutations: sed -i, mv, cp touching source files, etc.
-            // Heuristic: output has no error AND command looks file-mutating.
-            // We can't introspect the command here, so we rely on the build check
-            // being cheap enough to always run after bash too.
-            false // only trigger on explicit file tools to avoid noise
-        }
-        _ => false,
-    }
-}
-
-/// Detect the project's build system and run a fast syntax/type check.
-/// Returns None if no known build system found.
-async fn run_build_check() -> Option<String> {
-    use std::path::Path;
-    use tokio::process::Command;
-    use tokio::time::{Duration, timeout};
-
-    // Detect build system by marker files
-    let (cmd, args): (&str, &[&str]) = if Path::new("Cargo.toml").exists() {
-        ("cargo", &["check", "--message-format=short", "-q"])
-    } else if Path::new("tsconfig.json").exists() {
-        ("npx", &["tsc", "--noEmit", "--pretty", "false"])
-    } else if Path::new("package.json").exists() {
-        ("npm", &["run", "build", "--if-present"])
-    } else if Path::new("pyproject.toml").exists() || Path::new("setup.py").exists() {
-        ("python", &["-m", "py_compile"])
-    } else {
-        return None;
-    };
-
-    let fut = Command::new(cmd).args(args).output();
-    let output = match timeout(Duration::from_secs(30), fut).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(_)) | Err(_) => return None,
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = if stderr.is_empty() {
-        stdout.trim().to_string()
-    } else if stdout.is_empty() {
-        stderr.trim().to_string()
-    } else {
-        format!("{}\n{}", stdout.trim(), stderr.trim())
-    };
-
-    if output.status.success() {
-        Some("✓ build check passed. Now use search to verify the task goal is fully met before declaring done.".to_string())
-    } else {
-        // Return errors, capped at 40 lines
-        let lines: Vec<&str> = combined.lines().collect();
-        let shown = lines.len().min(40);
-        let mut result = lines[..shown].join("\n");
-        if lines.len() > shown {
-            result.push_str(&format!("\n[+{} lines truncated]", lines.len() - shown));
-        }
-        Some(format!("✗ build check failed:\n{result}"))
-    }
-}
 
 fn format_args_summary(args: &Value) -> String {
     if let Some(obj) = args.as_object() {

@@ -23,50 +23,6 @@ pub struct History {
     records: Vec<ToolRecord>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_history_record_and_recall() {
-        let mut history = History::default();
-        let tool_call_id = "test_id";
-        let tool_name = "read_file";
-        let full_output = "test content";
-        
-        let (model_output, display_summary) = history.record(tool_call_id, tool_name, full_output);
-        
-        assert_eq!(model_output, full_output);
-        assert_eq!(display_summary, "✓ Read file (1 lines)");
-        
-        let recalled = history.recall(tool_call_id);
-        assert_eq!(recalled, Some(full_output));
-    }
-
-    #[test]
-    fn test_compressed_count() {
-        let mut history = History::default();
-        
-        // Add a record with summary shorter than output
-        history.records.push(ToolRecord {
-            tool_call_id: "1".to_string(),
-            tool_name: "test".to_string(),
-            full_output: "long output".to_string(),
-            summary: "short".to_string(),
-        });
-        
-        // Add a record with summary same length as output
-        history.records.push(ToolRecord {
-            tool_call_id: "2".to_string(),
-            tool_name: "test".to_string(),
-            full_output: "abc".to_string(),
-            summary: "abc".to_string(),
-        });
-        
-        assert_eq!(history.compressed_count(), 1);
-    }
-}
-
 impl History {
     /// Record a completed tool call and produce the summary that will be
     /// sent back to the model as the tool result.
@@ -150,12 +106,16 @@ fn summarise(tool_name: &str, output: &str) -> String {
         // the context window fills up.
         "read_file" => output.to_string(),
         "write_file" | "edit_file" => {
-            // If the output contains a build check failure, the model needs to see it
-            if output.contains("[auto build check]\n✗") {
-                let check_start = output.find("[auto build check]").unwrap_or(0);
-                format!("{}\n{}", first_line(output), &output[check_start..])
+            // Build check failure: starts with "⚠ FILE WRITTEN BUT BUILD BROKEN"
+            // Keep the full output so the model sees compile errors.
+            if output.contains("⚠ FILE WRITTEN BUT BUILD BROKEN") || output.contains("✗ build check failed") {
+                output.to_string()
             } else {
-                first_line(output).to_string()
+                // On success: keep the first line (✓ Edited ...) plus any
+                // post-edit context echo (the ±10-line excerpt with fresh hashes).
+                // The excerpt is what lets the model make follow-up edits without
+                // re-reading — stripping it defeats its purpose.
+                output.to_string()
             }
         }
         "list_files" => summarise_list(output),
@@ -288,3 +248,64 @@ fn truncate_to_lines(s: &str, n: usize) -> String {
     }
     format!("{}\n[+{} lines truncated]", lines[..n].join("\n"), lines.len() - n)
 }
+
+    #[test]
+    fn test_history_record() {
+        let mut history = History::default();
+        let (summary, display) = history.record("test_id", "test_tool", "test_output");
+        assert_eq!(summary, "test_output");
+        assert_eq!(display, "test_output");
+        assert_eq!(history.records.len(), 1);
+    }
+
+    #[test]
+    fn test_history_recall() {
+        let mut history = History::default();
+        history.records.push(ToolRecord {
+            tool_call_id: "test_id".to_string(),
+            tool_name: "test_tool".to_string(),
+            full_output: "test_output".to_string(),
+            summary: "summary".to_string(),
+        });
+        
+        assert_eq!(history.recall("test_id"), Some("test_output"));
+    }
+
+    #[test]
+    fn test_history_recall_by_name() {
+        let mut history = History::default();
+        history.records.push(ToolRecord {
+            tool_call_id: "test_id".to_string(),
+            tool_name: "test_tool".to_string(),
+            full_output: "test_output".to_string(),
+            summary: "summary".to_string(),
+        });
+        
+        assert_eq!(history.recall_by_name("test_tool"), Some("test_output"));
+    }
+
+    #[test]
+    fn test_history_records() {
+        let mut history = History::default();
+        history.records.push(ToolRecord {
+            tool_call_id: "test_id".to_string(),
+            tool_name: "test_tool".to_string(),
+            full_output: "test_output".to_string(),
+            summary: "summary".to_string(),
+        });
+        
+        assert_eq!(history.records().len(), 1);
+    }
+
+    #[test]
+    fn test_history_compressed_count() {
+        let mut history = History::default();
+        history.records.push(ToolRecord {
+            tool_call_id: "test_id".to_string(),
+            tool_name: "test_tool".to_string(),
+            full_output: "test_output".to_string(),
+            summary: "summary".to_string(),
+        });
+        
+        assert_eq!(history.compressed_count(), 1);
+    }

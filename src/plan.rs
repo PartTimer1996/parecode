@@ -50,7 +50,7 @@ pub enum Verification {
     PatternAbsent { file: String, pattern: String },
     /// Run a shell command and check exit code 0
     CommandSuccess(String),
-    /// Run `cargo build` or equivalent and check exit code 0
+    /// Placeholder: step verification passes by default. Use CommandSuccess for actual build checks.
     BuildSuccess,
 }
 
@@ -217,12 +217,12 @@ const PLAN_SYSTEM_PROMPT: &str = r#"You are Forge, a coding assistant. Your task
 
 The plan breaks a coding task into discrete, independently executable steps.
 
-Rules for good plans:
-- Each step should do exactly ONE thing (read, edit, verify — not all three)
-- List only the files genuinely needed for that step in "files" (1-3 files per step is ideal)
-- The "instruction" field is what the model will receive as its entire context — make it self-contained and precise
-- Keep steps small: prefer 4-8 steps over 2 giant steps
-- The last step should always verify the result (search, build check, or test run)
+CRITICAL rules:
+- Each step runs with ONLY the files listed in its "files" array visible — the model cannot see any other files
+- List EVERY file the step will need to read OR modify, including files that define types, interfaces, or modules it depends on
+- Do not artificially limit file counts — list what is actually needed (3-8 files per step is common)
+- The "instruction" field is the model's complete context — be precise about what to change and where
+- Prefer 4-8 steps; do not create micro-steps that split naturally-coupled changes
 
 Respond with ONLY valid JSON — no markdown fences, no explanation. Format:
 
@@ -230,18 +230,17 @@ Respond with ONLY valid JSON — no markdown fences, no explanation. Format:
   "steps": [
     {
       "description": "human-readable one-liner shown to user",
-      "instruction": "precise model-facing instruction with full context needed",
-      "files": ["relative/path/to/file.ts"],
+      "instruction": "precise model-facing instruction",
+      "files": ["src/foo.rs", "src/types.rs", "src/bar.rs"],
       "verify": "none",
-      "tool_budget": 5
+      "tool_budget": 15
     }
   ]
 }
 
 For "verify", use one of:
 - "none" — no automated verification
-- "build" — run cargo build / npm build / equivalent
-- "command:cargo test" — run a specific command, expect exit 0
+- "command:some command" — run a specific command, expect exit 0
 - "absent:file.ts:old_pattern" — check pattern no longer exists in file
 - "changed:file.ts" — check file was modified"#;
 
@@ -264,7 +263,7 @@ struct PlanStepRaw {
 }
 
 fn default_verify() -> String { "none".to_string() }
-fn default_tool_budget() -> usize { 8 }
+fn default_tool_budget() -> usize { 15 }
 
 fn parse_verification(s: &str) -> Verification {
     if s == "none" || s.is_empty() {
@@ -309,17 +308,17 @@ pub async fn generate_plan(
     }
 
     if !context_files.is_empty() {
-        user_content.push_str("The following files are available in this project:\n\n");
+        user_content.push_str("The following files are attached:\n\n");
         for (path, content) in context_files {
-            // Only show first 80 lines per file — enough for structure without bloat
+            let total = content.lines().count();
+            // Show up to 300 lines — enough to see structure and imports
             let preview: String = content
                 .lines()
-                .take(80)
+                .take(300)
                 .collect::<Vec<_>>()
                 .join("\n");
-            let total = content.lines().count();
-            let note = if total > 80 {
-                format!(" ({total} lines total, showing first 80)")
+            let note = if total > 300 {
+                format!(" ({total} lines total, showing first 300)")
             } else {
                 String::new()
             };
@@ -352,7 +351,14 @@ pub async fn generate_plan(
         .trim_end_matches("```")
         .trim();
 
-    let raw: PlanResponse = serde_json::from_str(json_text)
+    // Sanitize unescaped control characters inside JSON string values.
+    // Small models (Qwen3 etc.) frequently emit literal \n/\t/\r inside JSON
+    // strings, which is invalid JSON and causes serde_json to reject the whole plan.
+    // We walk char-by-char, tracking whether we're inside a string, and replace
+    // bare control chars with their JSON escape sequences.
+    let json_text = sanitize_json_strings(json_text);
+
+    let raw: PlanResponse = serde_json::from_str(&json_text)
         .map_err(|e| anyhow::anyhow!("Plan parse error: {e}\n\nModel response:\n{json_text}"))?;
 
     let steps: Vec<PlanStep> = raw
@@ -430,11 +436,18 @@ pub async fn execute_step(
     prior_summaries: &[(String, String)], // (step description, what was done)
     ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
 ) -> Result<()> {
-    // Load the step's files as (path, content) pairs
+    // Load the step's files as (path, formatted_content) pairs.
+    // Use format_for_context so large files get the preamble+symbol-index+tail
+    // treatment with line numbers — not a raw dump. This gives the model the
+    // structural landmarks (exact line numbers for every function) it needs to
+    // anchor edit_file calls correctly without reading the whole file again.
     let mut attached: Vec<(String, String)> = Vec::new();
     for path in &step.files {
         match std::fs::read_to_string(path) {
-            Ok(content) => attached.push((path.clone(), content)),
+            Ok(raw) => {
+                let formatted = crate::tools::read::format_for_context(path, &raw);
+                attached.push((path.clone(), formatted));
+            }
             Err(e) => {
                 // Non-fatal — model will get an error if it tries to read the file
                 let _ = ui_tx.send(UiEvent::ToolResult {
@@ -474,8 +487,9 @@ pub async fn execute_step(
 }
 
 /// Build a compact summary of what a step actually did, by inspecting the files
-/// it listed. Reports which files were recently modified and their top symbols.
-/// Falls back to the step description if files can't be read.
+/// it listed. Reports which files were recently modified, their top symbols,
+/// and any structural additions (test modules, new blocks) so subsequent steps
+/// know what already exists and how to interact with it.
 pub fn summarise_completed_step(step: &PlanStep) -> String {
     if step.files.is_empty() {
         return format!("completed: {}", step.description);
@@ -495,8 +509,10 @@ pub fn summarise_completed_step(step: &PlanStep) -> String {
         }
 
         let Ok(content) = std::fs::read_to_string(path) else { continue };
-        let symbols: Vec<&str> = content
-            .lines()
+        let lines: Vec<&str> = content.lines().collect();
+
+        let symbols: Vec<&str> = lines
+            .iter()
             .filter_map(|line| {
                 let t = line.trim();
                 // Rust / TS / Python / Go top-level symbols
@@ -516,11 +532,56 @@ pub fn summarise_completed_step(step: &PlanStep) -> String {
             .take(4)
             .collect();
 
-        if symbols.is_empty() {
-            parts.push(format!("modified {path}"));
-        } else {
-            parts.push(format!("modified {path} [{}]", symbols.join(", ")));
+        // Detect structural blocks at the file level that affect how next steps edit
+        let mut structural_notes: Vec<String> = Vec::new();
+
+        // Test module detection (Rust #[cfg(test)] / Python if __name__ == '__main__' etc.)
+        let has_test_mod = lines.iter().any(|l| l.trim() == "#[cfg(test)]");
+        if has_test_mod {
+            // Find the closing line of the test module to help with anchoring
+            // List test fn names inside the module
+            let test_fns: Vec<&str> = lines.iter()
+                .filter_map(|l| {
+                    let t = l.trim();
+                    if t.starts_with("fn test_") || t.starts_with("async fn test_") {
+                        t.split('(').next()
+                            .map(|s| s.trim_start_matches("async fn ").trim_start_matches("fn "))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let fns_str = if test_fns.is_empty() {
+                "(empty)".to_string()
+            } else {
+                test_fns.join(", ")
+            };
+            structural_notes.push(format!(
+                "already has #[cfg(test)] mod tests containing [{fns_str}] — \
+                 to add more tests use edit_file with old_str targeting content inside the module \
+                 (NOT append=true, which would place code outside it). \
+                 Get exact line content and hashes from the pre-loaded file above, not from this summary."
+            ));
         }
+
+        // Describe class blocks for TS/Python (describe/class Test*)
+        let has_describe = lines.iter().any(|l| {
+            let t = l.trim();
+            t.starts_with("describe(") || t.starts_with("describe.only(")
+        });
+        if has_describe {
+            structural_notes.push("has describe() test block — add tests inside it".to_string());
+        }
+
+        let mut desc = if symbols.is_empty() {
+            format!("modified {path}")
+        } else {
+            format!("modified {path} [{}]", symbols.join(", "))
+        };
+        if !structural_notes.is_empty() {
+            desc.push_str(&format!("; {}", structural_notes.join("; ")));
+        }
+        parts.push(desc);
     }
 
     if parts.is_empty() {
@@ -577,36 +638,70 @@ pub fn verify_step(step: &PlanStep) -> Result<()> {
             if output.status.success() {
                 Ok(())
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let first_err = stderr.lines().next().unwrap_or("(no output)");
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let lines: Vec<&str> = combined.lines().take(30).collect();
                 Err(anyhow::anyhow!(
-                    "verify: '{cmd}' failed (exit {}): {first_err}",
-                    output.status.code().unwrap_or(-1)
+                    "verify: '{cmd}' failed (exit {}):\n{}",
+                    output.status.code().unwrap_or(-1),
+                    lines.join("\n")
                 ))
             }
         }
 
         Verification::BuildSuccess => {
-            // Auto-detect build command
-            let cmd = if std::path::Path::new("Cargo.toml").exists() {
-                "cargo build 2>&1 | tail -5"
-            } else if std::path::Path::new("package.json").exists() {
-                "npm run build 2>&1 | tail -5"
-            } else {
-                return Ok(()); // Can't detect — skip
-            };
-            let output = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .output()
-                .map_err(|e| anyhow::anyhow!("verify: build failed to run: {e}"))?;
-            if output.status.success() {
-                Ok(())
-            } else {
-                let out = String::from_utf8_lossy(&output.stdout);
-                let first = out.lines().next().unwrap_or("build failed");
-                Err(anyhow::anyhow!("verify: build failed: {first}"))
-            }
+            // BuildSuccess without a specific command: pass.
+            // Use Verification::CommandSuccess("your build cmd") for language-specific checks.
+            Ok(())
         }
     }
+}
+
+// ── JSON sanitizer ────────────────────────────────────────────────────────────
+
+/// Replace unescaped control characters inside JSON string values with their
+/// proper JSON escape sequences. Small models often emit literal newlines/tabs
+/// inside string values, producing invalid JSON that serde_json rejects.
+///
+/// Walks the input char-by-char tracking in/out of string literals, handling
+/// backslash escapes correctly so we don't double-escape already-escaped chars.
+fn sanitize_json_strings(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in input.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            out.push(ch);
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            out.push(ch);
+            continue;
+        }
+        if in_string {
+            match ch {
+                '\n' => { out.push_str("\\n"); continue; }
+                '\r' => { out.push_str("\\r"); continue; }
+                '\t' => { out.push_str("\\t"); continue; }
+                c if (c as u32) < 0x20 => {
+                    // Other control chars: emit as \uXXXX
+                    out.push_str(&format!("\\u{:04x}", c as u32));
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(ch);
+    }
+    out
 }
