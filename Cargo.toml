@@ -1,6 +1,6 @@
 [package]
 name = "parecode"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A terminal coding agent built for token efficiency and local model reliability"
 repository = "https://github.com/PartTimer1996/parecode"
