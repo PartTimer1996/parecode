@@ -58,11 +58,6 @@ impl History {
             .map(|r| r.full_output.as_str())
     }
 
-    /// All records (for diagnostics / verbose output).
-    pub fn records(&self) -> &[ToolRecord] {
-        &self.records
-    }
-
     /// Count records where the summary is actually shorter than the full output.
     pub fn compressed_count(&self) -> usize {
         self.records
@@ -298,19 +293,6 @@ fn truncate_to_lines(s: &str, n: usize) -> String {
         });
         
         assert_eq!(history.recall_by_name("test_tool"), Some("test_output"));
-    }
-
-    #[test]
-    fn test_history_records() {
-        let mut history = History::default();
-        history.records.push(ToolRecord {
-            tool_call_id: "test_id".to_string(),
-            tool_name: "test_tool".to_string(),
-            full_output: "test_output".to_string(),
-            summary: "summary".to_string(),
-        });
-        
-        assert_eq!(history.records().len(), 1);
     }
 
     #[test]

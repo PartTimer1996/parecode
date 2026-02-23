@@ -39,9 +39,9 @@ pub struct Session {
     /// "{unix_ts}_{cwd_basename}"
     pub id: String,
     /// Absolute cwd when session was created
-    pub cwd: String,
+    pub _cwd: String,
     /// All turns recorded so far (including archived ones beyond active_turn)
-    pub turns: Vec<ConversationTurn>,
+    pub _turns: Vec<ConversationTurn>,
     /// High-water mark: turns[0..=active_turn] are "live" for context injection.
     /// Turns beyond this are archived (rolled back) but not deleted.
     pub active_turn: usize,
@@ -88,8 +88,8 @@ pub fn open_session(cwd: &str) -> Result<Session> {
 
     Ok(Session {
         id,
-        cwd: cwd.to_string(),
-        turns: Vec::new(),
+        _cwd: cwd.to_string(),
+        _turns: Vec::new(),
         active_turn: 0,
         path,
     })

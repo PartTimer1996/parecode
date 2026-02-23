@@ -176,10 +176,6 @@ pub fn load_all() -> Vec<TaskRecord> {
         .collect()
 }
 
-/// Load records since a unix timestamp, oldest-first.
-pub fn load_since(since_ts: i64) -> Vec<TaskRecord> {
-    load_all().into_iter().filter(|r| r.timestamp >= since_ts).collect()
-}
 
 /// Delete all telemetry data. Returns Ok(()) if file didn't exist.
 pub fn clear_all() -> Result<()> {
@@ -222,7 +218,7 @@ impl Aggregate {
         self.compressed as f32 / self.tool_calls as f32
     }
 
-    pub fn avg_tokens_per_task(&self) -> u32 {
+    pub fn _avg_tokens_per_task(&self) -> u32 {
         if self.tasks == 0 { return 0; }
         self.total_tokens() / self.tasks as u32
     }

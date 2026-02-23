@@ -132,7 +132,7 @@ pub enum ConversationEntry {
     PlanCard,
     /// Lightweight nudge shown in chat after a task that changed files.
     /// Directs user to the Git tab (press 5) for the full diff.
-    GitNotification { files_changed: usize, checkpoint_hash: Option<String> },
+    GitNotification { files_changed: usize, _checkpoint_hash: Option<String> },
 }
 
 // ── Mode — TUI modal state ────────────────────────────────────────────────────
@@ -681,7 +681,7 @@ impl AppState {
                     self.git_checkpoints = repo.list_checkpoints().unwrap_or_default();
                 }
                 // Lightweight nudge in chat — one line, directs to Git tab
-                self.push(ConversationEntry::GitNotification { files_changed, checkpoint_hash });
+                self.push(ConversationEntry::GitNotification { files_changed, _checkpoint_hash: checkpoint_hash });
             }
             UiEvent::GitAutoCommit { message } => {
                 self.push(ConversationEntry::SystemMsg(format!("✓ committed: {message}")));
@@ -1046,8 +1046,8 @@ fn handle_key(
                             let cwd = id.splitn(2, '_').nth(1).unwrap_or("unknown").to_string();
                             state.session = Some(sessions::Session {
                                 id: id.clone(),
-                                cwd,
-                                turns: turns.clone(),
+                                _cwd: cwd,
+                                _turns: turns.clone(),
                                 active_turn: count.saturating_sub(1),
                                 path: path.clone(),
                             });
@@ -1285,8 +1285,6 @@ fn handle_key(
                         });
                         if all_approved {
                             let plan = pr.plan.clone();
-                            // Transition immediately — don't wait for first PlanStepStart event
-                            drop(pr);
                             state.mode = Mode::PlanRunning;
                             launch_plan(plan, state, resolved, verbose, dry_run, ui_tx);
                         } else {
@@ -2148,9 +2146,9 @@ fn launch_agent(
         verbose,
         dry_run,
         context_tokens: resolved.context_tokens,
-        profile_name: resolved.profile_name.clone(),
-        model: resolved.model.clone(),
-        show_timestamps: state.show_timestamps,
+        _profile_name: resolved.profile_name.clone(),
+        _model: resolved.model.clone(),
+        _show_timestamps: state.show_timestamps,
         mcp: state.mcp.clone(),
         hooks: std::sync::Arc::new(resolved_hooks),
         hooks_enabled: state.hooks_enabled,
@@ -2229,9 +2227,9 @@ fn launch_quick(
         verbose,
         dry_run,
         context_tokens: resolved.context_tokens,
-        profile_name: resolved.profile_name.clone(),
-        model: resolved.model.clone(),
-        show_timestamps: state.show_timestamps,
+        _profile_name: resolved.profile_name.clone(),
+        _model: resolved.model.clone(),
+        _show_timestamps: state.show_timestamps,
         mcp: state.mcp.clone(),
         hooks: std::sync::Arc::new(crate::hooks::HookConfig::default()),
         hooks_enabled: false,
@@ -2340,9 +2338,9 @@ fn launch_plan(
         verbose,
         dry_run,
         context_tokens: resolved.context_tokens,
-        profile_name: resolved.profile_name.clone(),
-        model: resolved.model.clone(),
-        show_timestamps: state.show_timestamps,
+        _profile_name: resolved.profile_name.clone(),
+        _model: resolved.model.clone(),
+        _show_timestamps: state.show_timestamps,
         mcp: state.mcp.clone(),
         hooks: std::sync::Arc::new(resolved_hooks),
         hooks_enabled: state.hooks_enabled,
@@ -2550,7 +2548,6 @@ fn load_sidebar_entries(current_session: &Option<sessions::Session>) -> Vec<Side
             let timestamp = id.splitn(2, '_').next()
                 .and_then(|ts| ts.parse::<i64>().ok())
                 .map(|ts| {
-                    use chrono::TimeZone as _;
                     let dt = chrono::DateTime::from_timestamp(ts, 0)
                         .unwrap_or_default()
                         .with_timezone(&chrono::Local);

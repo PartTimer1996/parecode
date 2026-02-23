@@ -14,7 +14,7 @@ use std::time::Instant;
 struct Entry {
     content: String,
     turn: usize,
-    read_at: Instant,
+    _read_at: Instant,
 }
 
 #[derive(Default)]
@@ -49,7 +49,7 @@ impl FileCache {
             Entry {
                 content,
                 turn: self.current_turn,
-                read_at: Instant::now(),
+                _read_at: Instant::now(),
             },
         );
     }
@@ -79,10 +79,6 @@ impl FileCache {
         }
     }
 
-    /// Number of cached files.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
 }
 
 pub struct CacheHit {
@@ -243,7 +239,7 @@ mod tests {
         cache.store("file2.txt", "content2".to_string());
         
         // Check initial state
-        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.entries.len(), 2);
         
         // Invalidate one file
         cache.invalidate("file1.txt");

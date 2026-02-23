@@ -254,7 +254,6 @@ pub fn draw(f: &mut Frame, state: &AppState, area: Rect) {
 
         // First-seen date
         if let Some(first) = state.telemetry_history.first() {
-            use chrono::TimeZone as _;
             let dt = chrono::DateTime::from_timestamp(first.timestamp, 0)
                 .unwrap_or_default()
                 .with_timezone(&chrono::Local);

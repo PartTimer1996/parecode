@@ -112,14 +112,6 @@ impl Plan {
         }
     }
 
-    pub fn pending_count(&self) -> usize {
-        self.steps.iter().filter(|s| s.status == StepStatus::Pending).count()
-    }
-
-    pub fn completed_count(&self) -> usize {
-        self.steps.iter().filter(|s| s.status == StepStatus::Pass).count()
-    }
-
     /// Estimate token cost for this plan.
     /// Heuristic: base_tokens(500) + instruction_len/4 + file_sizes/4 per step,
     /// summed and multiplied by 1.3 to account for tool results and model responses.
@@ -185,28 +177,6 @@ pub fn save_plan(plan: &Plan) -> Result<PathBuf> {
     let json = serde_json::to_string_pretty(plan)?;
     std::fs::write(&path, json)?;
     Ok(path)
-}
-
-pub fn load_plan(path: &std::path::Path) -> Result<Plan> {
-    let json = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&json)?)
-}
-
-/// Find the most recent plan in `.parecode/plans/`
-pub fn find_latest_plan() -> Option<PathBuf> {
-    let dir = plans_dir();
-    if !dir.exists() {
-        return None;
-    }
-    let mut entries: Vec<_> = std::fs::read_dir(&dir)
-        .ok()?
-        .flatten()
-        .filter(|e| {
-            e.path().extension().map(|x| x == "json").unwrap_or(false)
-        })
-        .collect();
-    entries.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
-    entries.first().map(|e| e.path())
 }
 
 // ── Plan generation ───────────────────────────────────────────────────────────

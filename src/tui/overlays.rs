@@ -8,7 +8,6 @@ use ratatui::{
 };
 
 use super::{AppState, FilePickerState, SessionBrowserState, slash_filtered};
-use chrono::TimeZone as _; // needed for .with_timezone()
 
 // ── Command palette ────────────────────────────────────────────────────────────
 

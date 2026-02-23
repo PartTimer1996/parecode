@@ -18,15 +18,6 @@ pub enum MessageContent {
     Parts(Vec<ContentPart>),
 }
 
-impl MessageContent {
-    pub fn as_str(&self) -> &str {
-        match self {
-            MessageContent::Text(s) => s.as_str(),
-            MessageContent::Parts(_) => "",
-        }
-    }
-}
-
 impl From<&str> for MessageContent {
     fn from(s: &str) -> Self {
         MessageContent::Text(s.to_string())
@@ -83,7 +74,7 @@ struct StreamChunk {
 #[derive(Debug, Deserialize)]
 struct StreamChoice {
     delta: Option<Delta>,
-    finish_reason: Option<String>,
+    _finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -389,18 +380,6 @@ fn build_messages(system: &str, messages: &[Message]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_message_content_from_str() {
-        let content: MessageContent = "test".into();
-        assert_eq!(content.as_str(), "test");
-    }
-
-    #[test]
-    fn test_message_content_from_string() {
-        let content: MessageContent = "test".to_string().into();
-        assert_eq!(content.as_str(), "test");
-    }
 
     #[test]
     fn test_content_part_serialize() {

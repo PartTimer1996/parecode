@@ -114,12 +114,12 @@ impl GitRepo {
     }
 
     /// Returns `git diff HEAD --stat` — summary of uncommitted changes.
-    pub fn diff_stat(&self) -> Result<String> {
+    pub fn _diff_stat(&self) -> Result<String> {
         self.run_git(&["diff", "HEAD", "--stat"])
     }
 
     /// Returns `git diff HEAD` — full unified diff of uncommitted changes.
-    pub fn diff_full(&self) -> Result<String> {
+    pub fn _diff_full(&self) -> Result<String> {
         self.run_git(&["diff", "HEAD"])
     }
 

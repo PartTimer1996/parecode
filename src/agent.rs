@@ -137,9 +137,9 @@ pub struct AgentConfig {
     pub verbose: bool,
     pub dry_run: bool,
     pub context_tokens: u32,
-    pub profile_name: String,
-    pub model: String,
-    pub show_timestamps: bool,
+    pub _profile_name: String,
+    pub _model: String,
+    pub _show_timestamps: bool,
     pub mcp: Arc<McpClient>,
     /// Resolved hook commands (may be from explicit config or auto-detected).
     pub hooks: Arc<HookConfig>,

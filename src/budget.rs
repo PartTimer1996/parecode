@@ -220,10 +220,6 @@ impl LoopDetector {
         let count = self.recent.iter().filter(|(_, f)| f == &fp).count();
         count >= 2
     }
-
-    pub fn clear(&mut self) {
-        self.recent.clear();
-    }
 }
 
 
@@ -276,13 +272,6 @@ mod tests {
         assert!(detector.record("read_file", "path=src/budget.rs"));
     }
 
-    #[test]
-    fn test_loop_detector_clear() {
-        let mut detector = LoopDetector::default();
-        detector.record("read_file", "path=src/budget.rs");
-        detector.clear();
-        assert!(detector.recent.is_empty());
-    }
 
     #[test]
     fn test_compress_tool_content() {

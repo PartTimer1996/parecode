@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem},
 };
 
 use super::AppState;

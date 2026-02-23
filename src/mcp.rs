@@ -47,11 +47,11 @@ pub struct McpTool {
     /// Qualified name: "<server_name>.<tool_name>" — e.g. "brave.brave_web_search"
     pub qualified_name: String,
     /// Original tool name used when calling the server
-    pub tool_name: String,
+    pub _tool_name: String,
     pub description: String,
     pub input_schema: Value,
     /// Which server owns this tool
-    pub server_name: String,
+    pub _server_name: String,
 }
 
 // ── Per-server state ───────────────────────────────────────────────────────────
@@ -289,10 +289,10 @@ fn parse_tools(server_name: &str, result: &Value) -> Vec<McpTool> {
 
             Some(McpTool {
                 qualified_name,
-                tool_name,
+                _tool_name: tool_name,
                 description,
                 input_schema,
-                server_name: server_name.to_string(),
+                _server_name: server_name.to_string(),
             })
         })
         .collect()
