@@ -156,6 +156,11 @@ pub async fn run_tui(
     prior_context: Option<String>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
 ) -> Result<()> {
+    let task_start = std::time::Instant::now();
+    let task_cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "unknown".to_string());
     // Merge native tools + MCP-discovered tools into one list for the model
     let mut tools = tools::all_definitions();
     let mcp_tools = config.mcp.all_tools().await;
@@ -467,6 +472,8 @@ pub async fn run_tui(
         output_tokens: total_output_tokens,
         tool_calls: tool_call_count,
         compressed_count: history.compressed_count(),
+        duration_secs: task_start.elapsed().as_secs() as u32,
+        cwd: task_cwd,
     });
 
     Ok(())
@@ -481,6 +488,11 @@ pub async fn run_quick(
     config: &AgentConfig,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
 ) -> Result<()> {
+    let task_start = std::time::Instant::now();
+    let task_cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "unknown".to_string());
     const QUICK_SYSTEM: &str = "You are Forge in quick mode. Answer concisely in one response. \
 If a tool call is needed, make exactly one — prefer edit_file or search. \
 Do not read files unless strictly necessary. Keep responses short.";
@@ -521,6 +533,8 @@ Do not read files unless strictly necessary. Keep responses short.";
         output_tokens: total_output,
         tool_calls: response.tool_calls.len().min(1),
         compressed_count: 0,
+        duration_secs: task_start.elapsed().as_secs() as u32,
+        cwd: task_cwd,
     });
 
     Ok(())

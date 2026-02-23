@@ -195,7 +195,7 @@ fn print_event_plain(ev: &tui::UiEvent) {
         UiEvent::ToolBudgetHit { limit } => {
             println!("\n  ■ tool call limit ({limit}) reached");
         }
-        UiEvent::AgentDone { input_tokens, output_tokens, tool_calls, compressed_count } => {
+        UiEvent::AgentDone { input_tokens, output_tokens, tool_calls, compressed_count, .. } => {
             let compressed = if *compressed_count > 0 {
                 format!("  {compressed_count} outputs truncated")
             } else {

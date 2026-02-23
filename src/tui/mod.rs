@@ -13,6 +13,12 @@
 ///   │  input box (3 lines, fixed)                    │
 ///   └────────────────────────────────────────────────┘
 pub mod render;
+pub mod chat;
+pub mod overlays;
+pub mod config_view;
+pub mod stats_view;
+pub mod plan_view;
+pub mod sidebar;
 
 use std::io;
 
@@ -64,6 +70,8 @@ pub enum UiEvent {
         output_tokens: u32,
         tool_calls: usize,
         compressed_count: usize,
+        duration_secs: u32,
+        cwd: String,
     },
     /// Agent hit an error
     AgentError(String),
@@ -125,9 +133,33 @@ pub enum Mode {
     AgentRunning,
     Palette,        // Ctrl+P command palette
     FilePicker,     // @ file picker
+    SlashComplete,  // / inline command autocomplete
     SessionBrowser, // Ctrl+H session history browser
     PlanReview,     // Plan review/annotation overlay
     PlanRunning,    // Plan step currently executing
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
+pub struct SidebarEntry {
+    pub id: String,
+    pub path: std::path::PathBuf,
+    pub project: String,   // cwd basename, max 16 chars
+    pub turn_count: usize,
+    pub preview: String,   // first message preview, max 26 chars
+    pub timestamp: String, // formatted date/time, e.g. "Feb 23 14:05"
+    pub is_current: bool,
+}
+
+// ── Tab ───────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Chat,
+    Config,
+    Stats,
+    Plan,
 }
 
 // ── FilePicker state ──────────────────────────────────────────────────────────
@@ -282,6 +314,8 @@ pub struct AppState {
     pub show_timestamps: bool,
     pub palette_query: String,
     pub file_picker: Option<FilePickerState>,
+    /// Selected index in the slash-complete dropdown
+    pub slash_complete_selected: usize,
     pub cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
     /// Files pinned via @, injected into every agent call in this conversation
     pub attached_files: Vec<AttachedFile>,
@@ -321,6 +355,28 @@ pub struct AppState {
     pub stream_in_think: bool,
     /// When false, hooks are suppressed for this session (/hooks off)
     pub hooks_enabled: bool,
+    /// Sidebar visible (collapsible session list on left)
+    pub sidebar_visible: bool,
+    /// True = arrow keys navigate the sidebar instead of scrolling history
+    pub sidebar_focused: bool,
+    /// Highlighted row index in the sidebar
+    pub sidebar_selected: usize,
+    /// Loaded sidebar entries (top 30 sessions)
+    pub sidebar_entries: Vec<SidebarEntry>,
+    /// Currently active tab
+    pub active_tab: Tab,
+    /// True once any plan has been generated (shows Plan tab)
+    pub plan_ever_active: bool,
+    /// Scroll offset for the Stats tab
+    pub stats_scroll: usize,
+    /// Historical telemetry loaded from disk at startup (all-time records)
+    pub telemetry_history: Vec<crate::telemetry::TaskRecord>,
+    /// Endpoint URL (for Config tab display)
+    pub endpoint: String,
+    /// Hooks config snapshot for Config tab display
+    pub hooks_config: crate::hooks::HookConfig,
+    /// Whether hooks are disabled at profile level (for Config tab display)
+    pub hooks_disabled_profile: bool,
 }
 
 impl AppState {
@@ -339,6 +395,7 @@ impl AppState {
             show_timestamps,
             palette_query: String::new(),
             file_picker: None,
+            slash_complete_selected: 0,
             cancel_tx: None,
             attached_files: Vec::new(),
             focused_chip: None,
@@ -358,6 +415,17 @@ impl AppState {
             last_stream_text: String::new(),
             stream_in_think: false,
             hooks_enabled: true,
+            active_tab: Tab::Chat,
+            plan_ever_active: false,
+            stats_scroll: 0,
+            telemetry_history: telemetry::load_all(),
+            endpoint: resolved.endpoint.clone(),
+            hooks_config: resolved.hooks.clone(),
+            hooks_disabled_profile: resolved.hooks_disabled,
+            sidebar_visible: false, // set to true after terminal size check in event_loop
+            sidebar_focused: false,
+            sidebar_selected: 0,
+            sidebar_entries: Vec::new(),
         }
     }
 
@@ -392,7 +460,8 @@ impl AppState {
                 self.last_stream_text.push_str(&c);
                 let len = self.last_stream_text.len();
                 if len > 80 {
-                    self.last_stream_text = self.last_stream_text[len - 60..].to_string();
+                    let start = self.last_stream_text.floor_char_boundary(len - 60);
+                    self.last_stream_text = self.last_stream_text[start..].to_string();
                 }
             }
             UiEvent::ThinkingChunk(c) => {
@@ -401,7 +470,8 @@ impl AppState {
                 self.last_stream_text.push_str(&c);
                 let len = self.last_stream_text.len();
                 if len > 80 {
-                    self.last_stream_text = self.last_stream_text[len - 60..].to_string();
+                    let start = self.last_stream_text.floor_char_boundary(len - 60);
+                    self.last_stream_text = self.last_stream_text[start..].to_string();
                 }
             }
             UiEvent::ToolCall { name, args_summary } => {
@@ -431,16 +501,18 @@ impl AppState {
                     format!("■ tool call limit ({limit}) reached"),
                 ));
             }
-            UiEvent::AgentDone { input_tokens, output_tokens, tool_calls, compressed_count } => {
+            UiEvent::AgentDone { input_tokens, output_tokens, tool_calls, compressed_count, duration_secs, cwd } => {
                 // Record telemetry
                 let session_id = self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
                 let record = self.stats.record_task(
                     &session_id,
+                    &cwd,
                     &self.current_task_preview.clone(),
                     input_tokens,
                     output_tokens,
                     tool_calls,
                     compressed_count,
+                    duration_secs,
                     &self.model.clone(),
                     &self.profile.clone(),
                 );
@@ -491,6 +563,7 @@ impl AppState {
             // ── Plan lifecycle ────────────────────────────────────────────────
             UiEvent::PlanReady(generated_plan) => {
                 self.plan_review = Some(PlanReviewState::new(generated_plan));
+                self.plan_ever_active = true;
                 // Push the plan card inline into history — no overlay
                 self.push(ConversationEntry::PlanCard);
                 self.mode = Mode::PlanReview;
@@ -604,6 +677,11 @@ impl AppState {
         if let Some(session) = &mut self.session {
             session.active_turn = self.conversation_turns.len() - 1;
         }
+
+        // Refresh sidebar so turn count stays current
+        if self.sidebar_visible {
+            self.sidebar_entries = load_sidebar_entries(&self.session);
+        }
     }
 }
 
@@ -624,6 +702,7 @@ fn palette_commands() -> Vec<PaletteCommand> {
         PaletteCommand { key: "/profile",     label: "Switch profile" },
         PaletteCommand { key: "/profiles",    label: "List profiles" },
         PaletteCommand { key: "/ts",          label: "Toggle timestamps" },
+        PaletteCommand { key: "/stats",       label: "Open stats tab  (/stats reset to clear history)" },
         PaletteCommand { key: "/hooks",       label: "Toggle hooks on/off (or /hooks on|off)" },
         PaletteCommand { key: "/list-hooks",  label: "Show all configured hooks and their status" },
         PaletteCommand { key: "/clear",       label: "Clear conversation" },
@@ -634,6 +713,15 @@ fn palette_commands() -> Vec<PaletteCommand> {
         PaletteCommand { key: "/help",        label: "Show help" },
         PaletteCommand { key: "/quit",        label: "Quit" },
     ]
+}
+
+/// Returns palette commands whose key or label contains the current input query.
+fn slash_filtered(input: &str) -> Vec<PaletteCommand> {
+    let q = input.to_lowercase();
+    palette_commands()
+        .into_iter()
+        .filter(|c| c.key.contains(q.as_str()) || c.label.to_lowercase().contains(q.as_str()))
+        .collect()
 }
 
 // ── Terminal setup / teardown ─────────────────────────────────────────────────
@@ -710,6 +798,12 @@ async fn event_loop(
     let mut state = AppState::new(&resolved, show_timestamps, mcp);
     state.cost_per_mtok_input = resolved.cost_per_mtok_input;
 
+    // Auto-show sidebar when terminal is wide enough
+    if let Ok((w, _)) = crossterm::terminal::size() {
+        state.sidebar_visible = w >= 110;
+    }
+    state.sidebar_entries = load_sidebar_entries(&state.session);
+
     // ── Hook startup summary ──────────────────────────────────────────────────
     if resolved.hooks_disabled {
         state.push(ConversationEntry::SystemMsg("⚙ hooks disabled for this profile".to_string()));
@@ -748,6 +842,10 @@ async fn event_loop(
                 s.active_turn = state.conversation_turns.len().saturating_sub(1);
             }
             state.session = Some(session);
+            // Keep only the 10 most recent non-empty sessions; delete older ones
+            sessions::prune_old_sessions(10);
+            // Reload sidebar now that state.session is set — this correctly marks is_current
+            state.sidebar_entries = load_sidebar_entries(&state.session);
         }
         Err(e) => {
             state.push(ConversationEntry::SystemMsg(
@@ -853,6 +951,81 @@ fn handle_key(
     dry_run: bool,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
 ) -> Result<bool> {
+    // ── Sidebar focused navigation ────────────────────────────────────────────
+    if state.sidebar_focused && state.sidebar_visible {
+        match key.code {
+            KeyCode::Up => {
+                if state.sidebar_selected > 0 {
+                    state.sidebar_selected -= 1;
+                }
+                return Ok(true);
+            }
+            KeyCode::Down => {
+                if state.sidebar_selected + 1 < state.sidebar_entries.len() {
+                    state.sidebar_selected += 1;
+                }
+                return Ok(true);
+            }
+            KeyCode::Enter => {
+                let idx = state.sidebar_selected;
+                if let Some(entry) = state.sidebar_entries.get(idx) {
+                    let path = entry.path.clone();
+                    let id = entry.id.clone();
+                    state.sidebar_focused = false;
+                    match sessions::load_session_turns(&path) {
+                        Ok(turns) if !turns.is_empty() => {
+                            let count = turns.len();
+                            state.entries.clear();
+                            state.scroll = 0;
+                            for t in &turns {
+                                state.entries.push(ConversationEntry::UserMessage(t.user_message.clone()));
+                                if !t.agent_response.is_empty() {
+                                    state.entries.push(ConversationEntry::AssistantChunk(t.agent_response.clone()));
+                                }
+                            }
+                            // Update state.session to the newly selected session so
+                            // is_current highlights correctly in the sidebar.
+                            let cwd = id.splitn(2, '_').nth(1).unwrap_or("unknown").to_string();
+                            state.session = Some(sessions::Session {
+                                id: id.clone(),
+                                cwd,
+                                turns: turns.clone(),
+                                active_turn: count.saturating_sub(1),
+                                path: path.clone(),
+                            });
+                            state.conversation_turns = turns;
+                            state.session_resumed = true;
+                            state.push(ConversationEntry::SystemMsg(
+                                format!("✓ resumed {id} ({count} turns)"),
+                            ));
+                            // Refresh sidebar to mark new current
+                            state.sidebar_entries = load_sidebar_entries(&state.session);
+                        }
+                        Ok(_) => {
+                            state.push(ConversationEntry::SystemMsg("session is empty".to_string()));
+                        }
+                        Err(e) => {
+                            state.push(ConversationEntry::SystemMsg(format!("resume error: {e}")));
+                        }
+                    }
+                }
+                return Ok(true);
+            }
+            KeyCode::Esc => {
+                state.sidebar_focused = false;
+                return Ok(true);
+            }
+            // Any char typed while sidebar is focused: unfocus and pass through
+            KeyCode::Char(_) => {
+                state.sidebar_focused = false;
+                // fall through to normal char handling below
+            }
+            _ => {
+                return Ok(true);
+            }
+        }
+    }
+
     // ── SessionBrowser mode ───────────────────────────────────────────────────
     if state.mode == Mode::SessionBrowser {
         if let Some(browser) = &mut state.session_browser {
@@ -993,6 +1166,73 @@ fn handle_key(
                     _ => {}
                 }
             }
+        }
+        return Ok(true);
+    }
+
+    // ── SlashComplete mode ────────────────────────────────────────────────────
+    if state.mode == Mode::SlashComplete {
+        match key.code {
+            KeyCode::Esc => {
+                state.mode = Mode::Normal;
+            }
+            KeyCode::Up => {
+                let count = slash_filtered(&state.input).len();
+                if count > 0 {
+                    state.slash_complete_selected =
+                        (state.slash_complete_selected + count - 1) % count;
+                }
+            }
+            KeyCode::Down => {
+                let count = slash_filtered(&state.input).len();
+                if count > 0 {
+                    state.slash_complete_selected =
+                        (state.slash_complete_selected + 1) % count;
+                }
+            }
+            KeyCode::Enter | KeyCode::Tab => {
+                let matches = slash_filtered(&state.input);
+                if let Some(cmd) = matches.get(state.slash_complete_selected) {
+                    state.input = cmd.key.to_string();
+                    // If the command takes an argument (not /quit, /clear etc.)
+                    // add a trailing space so user can type straight away
+                    let no_arg = matches!(
+                        cmd.key,
+                        "/quit" | "/exit" | "/q" | "/clear" | "/sessions"
+                        | "/new" | "/help" | "/h" | "/ts" | "/list-hooks"
+                        | "/profiles" | "/init" | "/stats"
+                    );
+                    if !no_arg {
+                        state.input.push(' ');
+                    }
+                    state.cursor = state.input.len();
+                }
+                state.mode = Mode::Normal;
+            }
+            KeyCode::Backspace => {
+                if state.input.len() <= 1 {
+                    // Backspaced past `/` — cancel
+                    state.input.clear();
+                    state.cursor = 0;
+                    state.mode = Mode::Normal;
+                } else {
+                    state.input.pop();
+                    state.cursor = state.input.len();
+                    state.slash_complete_selected = 0;
+                }
+            }
+            KeyCode::Char(c) => {
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                state.input.push_str(s);
+                state.cursor = state.input.len();
+                state.slash_complete_selected = 0;
+                // If input no longer starts with `/`, drop back to normal
+                if !state.input.starts_with('/') {
+                    state.mode = Mode::Normal;
+                }
+            }
+            _ => {}
         }
         return Ok(true);
     }
@@ -1152,6 +1392,43 @@ fn handle_key(
                 state.mode = Mode::SessionBrowser;
             }
         }
+        // Ctrl+B — toggle sidebar visible (does not change focus)
+        (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
+            if state.mode == Mode::Normal || state.sidebar_focused {
+                state.sidebar_visible = !state.sidebar_visible;
+                if state.sidebar_visible {
+                    state.sidebar_entries = load_sidebar_entries(&state.session);
+                } else {
+                    state.sidebar_focused = false;
+                }
+            }
+        }
+        // Tab — when sidebar is visible + input empty: enter sidebar focus
+        (KeyModifiers::NONE, KeyCode::Tab)
+            if state.sidebar_visible
+                && state.input.is_empty()
+                && state.mode == Mode::Normal
+                && state.attached_files.is_empty() => {
+            state.sidebar_focused = true;
+        }
+        // 1-4 — switch tabs (only when input is empty and not running)
+        (KeyModifiers::NONE, KeyCode::Char('1')) if state.input.is_empty()
+            && state.mode == Mode::Normal => {
+            state.active_tab = Tab::Chat;
+        }
+        (KeyModifiers::NONE, KeyCode::Char('2')) if state.input.is_empty()
+            && state.mode == Mode::Normal => {
+            state.active_tab = Tab::Config;
+        }
+        (KeyModifiers::NONE, KeyCode::Char('3')) if state.input.is_empty()
+            && state.mode == Mode::Normal => {
+            state.active_tab = Tab::Stats;
+        }
+        (KeyModifiers::NONE, KeyCode::Char('4')) if state.input.is_empty()
+            && state.mode == Mode::Normal
+            && state.plan_ever_active => {
+            state.active_tab = Tab::Plan;
+        }
         // Enter — submit input
         (KeyModifiers::NONE, KeyCode::Enter) => {
             if state.mode == Mode::AgentRunning || state.mode == Mode::PlanRunning {
@@ -1281,11 +1558,19 @@ fn handle_key(
         }
         // Scroll up
         (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::NONE, KeyCode::PageUp) => {
-            state.scroll = state.scroll.saturating_add(3);
+            if state.active_tab == Tab::Stats {
+                state.stats_scroll = state.stats_scroll.saturating_add(3);
+            } else {
+                state.scroll = state.scroll.saturating_add(3);
+            }
         }
         // Scroll down
         (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::NONE, KeyCode::PageDown) => {
-            state.scroll = state.scroll.saturating_sub(3);
+            if state.active_tab == Tab::Stats {
+                state.stats_scroll = state.stats_scroll.saturating_sub(3);
+            } else {
+                state.scroll = state.scroll.saturating_sub(3);
+            }
         }
         // Regular char input — insert at cursor
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
@@ -1306,6 +1591,12 @@ fn handle_key(
                         at_offset,
                     });
                     state.mode = Mode::FilePicker;
+                }
+
+                // `/` at start of input triggers slash autocomplete
+                if c == '/' && state.cursor == 1 {
+                    state.slash_complete_selected = 0;
+                    state.mode = Mode::SlashComplete;
                 }
             }
         }
@@ -1332,6 +1623,22 @@ fn execute_command(
             state.push(ConversationEntry::SystemMsg(
                 "Commands: /plan \"task\"  /quick \"task\"  /init  /cd  /profile  /profiles  /ts  /hooks [on|off]  /list-hooks  /clear  /sessions  /resume [n]  /rollback [n]  /new  /quit\nCtrl+H  session history  ·  Ctrl+P  command palette\nIn plan review: ↑↓ navigate  e annotate  d clear note  a approve & run  Esc cancel".to_string(),
             ));
+        }
+        "/stats" => {
+            let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            if arg == "reset" {
+                match telemetry::clear_all() {
+                    Ok(()) => {
+                        state.telemetry_history.clear();
+                        state.push(ConversationEntry::SystemMsg("telemetry cleared".to_string()));
+                    }
+                    Err(e) => {
+                        state.push(ConversationEntry::SystemMsg(format!("clear failed: {e}")));
+                    }
+                }
+            } else {
+                state.active_tab = Tab::Stats;
+            }
         }
         "/hooks" => {
             let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
@@ -1475,6 +1782,8 @@ fn execute_command(
             match sessions::open_session(&cwd_str()) {
                 Ok(s) => {
                     state.session = Some(s);
+                    sessions::prune_old_sessions(10);
+                    state.sidebar_entries = load_sidebar_entries(&state.session);
                     state.push(ConversationEntry::SystemMsg("new session started".to_string()));
                 }
                 Err(e) => {
@@ -1880,6 +2189,49 @@ fn launch_plan(
         let _ = plan::save_plan(&active_plan);
         let _ = ui_tx.send(UiEvent::PlanComplete { total });
     });
+}
+
+// ── Sidebar data loading ──────────────────────────────────────────────────────
+
+fn load_sidebar_entries(current_session: &Option<sessions::Session>) -> Vec<SidebarEntry> {
+    let current_id = current_session.as_ref().map(|s| s.id.as_str()).unwrap_or("");
+    let all = sessions::list_sessions().unwrap_or_default();
+    all.into_iter()
+        // Skip empty (zero-byte) files — sessions with no turns yet
+        .filter(|(_, path)| std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false))
+        .take(10)
+        .map(|(id, path)| {
+            // Turn count — load cheaply by counting lines
+            let turn_count = std::fs::read_to_string(&path)
+                .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+                .unwrap_or(0);
+            // Preview — first user_message from first line
+            let preview = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.lines().next().map(|l| l.to_string()))
+                .and_then(|l| serde_json::from_str::<sessions::ConversationTurn>(&l).ok())
+                .map(|t| {
+                    let msg = t.user_message.lines().next().unwrap_or("").to_string();
+                    msg.chars().take(26).collect::<String>()
+                })
+                .unwrap_or_default();
+            // Project = part after first underscore in id
+            let project = id.splitn(2, '_').nth(1).unwrap_or(&id).chars().take(16).collect();
+            // Timestamp from unix prefix
+            let timestamp = id.splitn(2, '_').next()
+                .and_then(|ts| ts.parse::<i64>().ok())
+                .map(|ts| {
+                    use chrono::TimeZone as _;
+                    let dt = chrono::DateTime::from_timestamp(ts, 0)
+                        .unwrap_or_default()
+                        .with_timezone(&chrono::Local);
+                    dt.format("%b %d %H:%M").to_string()
+                })
+                .unwrap_or_default();
+            let is_current = id == current_id;
+            SidebarEntry { id, path, project, turn_count, preview, timestamp, is_current }
+        })
+        .collect()
 }
 
 // ── Small helpers ─────────────────────────────────────────────────────────────

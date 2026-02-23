@@ -81,6 +81,11 @@ pub fn open_session(cwd: &str) -> Result<Session> {
     let id = format!("{ts}_{basename}");
     let path = dir.join(format!("{id}.jsonl"));
 
+    // Touch the file immediately so list_sessions() can find it right away.
+    // Without this the file only appears on disk after the first append_turn call,
+    // meaning the current session would never show as highlighted in the sidebar.
+    let _ = std::fs::OpenOptions::new().create(true).append(true).open(&path);
+
     Ok(Session {
         id,
         cwd: cwd.to_string(),
@@ -139,6 +144,26 @@ pub fn list_sessions() -> Result<Vec<(String, PathBuf)>> {
             (name, e.path())
         })
         .collect())
+}
+
+/// Delete session files beyond the newest `keep` *non-empty* sessions, oldest-first.
+/// Empty sessions (zero-byte files with no turns) are always deleted immediately.
+/// list_sessions() returns newest-first, so we walk in order and keep the first
+/// `keep` non-empty ones, deleting everything else.
+pub fn prune_old_sessions(keep: usize) {
+    let Ok(sessions) = list_sessions() else { return };
+    let mut kept = 0usize;
+    for (_, path) in sessions {
+        let is_empty = std::fs::metadata(&path).map(|m| m.len() == 0).unwrap_or(true);
+        if is_empty {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            kept += 1;
+            if kept > keep {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 /// Find the most recent session file whose name ends with `_{cwd_basename}`.

@@ -676,7 +676,7 @@ cost_per_mtok_output = 1.25
 - `src/tui/mod.rs` — `/quick` command, badge in status bar
 
 
-## Phase 6l 
+## Phase 6l - DONE
 
 Simple for / autocomplete show options, similar to @, simple yet massive for UX 
 
@@ -842,7 +842,7 @@ auto_commit_prefix = "forge: "  # prefix for auto-commit messages
 
 **Turn the TUI from "functional terminal app" into "this looks like a real product."** Ratatui was absolutely the right choice here — it has first-class `Tabs`, `Table`, split layouts, scrollable viewports, and inline syntax highlighting via `syntect`. Everything below is achievable without changing framework. This is the phase where Forge stops looking like a dev tool and starts looking like a product.
 
-### 6p-i. Tab bar (top of screen)
+### 6p-i. Tab bar (top of screen) - Working pretty nicely also
 
 Replace the current single-view layout with a tab bar across the top. Each tab is a full-screen view. `1-5` number keys or `Ctrl+Tab` to switch.
 
@@ -853,11 +853,11 @@ Replace the current single-view layout with a tab bar across the top. Each tab i
 
 | Tab | Contents | Key |
 |---|---|---|
-| **Chat** (default) | Current conversation view — what exists today | `1` |
-| **Config** | Profile switcher, hooks status, MCP servers, conventions preview | `2` |
-| **Git** | Diff viewer, commit history, checkpoint list, undo controls | `3` |
-| **Stats** | Telemetry dashboard — session totals, per-task breakdown, cost tracking | `4` |
-| **Plan** | Plan viewer when a plan is active — step list, status, carry-forward summaries | `5` |
+| DONE - **Chat** (default) | Current conversation view — what exists today | `1` |
+| Mostly - DONE - **Config** | Profile switcher, hooks status, MCP servers, conventions preview | `2` |
+| NOT DONE - **Git** | Diff viewer, commit history, checkpoint list, undo controls | `3` |
+| Needs fixed - **Stats** | Telemetry dashboard — session totals, per-task breakdown, cost tracking | `4` |
+| Needs tested - **Plan** | Plan viewer when a plan is active — step list, status, carry-forward summaries | `5` |
 
 **Design notes:**
 - Tabs use ratatui's `Tabs` widget — already built into the library, just needs importing
@@ -866,7 +866,7 @@ Replace the current single-view layout with a tab bar across the top. Each tab i
 - Active tab highlighted, inactive tabs dimmed
 - Each tab has its own scroll state — switching tabs preserves position
 
-### 6p-ii. Session sidebar (left panel, Chat tab)
+### DONE 6p-ii. Session sidebar (left panel, Chat tab) - Working pretty nicely 
 
 A collapsible sidebar on the left showing session history — like the sidebar in ChatGPT/Claude web UI. This is the single biggest UX improvement for multi-session users.
 
@@ -938,7 +938,7 @@ A collapsible sidebar on the left showing session history — like the sidebar i
 - Syntax colouring: line-prefix-based (`+` = green, `-` = red, `@@` = cyan) — no `syntect` needed for diffs
 - Scrollable viewport: ratatui's built-in scroll support
 
-### 6p-iv. Config tab (profile/hooks/MCP management)
+### 6p-iv. Config tab (profile/hooks/MCP management) - Done, needs edit file functionality directly 
 
 A read/edit view of the current configuration — eliminates the need to leave Forge to edit `config.toml`.
 
@@ -976,7 +976,7 @@ A read/edit view of the current configuration — eliminates the need to leave F
 - Conventions preview — first 10 lines of loaded conventions file
 - Profile list on the left if multiple profiles exist — highlight active, arrow keys to browse
 
-### 6p-v. Stats tab (telemetry dashboard)
+### 6p-v. Stats tab (telemetry dashboard) - THIS NEEDS IMPLEMENTED PROPERLY
 
 The existing stats bar is great. This tab expands it into a full dashboard — the kind of thing you screenshot and share.
 
@@ -1113,7 +1113,7 @@ System prompt size. You're now injecting: conventions, session context, step car
 **Prerequisites before starting validation:**
 - Phase 6b (distribution / cargo-dist) complete — test on a clean install, not a dev build
 - Phase 6c (first-run wizard) complete — test the real new-user flow, not a hand-configured setup
-- All 6a–6o phases building and shipping in the release binary
+- All 6a–6o (ideally some of the good parts of 6P) phases building and shipping in the release binary
 
 **Metrics to record for every test run** (telemetry captures most of this automatically in `.forge/telemetry.jsonl`):
 

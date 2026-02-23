@@ -1,30 +1,51 @@
-/// Telemetry — per-session usage stats, persisted to `.forge/telemetry.jsonl`.
+/// Telemetry — global usage stats, persisted to `~/.local/share/forge/telemetry.jsonl`.
 ///
 /// Stats are:
 /// - Accumulated live in AppState during a TUI session
 /// - Flushed to disk after every completed agent run
-/// - Displayed in the TUI stats overlay (Ctrl+T)
+/// - Displayed in the TUI stats tab (key 3)
 ///
 /// The JSONL format keeps one record per completed task (AgentDone event),
-/// enabling later aggregation across sessions.
+/// enabling aggregation across all sessions and projects.
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
 
-// ── Per-task record (one line in .forge/telemetry.jsonl) ─────────────────────
+// ── Storage path ──────────────────────────────────────────────────────────────
+
+fn telemetry_path() -> PathBuf {
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".local/share")
+        });
+    base.join("forge").join("telemetry.jsonl")
+}
+
+// ── Per-task record (one line in telemetry.jsonl) ─────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
     pub timestamp: i64,
     pub session_id: String,
-    pub task_preview: String,  // first 80 chars of the user message
+    /// Project directory basename (e.g. "forge", "my-app")
+    #[serde(default)]
+    pub cwd: String,
+    /// First 80 chars of the user message
+    pub task_preview: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub tool_calls: usize,
     pub compressed_count: usize,
-    pub compression_ratio: f32, // compressed_count / tool_calls (0.0 if no tools)
+    pub compression_ratio: f32,
+    /// Wall-clock seconds the task took (0 if not recorded)
+    #[serde(default)]
+    pub duration_secs: u32,
     pub model: String,
     pub profile: String,
 }
@@ -53,14 +74,17 @@ pub struct SessionStats {
 
 impl SessionStats {
     /// Record a completed agent run. Returns the TaskRecord for persistence.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_task(
         &mut self,
         session_id: &str,
+        cwd: &str,
         task_preview: &str,
         input_tokens: u32,
         output_tokens: u32,
         tool_calls: usize,
         compressed_count: usize,
+        duration_secs: u32,
         model: &str,
         profile: &str,
     ) -> TaskRecord {
@@ -79,12 +103,14 @@ impl SessionStats {
         let record = TaskRecord {
             timestamp: Utc::now().timestamp(),
             session_id: session_id.to_string(),
+            cwd: cwd.to_string(),
             task_preview: task_preview.chars().take(80).collect(),
             input_tokens,
             output_tokens,
             tool_calls,
             compressed_count,
             compression_ratio,
+            duration_secs,
             model: model.to_string(),
             profile: profile.to_string(),
         };
@@ -102,41 +128,34 @@ impl SessionStats {
         self.budget_enforcements += 1;
     }
 
-    /// Total tokens this session
     pub fn total_tokens(&self) -> u32 {
         self.total_input_tokens + self.total_output_tokens
     }
 
-    /// Average tokens per task
     pub fn avg_tokens_per_task(&self) -> u32 {
-        if self.tasks_completed == 0 {
-            return 0;
-        }
+        if self.tasks_completed == 0 { return 0; }
         self.total_tokens() / self.tasks_completed as u32
     }
 
-    /// Overall compression ratio (what fraction of tool calls got compressed)
     pub fn compression_ratio(&self) -> f32 {
-        if self.total_tool_calls == 0 {
-            return 0.0;
-        }
+        if self.total_tool_calls == 0 { return 0.0; }
         self.total_compressed as f32 / self.total_tool_calls as f32
     }
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
 
-/// Append a task record to `.forge/telemetry.jsonl` in the current working directory.
-/// Creates the `.forge/` directory if needed. Silently ignores write errors
-/// (telemetry must never crash the agent).
+/// Append a task record to the global telemetry file.
+/// Silently ignores write errors — telemetry must never crash the agent.
 pub fn append_record(record: &TaskRecord) {
     let _ = try_append_record(record);
 }
 
 fn try_append_record(record: &TaskRecord) -> Result<()> {
-    let dir = PathBuf::from(".forge");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("telemetry.jsonl");
+    let path = telemetry_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -146,70 +165,115 @@ fn try_append_record(record: &TaskRecord) -> Result<()> {
     Ok(())
 }
 
-/// Load recent records from `.forge/telemetry.jsonl` (last N lines).
-/// Returns empty vec if file doesn't exist or can't be read.
-pub fn load_recent(limit: usize) -> Vec<TaskRecord> {
-    let path = PathBuf::from(".forge/telemetry.jsonl");
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
+/// Load all records from the global telemetry file, oldest-first.
+pub fn load_all() -> Vec<TaskRecord> {
+    let path = telemetry_path();
+    let Ok(content) = std::fs::read_to_string(&path) else { return Vec::new() };
     content
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str(l).ok())
-        .collect::<Vec<TaskRecord>>()
-        .into_iter()
-        .rev()
-        .take(limit)
-        .rev()
         .collect()
 }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        
-        #[test]
-        fn test_task_record_serialization() {
-            let record = TaskRecord {
-                timestamp: 1625145600,
-                session_id: "test_session".to_string(),
-                task_preview: "test task".to_string(),
-                input_tokens: 100,
-                output_tokens: 200,
-                tool_calls: 5,
-                compressed_count: 2,
-                compression_ratio: 0.4,
-                model: "test_model".to_string(),
-                profile: "test_profile".to_string(),
-            };
-            
-            let json = serde_json::to_string(&record).unwrap();
-            let deserialized: TaskRecord = serde_json::from_str(&json).unwrap();
-            
-            assert_eq!(record.timestamp, deserialized.timestamp);
-            assert_eq!(record.session_id, deserialized.session_id);
-            assert_eq!(record.task_preview, deserialized.task_preview);
-            assert_eq!(record.input_tokens, deserialized.input_tokens);
-            assert_eq!(record.output_tokens, deserialized.output_tokens);
-            assert_eq!(record.tool_calls, deserialized.tool_calls);
-            assert_eq!(record.compressed_count, deserialized.compressed_count);
-            assert_eq!(record.compression_ratio, deserialized.compression_ratio);
-            assert_eq!(record.model, deserialized.model);
-            assert_eq!(record.profile, deserialized.profile);
-        }
-        
-        #[test]
-        fn test_session_stats_initial_state() {
-            let stats = SessionStats::default();
-            
-            assert_eq!(stats.tasks_completed, 0);
-            assert_eq!(stats.total_input_tokens, 0);
-            assert_eq!(stats.total_output_tokens, 0);
-            assert_eq!(stats.total_tool_calls, 0);
-            assert_eq!(stats.total_compressed, 0);
-            assert_eq!(stats.budget_enforcements, 0);
-            assert_eq!(stats.peak_context_pct, 0);
-            assert!(stats.records.is_empty());
+/// Load records since a unix timestamp, oldest-first.
+pub fn load_since(since_ts: i64) -> Vec<TaskRecord> {
+    load_all().into_iter().filter(|r| r.timestamp >= since_ts).collect()
+}
+
+/// Delete all telemetry data. Returns Ok(()) if file didn't exist.
+pub fn clear_all() -> Result<()> {
+    let path = telemetry_path();
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+// ── Aggregate helpers ─────────────────────────────────────────────────────────
+
+pub struct Aggregate {
+    pub tasks: usize,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub tool_calls: usize,
+    pub compressed: usize,
+    pub duration_secs: u32,
+}
+
+impl Aggregate {
+    pub fn from_records(records: &[TaskRecord]) -> Self {
+        Self {
+            tasks: records.len(),
+            input_tokens: records.iter().map(|r| r.input_tokens).sum(),
+            output_tokens: records.iter().map(|r| r.output_tokens).sum(),
+            tool_calls: records.iter().map(|r| r.tool_calls).sum(),
+            compressed: records.iter().map(|r| r.compressed_count).sum(),
+            duration_secs: records.iter().map(|r| r.duration_secs).sum(),
         }
     }
+
+    pub fn total_tokens(&self) -> u32 {
+        self.input_tokens + self.output_tokens
+    }
+
+    pub fn compression_ratio(&self) -> f32 {
+        if self.tool_calls == 0 { return 0.0; }
+        self.compressed as f32 / self.tool_calls as f32
+    }
+
+    pub fn avg_tokens_per_task(&self) -> u32 {
+        if self.tasks == 0 { return 0; }
+        self.total_tokens() / self.tasks as u32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_task_record_serialization() {
+        let record = TaskRecord {
+            timestamp: 1625145600,
+            session_id: "test_session".to_string(),
+            cwd: "my-project".to_string(),
+            task_preview: "test task".to_string(),
+            input_tokens: 100,
+            output_tokens: 200,
+            tool_calls: 5,
+            compressed_count: 2,
+            compression_ratio: 0.4,
+            duration_secs: 12,
+            model: "test_model".to_string(),
+            profile: "test_profile".to_string(),
+        };
+
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: TaskRecord = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(record.timestamp, deserialized.timestamp);
+        assert_eq!(record.session_id, deserialized.session_id);
+        assert_eq!(record.task_preview, deserialized.task_preview);
+        assert_eq!(record.input_tokens, deserialized.input_tokens);
+        assert_eq!(record.output_tokens, deserialized.output_tokens);
+        assert_eq!(record.tool_calls, deserialized.tool_calls);
+        assert_eq!(record.compressed_count, deserialized.compressed_count);
+        assert_eq!(record.compression_ratio, deserialized.compression_ratio);
+        assert_eq!(record.model, deserialized.model);
+        assert_eq!(record.profile, deserialized.profile);
+    }
+
+    #[test]
+    fn test_session_stats_initial_state() {
+        let stats = SessionStats::default();
+        assert_eq!(stats.tasks_completed, 0);
+        assert_eq!(stats.total_input_tokens, 0);
+        assert_eq!(stats.total_output_tokens, 0);
+        assert_eq!(stats.total_tool_calls, 0);
+        assert_eq!(stats.total_compressed, 0);
+        assert_eq!(stats.budget_enforcements, 0);
+        assert_eq!(stats.peak_context_pct, 0);
+        assert!(stats.records.is_empty());
+    }
+}
