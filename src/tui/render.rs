@@ -142,6 +142,7 @@ pub fn draw(f: &mut Frame, state: &AppState) {
         Tab::Config => super::config_view::draw(f, state, chunks[1]),
         Tab::Stats  => super::stats_view::draw(f, state, chunks[1]),
         Tab::Plan   => super::plan_view::draw(f, state, chunks[1]),
+        Tab::Git    => super::git_view::draw(f, state, chunks[1]),
     }
 
     draw_status_bar(f, state, chunks[2]);
@@ -170,6 +171,10 @@ pub fn draw(f: &mut Frame, state: &AppState) {
         }
     }
     // Plan review is now inline in history (PlanCard entry) — no overlay needed
+
+    if state.diff_overlay_visible {
+        super::overlays::draw_diff_overlay(f, state, area);
+    }
 }
 
 // ── Tab bar ───────────────────────────────────────────────────────────────────
@@ -180,12 +185,17 @@ fn draw_tab_bar(f: &mut Frame, state: &AppState, area: Rect) {
         ("[2] Config", Tab::Config, "2"),
         ("[3] Stats ", Tab::Stats,  "3"),
         ("[4] Plan  ", Tab::Plan,   "4"),
+        ("[5] Git   ", Tab::Git,    "5"),
     ];
 
     let mut spans = vec![Span::raw(" ")];
     for (label, tab, _key) in tabs {
         // Hide Plan tab unless a plan has been generated
         if *tab == Tab::Plan && !state.plan_ever_active {
+            continue;
+        }
+        // Hide Git tab when not in a git repo
+        if *tab == Tab::Git && !state.git_available {
             continue;
         }
         let active = state.active_tab == *tab;
@@ -404,6 +414,7 @@ fn draw_input(f: &mut Frame, state: &AppState, area: Rect) {
         Mode::SessionBrowser => (Color::Rgb(110, 90, 200), Color::Rgb(110, 90, 200), "◈"),
         Mode::PlanReview     => (Color::Rgb(200, 140, 0),  Color::Rgb(220, 160, 0),  "◇"),
         Mode::PlanRunning    => (Color::Rgb(40, 40, 60),   Color::DarkGray,          "▶"),
+        Mode::UndoConfirm    => (Color::Rgb(200, 80, 40),  Color::Rgb(220, 100, 60), "⚠"),
         Mode::Normal         => (Color::Rgb(60, 60, 80),  Color::Cyan,               "❯"),
     };
 

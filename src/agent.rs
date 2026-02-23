@@ -144,6 +144,12 @@ pub struct AgentConfig {
     pub hooks: Arc<HookConfig>,
     /// When false, all hooks are suppressed for this run (set by `/hooks off`).
     pub hooks_enabled: bool,
+    /// Auto-commit all changes after successful task completion.
+    pub auto_commit: bool,
+    /// Prefix for auto-commit messages (e.g. "forge: ").
+    pub auto_commit_prefix: String,
+    /// Enable git integration: checkpoint before task, git status in system prompt, diff after.
+    pub git_context: bool,
 }
 
 /// Run agent, emitting UiEvents to a ratatui TUI over `ui_tx`.
@@ -190,6 +196,22 @@ pub async fn run_tui(
     if let Some(conventions) = load_conventions() {
         system_prompt.push_str(&conventions);
     }
+    // ── Git status injection ──────────────────────────────────────────────────
+    // Inject `git status --short` so the model knows what files are uncommitted.
+    // Skips silently if not in a git repo or git_context is disabled.
+    if config.git_context {
+        if let Some(status) = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::git::GitRepo::open(&cwd))
+            .and_then(|repo| repo.status_short().ok())
+            .filter(|s| !s.trim().is_empty())
+        {
+            system_prompt.push_str(&format!(
+                "\n\n# Git status\n\n```\n{}\n```",
+                status.trim()
+            ));
+        }
+    }
     let system_prompt = system_prompt.as_str();
     let system_tokens = crate::budget::estimate_tokens(system_prompt);
 
@@ -211,6 +233,27 @@ pub async fn run_tui(
         }
         s.push_str(task);
         s
+    };
+
+    // ── Git checkpoint ────────────────────────────────────────────────────────
+    // Create a checkpoint before the task starts. If the tree is dirty, this
+    // commits all pending changes as a WIP checkpoint so /undo can restore them.
+    // Skips silently if not in a git repo or git_context is disabled.
+    let checkpoint_hash: Option<String> = if config.git_context {
+        std::env::current_dir().ok().and_then(|cwd| {
+            crate::git::GitRepo::open(&cwd).and_then(|repo| {
+                let summary: String = task
+                    .lines()
+                    .next()
+                    .unwrap_or(task)
+                    .chars()
+                    .take(60)
+                    .collect();
+                repo.checkpoint(&summary).ok()
+            })
+        })
+    } else {
+        None
     };
 
     messages.push(Message {
@@ -473,6 +516,45 @@ pub async fn run_tui(
                 output: hr.output,
                 exit_code: hr.exit_code,
             });
+        }
+    }
+
+    // ── Git post-task ─────────────────────────────────────────────────────────
+    // Emit a diff notification and optionally auto-commit.
+    if config.git_context {
+        if let Some(cwd) = std::env::current_dir().ok() {
+            if let Some(repo) = crate::git::GitRepo::open(&cwd) {
+                let ref_pt = checkpoint_hash.as_deref().unwrap_or("HEAD");
+                if let Ok(stat) = repo.diff_stat_from(ref_pt) {
+                    if !stat.trim().is_empty() {
+                        // Count lines that describe a changed file (contain '|')
+                        let files_changed = stat.lines().filter(|l| l.contains('|')).count();
+                        let _ = ui_tx.send(UiEvent::GitChanges {
+                            stat: stat.trim().to_string(),
+                            checkpoint_hash: checkpoint_hash.clone(),
+                            files_changed,
+                        });
+                    }
+                }
+                if config.auto_commit {
+                    let summary: String = task
+                        .lines()
+                        .next()
+                        .unwrap_or(task)
+                        .chars()
+                        .take(72)
+                        .collect();
+                    let msg = format!("{}{}", config.auto_commit_prefix, summary);
+                    match repo.auto_commit(&msg) {
+                        Ok(()) => {
+                            let _ = ui_tx.send(UiEvent::GitAutoCommit { message: msg });
+                        }
+                        Err(e) => {
+                            let _ = ui_tx.send(UiEvent::GitError(format!("auto-commit: {e}")));
+                        }
+                    }
+                }
+            }
         }
     }
 

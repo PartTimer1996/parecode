@@ -227,6 +227,24 @@ pub fn build_items(state: &AppState, term_width: u16) -> Vec<ListItem<'static>> 
                 items.extend(build_plan_card_items(state, state.cost_per_mtok_input));
             }
 
+            ConversationEntry::GitNotification { files_changed, .. } => {
+                // Compact single-line nudge — directs user to Git tab
+                let s = if *files_changed == 1 { "" } else { "s" };
+                items.push(ListItem::new(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("⎇ ", Style::default().fg(Color::Rgb(100, 180, 255))),
+                    Span::styled(
+                        format!("{files_changed} file{s} changed"),
+                        Style::default().fg(Color::Rgb(140, 140, 180)),
+                    ),
+                    Span::styled(
+                        "  — 5 to review · d to diff · /undo to revert",
+                        Style::default().fg(Color::Rgb(60, 60, 90)),
+                    ),
+                ])));
+                items.push(ListItem::new(Line::raw("")));
+            }
+
             ConversationEntry::TaskComplete {
                 input_tokens,
                 output_tokens,

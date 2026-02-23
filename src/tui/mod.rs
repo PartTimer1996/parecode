@@ -19,6 +19,7 @@ pub mod config_view;
 pub mod stats_view;
 pub mod plan_view;
 pub mod sidebar;
+pub mod git_view;
 
 use std::io;
 
@@ -100,6 +101,12 @@ pub enum UiEvent {
     PlanFailed { step: usize, error: String },
     /// A hook ran (on_edit, on_task_done, on_plan_step_done, on_session_start, on_session_end)
     HookOutput { event: String, output: String, exit_code: i32 },
+    /// Files changed since the last git checkpoint — drives the Git tab and chat nudge
+    GitChanges { stat: String, checkpoint_hash: Option<String>, files_changed: usize },
+    /// An auto-commit was created successfully
+    GitAutoCommit { message: String },
+    /// A git operation failed (non-fatal, display only)
+    GitError(String),
 }
 
 // ── ConversationEntry — displayable items in history ─────────────────────────
@@ -123,6 +130,9 @@ pub enum ConversationEntry {
     /// Inline plan card — rendered in history, navigable in PlanReview mode.
     /// The actual step data is read from `AppState::plan_review` at render time.
     PlanCard,
+    /// Lightweight nudge shown in chat after a task that changed files.
+    /// Directs user to the Git tab (press 5) for the full diff.
+    GitNotification { files_changed: usize, checkpoint_hash: Option<String> },
 }
 
 // ── Mode — TUI modal state ────────────────────────────────────────────────────
@@ -137,6 +147,7 @@ pub enum Mode {
     SessionBrowser, // Ctrl+H session history browser
     PlanReview,     // Plan review/annotation overlay
     PlanRunning,    // Plan step currently executing
+    UndoConfirm,    // Waiting for y/N confirmation before git hard reset
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -160,6 +171,7 @@ pub enum Tab {
     Config,
     Stats,
     Plan,
+    Git,
 }
 
 // ── FilePicker state ──────────────────────────────────────────────────────────
@@ -377,6 +389,24 @@ pub struct AppState {
     pub hooks_config: crate::hooks::HookConfig,
     /// Whether hooks are disabled at profile level (for Config tab display)
     pub hooks_disabled_profile: bool,
+
+    // ── Git integration ───────────────────────────────────────────────────────
+    /// Whether the cwd is inside a git repo (controls Git tab visibility)
+    pub git_available: bool,
+    /// Commit hash of the last checkpoint created before a task
+    pub last_checkpoint_hash: Option<String>,
+    /// `git diff --stat` output for display in the Git tab
+    pub git_stat_content: String,
+    /// Full `git diff` content for the diff overlay
+    pub git_diff_content: String,
+    /// Scroll offset within the diff overlay
+    pub diff_overlay_scroll: usize,
+    /// Whether the full-diff overlay is currently open
+    pub diff_overlay_visible: bool,
+    /// Cached list of forge checkpoints (for /undo and Git tab)
+    pub git_checkpoints: Vec<crate::git::CheckpointInfo>,
+    /// Pending undo depth — set while waiting for UndoConfirm y/N
+    pub pending_undo_n: Option<usize>,
 }
 
 impl AppState {
@@ -426,6 +456,14 @@ impl AppState {
             sidebar_focused: false,
             sidebar_selected: 0,
             sidebar_entries: Vec::new(),
+            git_available: crate::git::is_git_repo(std::path::Path::new(".")),
+            last_checkpoint_hash: None,
+            git_stat_content: String::new(),
+            git_diff_content: String::new(),
+            diff_overlay_scroll: 0,
+            diff_overlay_visible: false,
+            git_checkpoints: Vec::new(),
+            pending_undo_n: None,
         }
     }
 
@@ -633,6 +671,24 @@ impl AppState {
                 let success = exit_code == 0;
                 self.push(ConversationEntry::HookOutput { event, output, success });
             }
+
+            // ── Git events ────────────────────────────────────────────────────
+            UiEvent::GitChanges { stat, checkpoint_hash, files_changed } => {
+                self.last_checkpoint_hash = checkpoint_hash.clone();
+                self.git_stat_content = stat;
+                // Refresh checkpoint list for the Git tab
+                if let Some(repo) = crate::git::GitRepo::open(std::path::Path::new(".")) {
+                    self.git_checkpoints = repo.list_checkpoints().unwrap_or_default();
+                }
+                // Lightweight nudge in chat — one line, directs to Git tab
+                self.push(ConversationEntry::GitNotification { files_changed, checkpoint_hash });
+            }
+            UiEvent::GitAutoCommit { message } => {
+                self.push(ConversationEntry::SystemMsg(format!("✓ committed: {message}")));
+            }
+            UiEvent::GitError(e) => {
+                self.push(ConversationEntry::SystemMsg(format!("⚠ git: {e}")));
+            }
         }
     }
 }
@@ -705,6 +761,8 @@ fn palette_commands() -> Vec<PaletteCommand> {
         PaletteCommand { key: "/stats",       label: "Open stats tab  (/stats reset to clear history)" },
         PaletteCommand { key: "/hooks",       label: "Toggle hooks on/off (or /hooks on|off)" },
         PaletteCommand { key: "/list-hooks",  label: "Show all configured hooks and their status" },
+        PaletteCommand { key: "/undo",        label: "Revert to last git checkpoint (/undo N for Nth)" },
+        PaletteCommand { key: "/diff",        label: "Open full diff overlay for last task changes" },
         PaletteCommand { key: "/clear",       label: "Clear conversation" },
         PaletteCommand { key: "/sessions",    label: "List recent sessions  (or Ctrl+H)" },
         PaletteCommand { key: "/resume",      label: "Resume a previous session" },
@@ -1024,6 +1082,71 @@ fn handle_key(
                 return Ok(true);
             }
         }
+    }
+
+    // ── Diff overlay key intercept ────────────────────────────────────────────
+    // When the full-diff overlay is open, intercept all scrolling and dismiss keys.
+    if state.diff_overlay_visible {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                state.diff_overlay_scroll = state.diff_overlay_scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                state.diff_overlay_scroll = state.diff_overlay_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                state.diff_overlay_scroll = state.diff_overlay_scroll.saturating_add(20);
+            }
+            KeyCode::PageUp => {
+                state.diff_overlay_scroll = state.diff_overlay_scroll.saturating_sub(20);
+            }
+            KeyCode::Char('d') | KeyCode::Esc => {
+                state.diff_overlay_visible = false;
+            }
+            _ => {}
+        }
+        return Ok(true);
+    }
+
+    // ── UndoConfirm mode ──────────────────────────────────────────────────────
+    // Waiting for y/N after /undo — intercept any keystroke.
+    if state.mode == Mode::UndoConfirm {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                state.mode = Mode::Normal;
+                if let Some(n) = state.pending_undo_n.take() {
+                    match crate::git::GitRepo::open(std::path::Path::new(".")) {
+                        Some(repo) => match repo.undo(n) {
+                            Ok(()) => {
+                                state.push(ConversationEntry::SystemMsg(
+                                    format!("✓ reverted to checkpoint {n}"),
+                                ));
+                                // Update git availability (tree changed)
+                                state.git_checkpoints =
+                                    repo.list_checkpoints().unwrap_or_default();
+                            }
+                            Err(e) => {
+                                state.push(ConversationEntry::SystemMsg(
+                                    format!("undo failed: {e}"),
+                                ));
+                            }
+                        },
+                        None => {
+                            state.push(ConversationEntry::SystemMsg(
+                                "not in a git repository".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {
+                // N, Esc, or anything else → cancel
+                state.mode = Mode::Normal;
+                state.pending_undo_n = None;
+                state.push(ConversationEntry::SystemMsg("undo cancelled".to_string()));
+            }
+        }
+        return Ok(true);
     }
 
     // ── SessionBrowser mode ───────────────────────────────────────────────────
@@ -1429,6 +1552,43 @@ fn handle_key(
             && state.plan_ever_active => {
             state.active_tab = Tab::Plan;
         }
+        (KeyModifiers::NONE, KeyCode::Char('5')) if state.input.is_empty()
+            && state.mode == Mode::Normal
+            && state.git_available => {
+            state.active_tab = Tab::Git;
+            // Refresh git tab content on switch
+            git_view::load_git_tab(state);
+        }
+        // 'u' in Git tab triggers /undo 1
+        (KeyModifiers::NONE, KeyCode::Char('u')) if state.input.is_empty()
+            && state.mode == Mode::Normal
+            && state.active_tab == Tab::Git => {
+            let _ = execute_command("/undo 1", state, resolved, file)?;
+        }
+        // 'd' opens the full-diff overlay (only in Normal mode with git available)
+        (KeyModifiers::NONE, KeyCode::Char('d')) if state.input.is_empty()
+            && state.mode == Mode::Normal
+            && state.git_available => {
+            if let Some(repo) = crate::git::GitRepo::open(std::path::Path::new(".")) {
+                let ref_pt = state.last_checkpoint_hash.as_deref().unwrap_or("HEAD");
+                match repo.diff_full_from(ref_pt) {
+                    Ok(diff) if !diff.trim().is_empty() => {
+                        state.git_diff_content = diff;
+                        state.diff_overlay_visible = true;
+                        state.diff_overlay_scroll = 0;
+                        state.active_tab = Tab::Git;
+                    }
+                    Ok(_) => {
+                        state.push(ConversationEntry::SystemMsg(
+                            "no changes since last checkpoint".to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        state.push(ConversationEntry::SystemMsg(format!("git diff: {e}")));
+                    }
+                }
+            }
+        }
         // Enter — submit input
         (KeyModifiers::NONE, KeyCode::Enter) => {
             if state.mode == Mode::AgentRunning || state.mode == Mode::PlanRunning {
@@ -1621,7 +1781,7 @@ fn execute_command(
         }
         "/help" | "/h" => {
             state.push(ConversationEntry::SystemMsg(
-                "Commands: /plan \"task\"  /quick \"task\"  /init  /cd  /profile  /profiles  /ts  /hooks [on|off]  /list-hooks  /clear  /sessions  /resume [n]  /rollback [n]  /new  /quit\nCtrl+H  session history  ·  Ctrl+P  command palette\nIn plan review: ↑↓ navigate  e annotate  d clear note  a approve & run  Esc cancel".to_string(),
+                "Commands: /plan \"task\"  /quick \"task\"  /init  /cd  /profile  /profiles  /ts  /hooks [on|off]  /list-hooks  /undo [n]  /diff  /clear  /sessions  /resume [n]  /rollback [n]  /new  /quit\nCtrl+H  session history  ·  Ctrl+P  command palette  ·  d  open diff overlay\nIn plan review: ↑↓ navigate  e annotate  d clear note  a approve & run  Esc cancel\nIn git repo: press 5 for Git tab · /undo to revert · /diff to review changes".to_string(),
             ));
         }
         "/stats" => {
@@ -1671,6 +1831,73 @@ fn execute_command(
             state.push(ConversationEntry::SystemMsg(
                 format!("Hooks — {status}\n{detail}\nEdit ~/.config/forge/config.toml to change. /hooks on|off to toggle."),
             ));
+        }
+        "/undo" => {
+            let n: usize = parts
+                .get(1)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(1)
+                .max(1);
+            match crate::git::GitRepo::open(std::path::Path::new(".")) {
+                None => {
+                    state.push(ConversationEntry::SystemMsg(
+                        "not in a git repository".to_string(),
+                    ));
+                }
+                Some(repo) => match repo.list_checkpoints() {
+                    Ok(checkpoints) if checkpoints.is_empty() => {
+                        state.push(ConversationEntry::SystemMsg(
+                            "no forge checkpoints found — run a task first".to_string(),
+                        ));
+                    }
+                    Ok(checkpoints) => {
+                        let idx = (n - 1).min(checkpoints.len() - 1);
+                        let cp = &checkpoints[idx];
+                        state.push(ConversationEntry::SystemMsg(format!(
+                            "Revert to checkpoint {}? \"{}\"  [y/N]",
+                            cp.short_hash, cp.message
+                        )));
+                        state.pending_undo_n = Some(n);
+                        state.mode = Mode::UndoConfirm;
+                    }
+                    Err(e) => {
+                        state.push(ConversationEntry::SystemMsg(format!("git error: {e}")));
+                    }
+                },
+            }
+        }
+        "/diff" => {
+            match crate::git::GitRepo::open(std::path::Path::new(".")) {
+                None => {
+                    state.push(ConversationEntry::SystemMsg(
+                        "not in a git repository".to_string(),
+                    ));
+                }
+                Some(repo) => {
+                    let ref_pt = state
+                        .last_checkpoint_hash
+                        .as_deref()
+                        .unwrap_or("HEAD");
+                    match repo.diff_full_from(ref_pt) {
+                        Ok(diff) if !diff.trim().is_empty() => {
+                            state.git_diff_content = diff;
+                            state.diff_overlay_visible = true;
+                            state.diff_overlay_scroll = 0;
+                            state.active_tab = Tab::Git;
+                        }
+                        Ok(_) => {
+                            state.push(ConversationEntry::SystemMsg(
+                                "no changes since last checkpoint".to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            state.push(ConversationEntry::SystemMsg(
+                                format!("git diff: {e}"),
+                            ));
+                        }
+                    }
+                }
+            }
         }
         "/clear" => {
             state.entries.clear();
@@ -1924,6 +2151,9 @@ fn launch_agent(
         mcp: state.mcp.clone(),
         hooks: std::sync::Arc::new(resolved_hooks),
         hooks_enabled: state.hooks_enabled,
+        auto_commit: resolved.auto_commit,
+        auto_commit_prefix: resolved.auto_commit_prefix.clone(),
+        git_context: resolved.git_context,
     };
 
     let attached: Vec<(String, String)> = state.attached_files
@@ -2002,6 +2232,9 @@ fn launch_quick(
         mcp: state.mcp.clone(),
         hooks: std::sync::Arc::new(crate::hooks::HookConfig::default()),
         hooks_enabled: false,
+        auto_commit: false,
+        auto_commit_prefix: String::new(),
+        git_context: false,
     };
 
     state.collecting_response.clear();
@@ -2110,6 +2343,9 @@ fn launch_plan(
         mcp: state.mcp.clone(),
         hooks: std::sync::Arc::new(resolved_hooks),
         hooks_enabled: state.hooks_enabled,
+        auto_commit: resolved.auto_commit,
+        auto_commit_prefix: resolved.auto_commit_prefix.clone(),
+        git_context: resolved.git_context,
     };
 
     tokio::spawn(async move {
@@ -2117,9 +2353,42 @@ fn launch_plan(
         // Accumulates (description, summary) for each completed step
         let mut prior_summaries: Vec<(String, String)> = Vec::new();
 
+        // ── Plan-level git checkpoint ─────────────────────────────────────────
+        // Capture the state before any step runs — used for cumulative diff.
+        let plan_checkpoint: Option<String> = if agent_config.git_context {
+            std::env::current_dir().ok().and_then(|cwd| {
+                crate::git::GitRepo::open(&cwd).and_then(|repo| {
+                    let summary = format!(
+                        "plan: {}",
+                        active_plan.task.chars().take(50).collect::<String>()
+                    );
+                    repo.checkpoint(&summary).ok()
+                })
+            })
+        } else {
+            None
+        };
+
         for step_idx in 0..total {
             let step_snapshot = active_plan.steps[step_idx].clone();
             let desc = step_snapshot.description.clone();
+
+            // ── Per-step git checkpoint ───────────────────────────────────────
+            let step_checkpoint: Option<String> = if agent_config.git_context {
+                std::env::current_dir().ok().and_then(|cwd| {
+                    crate::git::GitRepo::open(&cwd).and_then(|repo| {
+                        let summary = format!(
+                            "plan step {}/{}: {}",
+                            step_idx + 1,
+                            total,
+                            desc.chars().take(40).collect::<String>()
+                        );
+                        repo.checkpoint(&summary).ok()
+                    })
+                })
+            } else {
+                None
+            };
 
             let _ = ui_tx.send(UiEvent::PlanStepStart {
                 index: step_idx,
@@ -2165,6 +2434,25 @@ fn launch_plan(
                             });
                         }
                     }
+                    // ── Per-step diff notification ────────────────────────────
+                    if agent_config.git_context {
+                        if let Some(cwd) = std::env::current_dir().ok() {
+                            if let Some(repo) = crate::git::GitRepo::open(&cwd) {
+                                let ref_pt = step_checkpoint.as_deref().unwrap_or("HEAD");
+                                if let Ok(stat) = repo.diff_stat_from(ref_pt) {
+                                    if !stat.trim().is_empty() {
+                                        let files_changed =
+                                            stat.lines().filter(|l| l.contains('|')).count();
+                                        let _ = ui_tx.send(UiEvent::GitChanges {
+                                            stat: stat.trim().to_string(),
+                                            checkpoint_hash: step_checkpoint.clone(),
+                                            files_changed,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     active_plan.steps[step_idx].status = StepStatus::Fail;
@@ -2187,6 +2475,44 @@ fn launch_plan(
         // All steps passed
         active_plan.status = crate::plan::PlanStatus::Complete;
         let _ = plan::save_plan(&active_plan);
+
+        // ── Cumulative diff + auto-commit ─────────────────────────────────────
+        if agent_config.git_context {
+            if let Some(cwd) = std::env::current_dir().ok() {
+                if let Some(repo) = crate::git::GitRepo::open(&cwd) {
+                    let ref_pt = plan_checkpoint.as_deref().unwrap_or("HEAD");
+                    if let Ok(stat) = repo.diff_stat_from(ref_pt) {
+                        if !stat.trim().is_empty() {
+                            let files_changed =
+                                stat.lines().filter(|l| l.contains('|')).count();
+                            let cumulative_stat =
+                                format!("Plan complete — cumulative changes:\n{}", stat.trim());
+                            let _ = ui_tx.send(UiEvent::GitChanges {
+                                stat: cumulative_stat,
+                                checkpoint_hash: plan_checkpoint.clone(),
+                                files_changed,
+                            });
+                        }
+                    }
+                    if agent_config.auto_commit {
+                        let summary: String =
+                            active_plan.task.chars().take(72).collect();
+                        let msg =
+                            format!("{}{}", agent_config.auto_commit_prefix, summary);
+                        match repo.auto_commit(&msg) {
+                            Ok(()) => {
+                                let _ = ui_tx.send(UiEvent::GitAutoCommit { message: msg });
+                            }
+                            Err(e) => {
+                                let _ = ui_tx
+                                    .send(UiEvent::GitError(format!("auto-commit: {e}")));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let _ = ui_tx.send(UiEvent::PlanComplete { total });
     });
 }

@@ -3,6 +3,7 @@ mod budget;
 mod cache;
 mod client;
 mod config;
+mod git;
 mod history;
 mod hooks;
 mod index;
@@ -150,6 +151,9 @@ async fn run_single_shot(
         mcp,
         hooks: std::sync::Arc::new(hook_config),
         hooks_enabled: !resolved.hooks_disabled,
+        auto_commit: false,
+        auto_commit_prefix: String::new(),
+        git_context: false,
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<tui::UiEvent>();
@@ -216,13 +220,16 @@ fn print_event_plain(ev: &tui::UiEvent) {
                 println!("  ⚙ {event} {mark}: {}", output.lines().next().unwrap_or(""));
             }
         }
-        // Plan lifecycle events only occur in TUI mode — ignore here
+        // Plan and Git lifecycle events only occur in TUI mode — ignore here
         UiEvent::PlanReady(_)
         | UiEvent::PlanGenerateFailed(_)
         | UiEvent::PlanStepStart { .. }
         | UiEvent::PlanStepDone { .. }
         | UiEvent::PlanComplete { .. }
-        | UiEvent::PlanFailed { .. } => {}
+        | UiEvent::PlanFailed { .. }
+        | UiEvent::GitChanges { .. }
+        | UiEvent::GitAutoCommit { .. }
+        | UiEvent::GitError(_) => {}
     }
 }
 
@@ -254,6 +261,9 @@ async fn run_single_shot_quick(
         mcp,
         hooks: std::sync::Arc::new(hooks::HookConfig::default()),
         hooks_enabled: false,
+        auto_commit: false,
+        auto_commit_prefix: String::new(),
+        git_context: false,
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<tui::UiEvent>();

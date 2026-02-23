@@ -48,10 +48,28 @@ pub struct Profile {
     /// Set to true to disable all hooks for this profile, including auto-detected ones.
     #[serde(default)]
     pub hooks_disabled: bool,
+    /// Auto-commit all changes after each successful task. Default: false.
+    #[serde(default)]
+    pub auto_commit: bool,
+    /// Prefix for auto-commit messages. Default: "forge: ".
+    #[serde(default = "default_auto_commit_prefix")]
+    pub auto_commit_prefix: String,
+    /// Inject `git status` into system prompt and create checkpoints before tasks.
+    /// Set to false to disable all git integration. Default: true.
+    #[serde(default = "default_git_context")]
+    pub git_context: bool,
 }
 
 fn default_context_tokens() -> u32 {
     32_768
+}
+
+fn default_auto_commit_prefix() -> String {
+    "forge: ".to_string()
+}
+
+fn default_git_context() -> bool {
+    true
 }
 
 impl Default for Profile {
@@ -66,6 +84,9 @@ impl Default for Profile {
             cost_per_mtok_input: None,
             hooks: crate::hooks::HookConfig::default(),
             hooks_disabled: false,
+            auto_commit: false,
+            auto_commit_prefix: default_auto_commit_prefix(),
+            git_context: default_git_context(),
         }
     }
 }
@@ -139,6 +160,12 @@ pub struct ResolvedConfig {
     pub hooks: crate::hooks::HookConfig,
     /// When true, all hooks are suppressed including auto-detected ones
     pub hooks_disabled: bool,
+    /// Auto-commit all changes after each successful task
+    pub auto_commit: bool,
+    /// Prefix for auto-commit messages
+    pub auto_commit_prefix: String,
+    /// Enable git integration (checkpoints, status injection, post-task diffs)
+    pub git_context: bool,
 }
 
 impl ResolvedConfig {
@@ -177,6 +204,9 @@ impl ResolvedConfig {
             cost_per_mtok_input: base.cost_per_mtok_input,
             hooks: base.hooks,
             hooks_disabled: base.hooks_disabled,
+            auto_commit: base.auto_commit,
+            auto_commit_prefix: base.auto_commit_prefix,
+            git_context: base.git_context,
         }
     }
 }
@@ -253,6 +283,11 @@ context_tokens = 32768
 # model          = "qwen/qwen-2.5-coder-32b-instruct"
 # context_tokens = 32768
 # api_key        = "sk-or-..."
+
+# ── Git integration (optional, per-profile) ──────────────────────────────────
+# git_context = true           # inject git status into system prompt; enables checkpoints/diffs
+# auto_commit = false          # auto-commit all changes after each successful task
+# auto_commit_prefix = "forge: "
 
 # ── MCP servers (optional, per-profile) ──────────────────────────────────────
 # Add MCP servers to any profile to give the model extra tools.

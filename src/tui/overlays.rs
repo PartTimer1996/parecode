@@ -344,3 +344,82 @@ pub fn draw_session_browser(f: &mut Frame, browser: &SessionBrowserState, area: 
     ]);
     f.render_widget(Paragraph::new(hint), hint_area);
 }
+
+// ── Full diff overlay ──────────────────────────────────────────────────────────
+
+/// Full-screen overlay showing the complete `git diff` output with syntax colouring.
+/// Opened by pressing `d` or `/diff`. Scrollable with j/k. Dismissed with d/Esc.
+pub fn draw_diff_overlay(f: &mut Frame, state: &AppState, area: Rect) {
+    if !state.diff_overlay_visible || state.git_diff_content.is_empty() {
+        return;
+    }
+
+    // 2-char inset from screen edges
+    let overlay_area = Rect {
+        x: area.x + 2,
+        y: area.y + 1,
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(2),
+    };
+
+    f.render_widget(Clear, overlay_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            " git diff  (d/Esc close · j/k scroll · PgDn/PgUp fast) ",
+            Style::default()
+                .fg(Color::Rgb(100, 180, 255))
+                .add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(Color::Rgb(50, 80, 140)))
+        .style(Style::default().bg(Color::Rgb(8, 8, 14)));
+
+    let inner = block.inner(overlay_area);
+    f.render_widget(block, overlay_area);
+
+    // Parse lines and apply diff colouring by line prefix
+    let all_lines: Vec<Line> = state
+        .git_diff_content
+        .lines()
+        .map(|line| {
+            let style = if line.starts_with("+++") || line.starts_with("---") {
+                // File header lines — purple bold
+                Style::default()
+                    .fg(Color::Rgb(180, 140, 255))
+                    .add_modifier(Modifier::BOLD)
+            } else if line.starts_with('+') {
+                // Added lines — green
+                Style::default().fg(Color::Rgb(80, 200, 80))
+            } else if line.starts_with('-') {
+                // Removed lines — red
+                Style::default().fg(Color::Rgb(200, 80, 80))
+            } else if line.starts_with("@@") {
+                // Hunk header — cyan
+                Style::default().fg(Color::Rgb(80, 160, 255))
+            } else if line.starts_with("diff ") || line.starts_with("index ") {
+                // Diff meta — purple
+                Style::default().fg(Color::Rgb(140, 100, 200))
+            } else {
+                // Context lines — dimmed
+                Style::default().fg(Color::Rgb(140, 140, 160))
+            };
+            Line::from(Span::styled(line.to_string(), style))
+        })
+        .collect();
+
+    let total_lines = all_lines.len();
+    let visible_height = inner.height as usize;
+
+    // Clamp scroll so we don't scroll past the end
+    let scroll = state
+        .diff_overlay_scroll
+        .min(total_lines.saturating_sub(visible_height));
+
+    let visible: Vec<Line> = all_lines.into_iter().skip(scroll).collect();
+
+    f.render_widget(
+        Paragraph::new(visible).style(Style::default().bg(Color::Rgb(8, 8, 14))),
+        inner,
+    );
+}

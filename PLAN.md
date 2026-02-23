@@ -736,7 +736,7 @@ auto_commit_prefix = "forge: "  # prefix for auto-commit messages
 
 ---
 
-## Phase 6n — Diff/Patch Edit Mode
+## Phase 6n — Diff/Patch Edit Mode - Before distrobution - should actually be pretty easy - just an additional tool
 
 **More token-efficient editing for multi-hunk changes.** The current `edit_file` tool uses search-and-replace (`old_str` → `new_str`), which works well for single edits but becomes expensive for multi-hunk changes — the model must send the full old content and full new content for each hunk. A unified-diff mode sends only the changes, which aligns directly with Forge's efficiency thesis.
 
@@ -798,7 +798,7 @@ auto_commit_prefix = "forge: "  # prefix for auto-commit messages
 
 ---
 
-## Phase 6o — Multi-File Awareness via Git
+## Phase 6o — Multi-File Awareness via Git - We can do this last - cargo and typescript compilars will work quite well without this for now
 
 **Leverages Phase 6m's git integration to detect and handle cross-file breakage.** Currently, when a model edits `auth.rs` and breaks `handler.rs`, the only detection mechanism is the `cargo check` hook — which only works for languages with fast type-checkers. This phase makes cross-file impact visible to the model proactively.
 
@@ -976,7 +976,7 @@ A read/edit view of the current configuration — eliminates the need to leave F
 - Conventions preview — first 10 lines of loaded conventions file
 - Profile list on the left if multiple profiles exist — highlight active, arrow keys to browse
 
-### 6p-v. Stats tab (telemetry dashboard) - THIS NEEDS IMPLEMENTED PROPERLY
+### 6p-v. Stats tab (telemetry dashboard) - Generally not bad - reactivity to current session could be better
 
 The existing stats bar is great. This tab expands it into a full dashboard — the kind of thing you screenshot and share.
 
