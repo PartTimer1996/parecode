@@ -422,3 +422,72 @@ pub fn draw_diff_overlay(f: &mut Frame, state: &AppState, area: Rect) {
         inner,
     );
 }
+
+// ── Profile picker ─────────────────────────────────────────────────────────────
+
+pub fn draw_profile_picker(f: &mut Frame, state: &AppState, area: Rect) {
+    let entries = &state.profile_picker_entries;
+    if entries.is_empty() {
+        return;
+    }
+
+    let count = entries.len() as u16;
+    let height = (count + 2).min(16).min(area.height.saturating_sub(6));
+    let width = 54u16.min(area.width.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup_area = Rect { x, y, width, height };
+
+    f.render_widget(Clear, popup_area);
+
+    let sel = state.profile_picker_selected;
+    let items: Vec<ListItem<'static>> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, (name, model))| {
+            let active = *name == state.profile;
+            let marker = if active { " ← " } else { "   " };
+            let (name_style, model_style) = if i == sel {
+                (
+                    Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                )
+            } else if active {
+                (
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Rgb(100, 180, 220)),
+                )
+            } else {
+                (
+                    Style::default().fg(Color::White),
+                    Style::default().fg(Color::DarkGray),
+                )
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("  {name:<16}"), name_style),
+                Span::styled(model.to_string(), model_style),
+                Span::styled(marker.to_string(), name_style),
+            ]))
+        })
+        .collect();
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Switch Profile  ↑↓ navigate  Enter select  Esc cancel ",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Scroll to keep selected visible
+    let visible = inner.height as usize;
+    let skip = if sel >= visible { sel - visible + 1 } else { 0 };
+
+    let visible_items: Vec<ListItem<'static>> =
+        items.into_iter().skip(skip).take(visible).collect();
+    let list = List::new(visible_items);
+    f.render_widget(list, inner);
+}

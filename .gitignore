@@ -1,5 +1,5 @@
 /target
-.forge/
+.parecode/
 *.env
 .env.*
 *.txt

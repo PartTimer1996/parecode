@@ -107,6 +107,8 @@ pub enum UiEvent {
     GitAutoCommit { message: String },
     /// A git operation failed (non-fatal, display only)
     GitError(String),
+    /// System message from background tasks (e.g. update check)
+    SystemMsg(String),
 }
 
 // ── ConversationEntry — displayable items in history ─────────────────────────
@@ -148,6 +150,7 @@ pub enum Mode {
     PlanReview,     // Plan review/annotation overlay
     PlanRunning,    // Plan step currently executing
     UndoPicker,     // Interactive checkpoint picker in Git tab (↑↓ select, Enter confirm, Esc cancel)
+    ProfilePicker,  // Interactive profile picker overlay in Config tab
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -173,6 +176,8 @@ pub enum Tab {
     Plan,
     Git,
 }
+
+
 
 // ── FilePicker state ──────────────────────────────────────────────────────────
 
@@ -389,6 +394,17 @@ pub struct AppState {
     pub hooks_config: crate::hooks::HookConfig,
     /// Whether hooks are disabled at profile level (for Config tab display)
     pub hooks_disabled_profile: bool,
+    /// MCP server names configured for this profile (for Config tab display)
+    pub mcp_server_names: Vec<String>,
+
+    // ── Config tab editable state ─────────────────────────────────────────────
+    /// Whether auto-commit is enabled (mirrors resolved config, for Config tab display)
+    pub auto_commit: bool,
+    /// Auto-commit prefix string
+    #[allow(dead_code)]
+    pub auto_commit_prefix: String,
+    /// Whether git context/checkpoints are enabled (mirrors resolved config)
+    pub git_context_enabled: bool,
 
     // ── Git integration ───────────────────────────────────────────────────────
     /// Whether the cwd is inside a git repo (controls Git tab visibility)
@@ -407,6 +423,14 @@ pub struct AppState {
     pub git_checkpoints: Vec<crate::git::CheckpointInfo>,
     /// Selected index in the UndoPicker list
     pub undo_picker_selected: usize,
+    /// Set to true to shell out to $EDITOR on config.toml; event loop handles it
+    pub wants_editor: bool,
+    /// Scroll offset for the Config tab content
+    pub config_scroll: usize,
+    /// Selected index in the profile picker overlay
+    pub profile_picker_selected: usize,
+    /// Sorted profile names for the picker (populated when picker opens)
+    pub profile_picker_entries: Vec<(String, String)>,  // (name, model)
 }
 
 impl AppState {
@@ -452,6 +476,10 @@ impl AppState {
             endpoint: resolved.endpoint.clone(),
             hooks_config: resolved.hooks.clone(),
             hooks_disabled_profile: resolved.hooks_disabled,
+            mcp_server_names: resolved.mcp_servers.iter().map(|s| s.name.clone()).collect(),
+            auto_commit: resolved.auto_commit,
+            auto_commit_prefix: resolved.auto_commit_prefix.clone(),
+            git_context_enabled: resolved.git_context,
             sidebar_visible: false, // set to true after terminal size check in event_loop
             sidebar_focused: false,
             sidebar_selected: 0,
@@ -464,6 +492,10 @@ impl AppState {
             diff_overlay_visible: false,
             git_checkpoints: Vec::new(),
             undo_picker_selected: 0,
+            wants_editor: false,
+            config_scroll: 0,
+            profile_picker_selected: 0,
+            profile_picker_entries: Vec::new(),
         }
     }
 
@@ -688,6 +720,9 @@ impl AppState {
             }
             UiEvent::GitError(e) => {
                 self.push(ConversationEntry::SystemMsg(format!("⚠ git: {e}")));
+            }
+            UiEvent::SystemMsg(msg) => {
+                self.push(ConversationEntry::SystemMsg(msg));
             }
         }
     }
@@ -938,6 +973,43 @@ async fn event_loop(
         }
     }
 
+    // ── /init auto-prompt for new projects ──────────────────────────────────
+    // If this project directory doesn't have .parecode/conventions.md, offer to create it.
+    {
+        let cwd_path = std::path::Path::new(&cwd);
+        let conventions = cwd_path.join(".parecode/conventions.md");
+        if !conventions.exists() {
+            // Check if this looks like a project directory
+            let markers = ["Cargo.toml", "package.json", "pyproject.toml", "go.mod",
+                           "Makefile", "CMakeLists.txt"];
+            if markers.iter().any(|m| cwd_path.join(m).exists()) {
+                let content = crate::init::run_project_init(cwd_path);
+                match crate::init::save_conventions(cwd_path, &content) {
+                    Ok(path) => {
+                        state.push(ConversationEntry::SystemMsg(
+                            format!("✓ project conventions detected → {}", path.display()),
+                        ));
+                    }
+                    Err(e) => {
+                        state.push(ConversationEntry::SystemMsg(
+                            format!("⚠ could not write conventions: {e}"),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Version check (background, non-blocking) ─────────────────────────────
+    let update_tx = ui_tx.clone();
+    tokio::spawn(async move {
+        if let Some((_current, latest)) = crate::setup::check_for_update().await {
+            let _ = update_tx.send(UiEvent::SystemMsg(
+                format!("update available: v{latest} — see https://github.com/PartTimer1996/parecode/releases"),
+            ));
+        }
+    });
+
     let mut crossterm_events = EventStream::new();
     let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(120));
 
@@ -980,6 +1052,75 @@ async fn event_loop(
                     Event::Resize(_, _) => {}
                     _ => {}
                 }
+
+                // Shell out to $EDITOR if requested by Config tab
+                if state.wants_editor {
+                    state.wants_editor = false;
+                    let config_file_path = crate::config::config_path();
+                    let editor = std::env::var("EDITOR")
+                        .or_else(|_| std::env::var("VISUAL"))
+                        .unwrap_or_else(|_| "vi".to_string());
+
+                    // Suspend TUI
+                    disable_raw_mode()?;
+                    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+                    // Run editor
+                    let status = std::process::Command::new(&editor)
+                        .arg(&config_file_path)
+                        .status();
+
+                    // Resume TUI
+                    enable_raw_mode()?;
+                    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                    terminal.clear()?;
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            // Reload config from disk
+                            match crate::config::ConfigFile::load() {
+                                Ok(new_file) => {
+                                    let profile_name = state.profile.clone();
+                                    resolved = crate::config::ResolvedConfig::resolve(
+                                        &new_file, Some(&profile_name), None, None, None,
+                                    );
+                                    file = new_file;
+                                    // Sync display state from re-resolved config
+                                    state.profile = resolved.profile_name.clone();
+                                    state.model = resolved.model.clone();
+                                    state.context_tokens = resolved.context_tokens;
+                                    state.endpoint = resolved.endpoint.clone();
+                                    state.cost_per_mtok_input = resolved.cost_per_mtok_input;
+                                    state.hooks_config = resolved.hooks.clone();
+                                    state.hooks_disabled_profile = resolved.hooks_disabled;
+                                    state.mcp_server_names = resolved.mcp_servers.iter().map(|s| s.name.clone()).collect();
+                                    state.auto_commit = resolved.auto_commit;
+                                    state.auto_commit_prefix = resolved.auto_commit_prefix.clone();
+                                    state.git_context_enabled = resolved.git_context;
+                                    state.push(ConversationEntry::SystemMsg(
+                                        "✓ config reloaded".to_string(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    state.push(ConversationEntry::SystemMsg(
+                                        format!("✗ failed to reload config: {e}"),
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            state.push(ConversationEntry::SystemMsg(
+                                "editor exited with error — config not reloaded".to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            state.push(ConversationEntry::SystemMsg(
+                                format!("✗ failed to launch editor '{editor}': {e}"),
+                            ));
+                        }
+                    }
+                }
+
                 terminal.draw(|f| render::draw(f, &state))?;
             }
         }
@@ -1159,6 +1300,121 @@ fn handle_key(
             _ => {}
         }
         return Ok(true);
+    }
+
+    // ── Config tab shortcuts ──────────────────────────────────────────────────
+    if state.active_tab == Tab::Config && state.mode != Mode::AgentRunning && state.mode != Mode::PlanRunning {
+        if state.mode == Mode::ProfilePicker {
+            match key.code {
+                KeyCode::Esc => {
+                    state.mode = Mode::Normal;
+                    return Ok(true);
+                }
+                KeyCode::Up => {
+                    if state.profile_picker_selected > 0 {
+                        state.profile_picker_selected -= 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Down => {
+                    if !state.profile_picker_entries.is_empty()
+                        && state.profile_picker_selected + 1 < state.profile_picker_entries.len()
+                    {
+                        state.profile_picker_selected += 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Enter => {
+                    if let Some((name, _)) = state
+                        .profile_picker_entries
+                        .get(state.profile_picker_selected)
+                        .cloned()
+                    {
+                        // Reload config and switch profile
+                        *file = crate::config::ConfigFile::load()?;
+                        if file.profiles.contains_key(&name) {
+                            *resolved = crate::config::ResolvedConfig::resolve(
+                                file,
+                                Some(&name),
+                                None,
+                                None,
+                                None,
+                            );
+                            state.profile = resolved.profile_name.clone();
+                            state.model = resolved.model.clone();
+                            state.context_tokens = resolved.context_tokens;
+                            state.cost_per_mtok_input = resolved.cost_per_mtok_input;
+                            state.endpoint = resolved.endpoint.clone();
+                            state.hooks_config = resolved.hooks.clone();
+                            state.hooks_disabled_profile = resolved.hooks_disabled;
+                            state.mcp_server_names = resolved
+                                .mcp_servers
+                                .iter()
+                                .map(|s| s.name.clone())
+                                .collect();
+                            state.auto_commit = resolved.auto_commit;
+                            state.auto_commit_prefix = resolved.auto_commit_prefix.clone();
+                            state.git_context_enabled = resolved.git_context;
+                            state.push(ConversationEntry::SystemMsg(format!(
+                                "✓ switched to {} · {} · {}k ctx",
+                                resolved.profile_name,
+                                resolved.model,
+                                resolved.context_tokens / 1000
+                            )));
+                        }
+                    }
+                    state.mode = Mode::Normal;
+                    return Ok(true);
+                }
+                _ => return Ok(true),
+            }
+        }
+
+        match key.code {
+            KeyCode::Char('e') => {
+                // Signal the event loop to shell out to $EDITOR
+                state.wants_editor = true;
+                return Ok(true);
+            }
+            KeyCode::Char('h') => {
+                // Toggle hooks on/off (mirrors /hooks toggle)
+                state.hooks_enabled = !state.hooks_enabled;
+                let status = if state.hooks_enabled { "on" } else { "off" };
+                state.push(ConversationEntry::SystemMsg(
+                    format!("⚙ hooks {status}"),
+                ));
+                return Ok(true);
+            }
+            KeyCode::Char('p') => {
+                // Open profile picker overlay
+                let mut entries: Vec<(String, String)> = file
+                    .profiles
+                    .iter()
+                    .map(|(name, p)| (name.clone(), p.model.clone()))
+                    .collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                state.profile_picker_entries = entries;
+                state.profile_picker_selected = state
+                    .profile_picker_entries
+                    .iter()
+                    .position(|(n, _)| *n == state.profile)
+                    .unwrap_or(0);
+                state.mode = Mode::ProfilePicker;
+                return Ok(true);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if state.config_scroll > 0 {
+                    state.config_scroll -= 1;
+                }
+                return Ok(true);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.config_scroll += 1;
+                return Ok(true);
+            }
+            // Don't intercept Esc (go to Chat), digits (tab switch), etc. — fall through
+            _ => {}
+        }
     }
 
     // ── SessionBrowser mode ───────────────────────────────────────────────────
@@ -1775,6 +2031,10 @@ fn handle_key(
 
     Ok(true)
 }
+
+// ── Config tab inline edit apply ──────────────────────────────────────────────
+
+/// Apply a config field edit: update AppState, ResolvedConfig, ConfigFile, and save to disk.
 
 // ── Slash command handler ─────────────────────────────────────────────────────
 

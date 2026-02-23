@@ -11,6 +11,7 @@ mod init;
 mod mcp;
 mod plan;
 mod sessions;
+mod setup;
 mod telemetry;
 mod tools;
 mod tui;
@@ -81,6 +82,32 @@ async fn main() -> Result<()> {
         println!("Config written to: {}", path.display());
         println!("Edit it, then run: parecode");
         return Ok(());
+    }
+
+    // ── First-run wizard ──────────────────────────────────────────────────────
+    // If no config file exists and no CLI/env overrides fully configure us,
+    // run the interactive setup wizard before loading config.
+    if !config::config_path().exists()
+        && args.endpoint.is_none()
+        && args.model.is_none()
+    {
+        match setup::run_setup_wizard().await {
+            Ok(true) => {
+                // Wizard wrote a config — show completion hint once
+                if let Some(hint) = setup::shell_completion_hint() {
+                    println!();
+                    println!("{hint}");
+                }
+                println!();
+            }
+            Ok(false) => {
+                // User skipped — they can use env vars or --init later
+            }
+            Err(e) => {
+                eprintln!("  Setup wizard error: {e}");
+                eprintln!("  Falling back to defaults. Run `parecode --init` to configure.");
+            }
+        }
     }
 
     let file = ConfigFile::load()?;
@@ -230,6 +257,9 @@ fn print_event_plain(ev: &tui::UiEvent) {
         | UiEvent::GitChanges { .. }
         | UiEvent::GitAutoCommit { .. }
         | UiEvent::GitError(_) => {}
+        UiEvent::SystemMsg(msg) => {
+            println!("  {msg}");
+        }
     }
 }
 

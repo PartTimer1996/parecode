@@ -138,6 +138,7 @@ impl ConfigFile {
         let key = name.unwrap_or(&self.default_profile);
         self.profiles.get(key)
     }
+
 }
 
 // ── Resolved runtime config (after merging file + CLI overrides) ──────────────

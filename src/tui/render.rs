@@ -170,6 +170,9 @@ pub fn draw(f: &mut Frame, state: &AppState) {
             super::overlays::draw_session_browser(f, browser, area);
         }
     }
+    if state.mode == Mode::ProfilePicker {
+        super::overlays::draw_profile_picker(f, state, area);
+    }
     // Plan review is now inline in history (PlanCard entry) — no overlay needed
 
     if state.diff_overlay_visible {
@@ -415,6 +418,7 @@ fn draw_input(f: &mut Frame, state: &AppState, area: Rect) {
         Mode::PlanReview     => (Color::Rgb(200, 140, 0),  Color::Rgb(220, 160, 0),  "◇"),
         Mode::PlanRunning    => (Color::Rgb(40, 40, 60),   Color::DarkGray,          "▶"),
         Mode::UndoPicker     => (Color::Rgb(200, 80, 40),  Color::Rgb(220, 100, 60), "⚠"),
+        Mode::ProfilePicker  => (Color::Cyan,              Color::Cyan,               "▸"),
         Mode::Normal         => (Color::Rgb(60, 60, 80),  Color::Cyan,               "❯"),
     };
 
@@ -479,7 +483,7 @@ fn draw_input(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(paragraph, area);
 
     // Position cursor at the actual edit cursor, not end of string
-    if matches!(state.mode, Mode::Normal | Mode::Palette | Mode::FilePicker | Mode::SlashComplete | Mode::PlanReview) {
+    if matches!(state.mode, Mode::Normal | Mode::Palette | Mode::FilePicker | Mode::SlashComplete | Mode::PlanReview | Mode::ProfilePicker) {
         use unicode_width::UnicodeWidthStr;
         // prompt is "  ❯ " — ❯ is 1 wide, total visible width is 4 cols
         let prompt_width: u16 = 4;

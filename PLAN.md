@@ -694,7 +694,7 @@ Simple for / autocomplete show options, similar to @, simple yet massive for UX
 
 ### ✅ 6m-ii. Post-task diff display
 - After every completed agent run, `⎇ N files changed — press 5 to review, d to diff, /undo to revert` in chat
-- `d` key from any tab opens full-screen syntax-coloured diff overlay (green/red/cyan, j/k scroll)
+- `d` key from any tab opens full-screen syntax-coloured diff overlay (green/red/cyan, scroll)
 - `/diff` command switches to Git tab + opens diff overlay
 - **Bug fixed**: diffs compare checkpoint against working tree (`git diff <hash>`), not commit-to-commit (`git diff <hash> HEAD`)
 
@@ -883,7 +883,7 @@ A collapsible sidebar on the left showing session history — like the sidebar i
 **Features:**
 - Syntax-highlighted diff — added lines green, removed lines red, context lines dimmed
 - File headers as collapsible sections (Enter to expand/collapse a file's hunks)
-- Scrollable — `j/k` or `↑↓` to navigate, `Page Up/Down` for fast scroll
+- Scrollable —  `↑↓` to navigate, `Page Up/Down` for fast scroll
 - Bottom action bar: `u` undo to checkpoint, `c` commit changes, `s` stash
 - Checkpoint history list (left side or top selector): navigate between checkpoints
 - `git diff --stat` summary at the top
