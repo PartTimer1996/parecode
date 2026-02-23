@@ -101,14 +101,16 @@ impl GitRepo {
         Ok(())
     }
 
-    /// Returns `git diff <ref_hash> HEAD --stat` — summary of what changed since checkpoint.
+    /// Returns `git diff <ref_hash> --stat` — summary of what changed since checkpoint,
+    /// including uncommitted working-tree changes.
     pub fn diff_stat_from(&self, ref_hash: &str) -> Result<String> {
-        self.run_git(&["diff", ref_hash, "HEAD", "--stat"])
+        self.run_git(&["diff", ref_hash, "--stat"])
     }
 
-    /// Returns `git diff <ref_hash> HEAD` — full unified diff since checkpoint.
+    /// Returns `git diff <ref_hash>` — full unified diff since checkpoint,
+    /// including uncommitted working-tree changes.
     pub fn diff_full_from(&self, ref_hash: &str) -> Result<String> {
-        self.run_git(&["diff", ref_hash, "HEAD"])
+        self.run_git(&["diff", ref_hash])
     }
 
     /// Returns `git diff HEAD --stat` — summary of uncommitted changes.

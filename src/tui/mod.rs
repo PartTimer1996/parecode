@@ -147,7 +147,7 @@ pub enum Mode {
     SessionBrowser, // Ctrl+H session history browser
     PlanReview,     // Plan review/annotation overlay
     PlanRunning,    // Plan step currently executing
-    UndoConfirm,    // Waiting for y/N confirmation before git hard reset
+    UndoPicker,     // Interactive checkpoint picker in Git tab (↑↓ select, Enter confirm, Esc cancel)
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -405,8 +405,8 @@ pub struct AppState {
     pub diff_overlay_visible: bool,
     /// Cached list of forge checkpoints (for /undo and Git tab)
     pub git_checkpoints: Vec<crate::git::CheckpointInfo>,
-    /// Pending undo depth — set while waiting for UndoConfirm y/N
-    pub pending_undo_n: Option<usize>,
+    /// Selected index in the UndoPicker list
+    pub undo_picker_selected: usize,
 }
 
 impl AppState {
@@ -463,7 +463,7 @@ impl AppState {
             diff_overlay_scroll: 0,
             diff_overlay_visible: false,
             git_checkpoints: Vec::new(),
-            pending_undo_n: None,
+            undo_picker_selected: 0,
         }
     }
 
@@ -1108,22 +1108,36 @@ fn handle_key(
         return Ok(true);
     }
 
-    // ── UndoConfirm mode ──────────────────────────────────────────────────────
-    // Waiting for y/N after /undo — intercept any keystroke.
-    if state.mode == Mode::UndoConfirm {
+    // ── UndoPicker mode ───────────────────────────────────────────────────────
+    // Interactive checkpoint picker: ↑↓ navigate, Enter confirm, Esc cancel.
+    if state.mode == Mode::UndoPicker {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if state.undo_picker_selected > 0 {
+                    state.undo_picker_selected -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if state.undo_picker_selected + 1 < state.git_checkpoints.len() {
+                    state.undo_picker_selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let idx = state.undo_picker_selected;
                 state.mode = Mode::Normal;
-                if let Some(n) = state.pending_undo_n.take() {
+                if let Some(cp) = state.git_checkpoints.get(idx).cloned() {
                     match crate::git::GitRepo::open(std::path::Path::new(".")) {
-                        Some(repo) => match repo.undo(n) {
+                        Some(repo) => match repo.undo(idx + 1) {
                             Ok(()) => {
-                                state.push(ConversationEntry::SystemMsg(
-                                    format!("✓ reverted to checkpoint {n}"),
-                                ));
-                                // Update git availability (tree changed)
-                                state.git_checkpoints =
-                                    repo.list_checkpoints().unwrap_or_default();
+                                state.push(ConversationEntry::SystemMsg(format!(
+                                    "✓ reverted to checkpoint {}  \"{}\"",
+                                    cp.short_hash, cp.message
+                                )));
+                                // Refresh git state after reset
+                                state.git_checkpoints = repo.list_checkpoints().unwrap_or_default();
+                                state.last_checkpoint_hash = None;
+                                state.git_stat_content = String::new();
+                                state.git_diff_content = String::new();
                             }
                             Err(e) => {
                                 state.push(ConversationEntry::SystemMsg(
@@ -1139,12 +1153,10 @@ fn handle_key(
                     }
                 }
             }
-            _ => {
-                // N, Esc, or anything else → cancel
+            KeyCode::Esc => {
                 state.mode = Mode::Normal;
-                state.pending_undo_n = None;
-                state.push(ConversationEntry::SystemMsg("undo cancelled".to_string()));
             }
+            _ => {}
         }
         return Ok(true);
     }
@@ -1559,11 +1571,11 @@ fn handle_key(
             // Refresh git tab content on switch
             git_view::load_git_tab(state);
         }
-        // 'u' in Git tab triggers /undo 1
+        // 'u' in Git tab opens the checkpoint picker
         (KeyModifiers::NONE, KeyCode::Char('u')) if state.input.is_empty()
             && state.mode == Mode::Normal
             && state.active_tab == Tab::Git => {
-            let _ = execute_command("/undo 1", state, resolved, file)?;
+            let _ = execute_command("/undo", state, resolved, file)?;
         }
         // 'd' opens the full-diff overlay (only in Normal mode with git available)
         (KeyModifiers::NONE, KeyCode::Char('d')) if state.input.is_empty()
@@ -1833,11 +1845,6 @@ fn execute_command(
             ));
         }
         "/undo" => {
-            let n: usize = parts
-                .get(1)
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(1)
-                .max(1);
             match crate::git::GitRepo::open(std::path::Path::new(".")) {
                 None => {
                     state.push(ConversationEntry::SystemMsg(
@@ -1851,14 +1858,10 @@ fn execute_command(
                         ));
                     }
                     Ok(checkpoints) => {
-                        let idx = (n - 1).min(checkpoints.len() - 1);
-                        let cp = &checkpoints[idx];
-                        state.push(ConversationEntry::SystemMsg(format!(
-                            "Revert to checkpoint {}? \"{}\"  [y/N]",
-                            cp.short_hash, cp.message
-                        )));
-                        state.pending_undo_n = Some(n);
-                        state.mode = Mode::UndoConfirm;
+                        state.git_checkpoints = checkpoints;
+                        state.undo_picker_selected = 0;
+                        state.active_tab = Tab::Git;
+                        state.mode = Mode::UndoPicker;
                     }
                     Err(e) => {
                         state.push(ConversationEntry::SystemMsg(format!("git error: {e}")));

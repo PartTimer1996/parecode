@@ -414,7 +414,7 @@ fn draw_input(f: &mut Frame, state: &AppState, area: Rect) {
         Mode::SessionBrowser => (Color::Rgb(110, 90, 200), Color::Rgb(110, 90, 200), "◈"),
         Mode::PlanReview     => (Color::Rgb(200, 140, 0),  Color::Rgb(220, 160, 0),  "◇"),
         Mode::PlanRunning    => (Color::Rgb(40, 40, 60),   Color::DarkGray,          "▶"),
-        Mode::UndoConfirm    => (Color::Rgb(200, 80, 40),  Color::Rgb(220, 100, 60), "⚠"),
+        Mode::UndoPicker     => (Color::Rgb(200, 80, 40),  Color::Rgb(220, 100, 60), "⚠"),
         Mode::Normal         => (Color::Rgb(60, 60, 80),  Color::Cyan,               "❯"),
     };
 

@@ -4,10 +4,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
-use super::AppState;
+use super::{AppState, Mode};
 use crate::git::GitRepo;
 
 /// Refresh Git tab content from the repo. Call when switching to Tab::Git.
@@ -20,6 +20,12 @@ pub fn load_git_tab(state: &mut AppState) {
 }
 
 pub fn draw(f: &mut Frame, state: &AppState, area: Rect) {
+    // When the undo picker is active, show the checkpoint list fullscreen in this tab
+    if state.mode == Mode::UndoPicker {
+        draw_undo_picker(f, state, area);
+        return;
+    }
+
     // Split into: header (checkpoint info), stat area, action bar
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -33,6 +39,107 @@ pub fn draw(f: &mut Frame, state: &AppState, area: Rect) {
     draw_checkpoint_header(f, state, chunks[0]);
     draw_diff_stat(f, state, chunks[1]);
     draw_action_bar(f, state, chunks[2]);
+}
+
+fn draw_undo_picker(f: &mut Frame, state: &AppState, area: Rect) {
+    use ratatui::widgets::Clear;
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),    // checkpoint list
+            Constraint::Length(1), // hint bar
+        ])
+        .split(area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            " Select checkpoint to revert to ",
+            Style::default().fg(Color::Rgb(220, 100, 60)).add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(Color::Rgb(200, 80, 40)))
+        .style(Style::default().bg(Color::Rgb(8, 6, 6)));
+
+    let inner = block.inner(chunks[0]);
+    f.render_widget(Clear, chunks[0]);
+    f.render_widget(block, chunks[0]);
+
+    if state.git_checkpoints.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  no forge checkpoints found",
+                Style::default().fg(Color::Rgb(80, 60, 60)),
+            )),
+            inner,
+        );
+    } else {
+        let items: Vec<ListItem> = state
+            .git_checkpoints
+            .iter()
+            .enumerate()
+            .map(|(i, cp)| {
+                let selected = i == state.undo_picker_selected;
+                let age = format_age(cp.timestamp);
+                let (bg, hash_fg, age_fg, msg_fg) = if selected {
+                    (
+                        Color::Rgb(50, 20, 15),
+                        Color::Rgb(255, 140, 80),
+                        Color::Rgb(180, 100, 60),
+                        Color::White,
+                    )
+                } else {
+                    (
+                        Color::Reset,
+                        Color::Rgb(160, 100, 60),
+                        Color::Rgb(80, 60, 50),
+                        Color::Rgb(180, 170, 160),
+                    )
+                };
+                let marker = if selected { "▶ " } else { "  " };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{marker}{:<8}  ", cp.short_hash),
+                        Style::default().fg(hash_fg).bg(bg).add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
+                    ),
+                    Span::styled(
+                        format!("{:<10}  ", age),
+                        Style::default().fg(age_fg).bg(bg),
+                    ),
+                    Span::styled(
+                        cp.message.chars().take(60).collect::<String>(),
+                        Style::default().fg(msg_fg).bg(bg),
+                    ),
+                ]))
+            })
+            .collect();
+
+        // Scroll to keep selected visible
+        let visible = inner.height as usize;
+        let skip = if state.undo_picker_selected >= visible {
+            state.undo_picker_selected - visible + 1
+        } else {
+            0
+        };
+        let sliced: Vec<ListItem> = items.into_iter().skip(skip).collect();
+        f.render_widget(List::new(sliced), inner);
+    }
+
+    let hint = Line::from(vec![
+        Span::styled("  ↑↓ select  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::Rgb(220, 100, 60))),
+        Span::styled(" revert  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Rgb(220, 100, 60))),
+        Span::styled(" cancel  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "⚠ git reset --hard — this cannot be undone",
+            Style::default().fg(Color::Rgb(120, 60, 40)),
+        ),
+    ]);
+    f.render_widget(
+        Paragraph::new(hint).style(Style::default().bg(Color::Rgb(8, 6, 6))),
+        chunks[1],
+    );
 }
 
 fn draw_checkpoint_header(f: &mut Frame, state: &AppState, area: Rect) {
@@ -181,16 +288,12 @@ fn draw_action_bar(f: &mut Frame, _state: &AppState, area: Rect) {
             Style::default().fg(Color::Rgb(80, 140, 200)),
         ),
         Span::styled(
-            "[u] undo  ",
+            "[u] revert to checkpoint  ",
             Style::default().fg(Color::Rgb(200, 120, 80)),
         ),
         Span::styled(
-            "[1] back to chat  ",
+            "[1] back to chat",
             Style::default().fg(Color::Rgb(80, 80, 100)),
-        ),
-        Span::styled(
-            "/undo [n] to revert to Nth checkpoint",
-            Style::default().fg(Color::Rgb(60, 60, 80)),
         ),
     ]);
     f.render_widget(

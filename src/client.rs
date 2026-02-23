@@ -385,3 +385,48 @@ fn build_messages(system: &str, messages: &[Message]) -> Vec<Value> {
 
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_content_from_str() {
+        let content: MessageContent = "test".into();
+        assert_eq!(content.as_str(), "test");
+    }
+
+    #[test]
+    fn test_message_content_from_string() {
+        let content: MessageContent = "test".to_string().into();
+        assert_eq!(content.as_str(), "test");
+    }
+
+    #[test]
+    fn test_content_part_serialize() {
+        let part = ContentPart::Text { text: "hello".to_string() };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"type\":\"text\""));
+    }
+
+    #[test]
+    fn test_model_response() {
+        let response = ModelResponse {
+            text: "test response".to_string(),
+            tool_calls: vec![],
+            input_tokens: 100,
+            output_tokens: 200,
+        };
+        assert_eq!(response.text, "test response");
+        assert_eq!(response.input_tokens, 100);
+        assert_eq!(response.output_tokens, 200);
+    }
+
+    #[test]
+    fn test_pending_tool_call_default() {
+        let pending = PendingToolCall::default();
+        assert!(pending.id.is_empty());
+        assert!(pending.name.is_empty());
+        assert!(pending.arguments.is_empty());
+    }
+}
