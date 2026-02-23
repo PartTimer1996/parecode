@@ -91,8 +91,8 @@ pub fn format_for_context(path: &str, content: &str) -> String {
             if symbols.is_empty() {
                 out.push_str("     (no top-level symbols detected in omitted section)\n");
             } else {
-                for (line_no, label) in &symbols {
-                    out.push_str(&format!("{line_no:4} | {label}\n"));
+                for (line_no, hash, label) in &symbols {
+                    out.push_str(&format!("{line_no:4} [{hash}] | {label}\n"));
                 }
             }
             out.push('\n');
@@ -168,8 +168,8 @@ pub fn execute(args: &Value) -> Result<String> {
         if symbols.is_empty() {
             out.push_str("     (no top-level symbols detected in omitted section)\n");
         } else {
-            for (line_no, label) in &symbols {
-                out.push_str(&format!("{line_no:4} | {label}\n"));
+            for (line_no, hash, label) in &symbols {
+                out.push_str(&format!("{line_no:4} [{hash}] | {label}\n"));
             }
         }
         out.push('\n');
@@ -210,14 +210,19 @@ fn preamble_end_line(lines: &[&str]) -> usize {
 
 // ── Symbol index ──────────────────────────────────────────────────────────────
 
-/// Collect symbol definitions from a slice of lines, returning (absolute_line_no, label).
+/// Collect symbol definitions from a slice of lines, returning (absolute_line_no, hash, label).
 /// `offset` is the 0-based index of `lines[0]` in the full file.
-pub fn collect_symbols(lines: &[&str], offset: usize) -> Vec<(usize, String)> {
+/// The hash is computed from the *actual* file line (not the condensed label) so it
+/// matches what edit_file expects for anchor validation.
+pub fn collect_symbols(lines: &[&str], offset: usize) -> Vec<(usize, String, String)> {
     lines
         .iter()
         .enumerate()
         .filter_map(|(i, line)| {
-            classify_symbol(line.trim()).map(|label| (offset + i + 1, label))
+            classify_symbol(line.trim()).map(|label| {
+                let hash = line_hash(line);
+                (offset + i + 1, hash, label)
+            })
         })
         .collect()
 }
@@ -231,9 +236,9 @@ fn build_symbol_index(lines: &[&str], path: &str, total: usize) -> String {
         );
     }
 
-    let mut out = format!("[{path} — {total} lines. Symbol index:]\n\n");
-    for (line_no, label) in &symbols {
-        out.push_str(&format!("{line_no:4} | {label}\n"));
+    let mut out = format!("[{path} — {total} lines. Symbol index (hashes are valid for edit_file anchor):]\n\n");
+    for (line_no, hash, label) in &symbols {
+        out.push_str(&format!("{line_no:4} [{hash}] | {label}\n"));
     }
     out.push_str("\nUse line_range=[start,end] to read any section.\n");
     out

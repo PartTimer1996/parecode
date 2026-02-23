@@ -70,6 +70,22 @@ impl History {
             .filter(|r| r.summary.len() < r.full_output.len())
             .count()
     }
+
+    /// Compress stale read_file records for a given path.
+    /// Called after a successful edit_file — the old read content has stale
+    /// hashes/line numbers, so keeping it verbatim wastes context.
+    /// The full_output is preserved for recall; only the summary (what goes
+    /// into conversation history) is replaced with a short note.
+    pub fn compress_reads_for(&mut self, path: &str) {
+        for rec in &mut self.records {
+            if rec.tool_name == "read_file" && rec.summary.contains(path) && rec.summary.len() > 200 {
+                rec.summary = format!(
+                    "[Previously read {path} — content is now stale after edit. \
+                     Use read_file to get current content if needed.]"
+                );
+            }
+        }
+    }
 }
 
 // ── Summarisation rules (deterministic, zero model calls) ────────────────────

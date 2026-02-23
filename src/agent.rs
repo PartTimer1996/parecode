@@ -26,8 +26,9 @@ Guidelines:
 - For replacement tasks (e.g. "replace X with Y"), use search to confirm no instances of X remain before declaring done
 - When a task is complete, say so clearly and stop calling tools
 - edit_file returns a fresh excerpt of the file around the edit site after every successful edit — use those hashes directly for follow-up edits; do NOT call read_file again to verify an edit you just made
+- IMPORTANT: Only make ONE edit_file call per file per response. After editing a file, wait for the result before planning the next edit — the file's line numbers and hashes change after every edit, so batching multiple edits to the same file will fail.
 - For large files: use read_file with symbols=true to get a function/class index first, then read_file with line_range=[start,end] to fetch only the section you need
-- read_file output lines are prefixed `N [hash] | content` — the 4-char hash in brackets is the anchor for edit_file. Example: from `  42 [a3f2] | fn foo()`, pass anchor="a3f2" (just the 4 chars, no brackets, no line number). This prevents stale-line errors if the file changed between read and edit.
+- read_file output lines are prefixed `N [hash] | content` — the 4-char hash in brackets is the anchor for edit_file. Example: from `  42 [a3f2] | fn foo()`, pass anchor="a3f2" (just the 4 chars, no brackets, no line number). This prevents stale-line errors if the file changed between read and edit. Symbol index output also includes hashes — use them the same way.
 - append=true adds content after the LAST LINE of the file. Only use it when the file has no relevant closing block yet (e.g. creating the very first test module in a file that has none at all). If you can see a test block, a class, or any closing brace at the end of the file — use old_str to insert inside it, not append=true.
 - To add to an existing block: use old_str matching the closing brace of that block (e.g. the final `}` plus the line before it) and replace it with the new content plus the closing brace.
 - In plan mode, the "Completed steps" preamble describes what changed but its line numbers are STALE. Always read anchors and line positions from the pre-loaded file content shown in the attached files section — never from the completed steps summary.
@@ -388,6 +389,17 @@ pub async fn run_tui(
             } else {
                 let raw_output = execute_tool(tc, config, &mut cache, &history, &ui_tx, &config.mcp).await;
 
+                // Bash commands may mutate files — invalidate any cached reads
+                // for paths that appear in the command string.
+                if tc.name == "bash" {
+                    if let Some(cmd) = serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                        .ok()
+                        .and_then(|v| v["command"].as_str().map(|s| s.to_string()))
+                    {
+                        cache.invalidate_if_mentioned(&cmd);
+                    }
+                }
+
                 let (model_output, display_summary) = if config.dry_run {
                     (raw_output.clone(), raw_output.clone())
                 } else {
@@ -429,8 +441,13 @@ pub async fn run_tui(
                 }
             }
 
-            // Record mutation after successful execution
+            // Record mutation after successful execution and compress stale reads
             if let Some(path) = target_path {
+                // Compress old read_file results for this path — their hashes
+                // and line numbers are now stale, wasting context budget.
+                if !result_content.contains("[Tool error") {
+                    history.compress_reads_for(&path);
+                }
                 mutated_files.insert(path);
             }
 

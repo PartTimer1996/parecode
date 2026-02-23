@@ -46,6 +46,30 @@ pub fn execute(args: &Value) -> Result<String> {
         let mut content = fs::read_to_string(path)
             .with_context(|| format!("edit_file: cannot read '{path}'"))?;
 
+        // Guard: if the file already ends with a closing block (brace, etc.),
+        // appending will place code outside it — almost always wrong.
+        // Reject and tell the model to use old_str to insert inside the block.
+        let trimmed = content.trim_end();
+        let ends_with_block = trimmed.ends_with('}')
+            || trimmed.ends_with("end")
+            || trimmed.ends_with("endif");
+        if ends_with_block {
+            // Show the last few lines so the model can use old_str to target the right spot
+            let tail: Vec<&str> = content.lines().rev().take(8).collect();
+            let tail: Vec<&str> = tail.into_iter().rev().collect();
+            let tail_start = content.lines().count().saturating_sub(tail.len()) + 1;
+            let mut hint = String::new();
+            for (i, line) in tail.iter().enumerate() {
+                hint.push_str(&crate::tools::read::format_line(tail_start + i, line));
+            }
+            return Err(anyhow::anyhow!(
+                "edit_file: append=true rejected — '{path}' already has a closing block \
+                 (test module or braces at end). Appending would place code outside it.\n\
+                 Use old_str to match the closing brace and insert your content inside.\n\
+                 Last lines of file:\n{hint}"
+            ));
+        }
+
         // Ensure file ends with a blank line so appended content starts cleanly
         if !content.ends_with('\n') {
             content.push('\n');
@@ -85,7 +109,10 @@ pub fn execute(args: &Value) -> Result<String> {
         .with_context(|| format!("edit_file: cannot read '{path}'"))?;
 
     // Anchor check — verify the first line of old_str still has the expected hash.
-    // This catches stale-line edits where the file changed since it was read.
+    // Soft policy: if the anchor mismatches but old_str uniquely matches, proceed
+    // with a warning instead of hard-failing. Small models often get anchors wrong
+    // (especially from symbol-index reads) but have the correct old_str.
+    let mut anchor_warning: Option<String> = None;
     if let Some(anchor_raw) = args["anchor"].as_str() {
         // Normalise anchor to just the 4-char hash:
         //   "[a3f2]"    → "a3f2"  (model copied brackets from new format)
@@ -101,32 +128,11 @@ pub fn execute(args: &Value) -> Result<String> {
         let first_line = old_str.lines().next().unwrap_or("");
         let actual_hash = crate::tools::read::line_hash(first_line);
         if actual_hash != anchor {
-            // Find where this first_line actually appears in the file for a useful hint
-            let line_info = content.lines().enumerate()
-                .find(|(_, l)| *l == first_line)
-                .map(|(i, _)| format!(" (found at line {} with different hash)", i + 1))
-                .unwrap_or_else(|| " (line not found in current file — content may have changed)".to_string());
-            // Return the current content around where the model seems to be looking
-            let hint_lines: Vec<String> = content.lines().enumerate()
-                .filter(|(_, l)| l.trim() == first_line.trim())
-                .flat_map(|(i, _)| {
-                    let lo = i.saturating_sub(3);
-                    let hi = (i + 4).min(content.lines().count());
-                    content.lines().enumerate()
-                        .skip(lo).take(hi - lo)
-                        .map(|(j, l)| crate::tools::read::format_line(j + 1, l))
-                        .collect::<Vec<_>>()
-                })
-                .take(12)
-                .collect();
-            let hint = if hint_lines.is_empty() {
-                "Re-read the file to get current hashes.".to_string()
-            } else {
-                format!("Current content near that line:\n{}", hint_lines.join(""))
-            };
-            return Err(anyhow::anyhow!(
-                "edit_file: anchor mismatch for '{path}' — expected hash '{anchor}' but got '{actual_hash}'{line_info}.\
-                \n{hint}"
+            // Don't hard-fail yet — record the mismatch and check if old_str
+            // uniquely matches below. If it does, proceed with a warning.
+            anchor_warning = Some(format!(
+                "(anchor mismatch: expected '{}', got '{}' — edit applied anyway since old_str was unique)",
+                anchor, actual_hash
             ));
         }
     }
@@ -140,7 +146,8 @@ pub fn execute(args: &Value) -> Result<String> {
         fs::write(path, &new_content)
             .with_context(|| format!("edit_file: cannot write '{path}'"))?;
         let ctx = post_edit_context(path, anchor_line);
-        return Ok(format!("✓ Edited {path} (1 replacement){ctx}"));
+        let warn = anchor_warning.map(|w| format!(" {w}")).unwrap_or_default();
+        return Ok(format!("✓ Edited {path} (1 replacement){warn}{ctx}"));
     }
     if exact_count > 1 {
         return Err(anyhow::anyhow!(
@@ -159,7 +166,8 @@ pub fn execute(args: &Value) -> Result<String> {
         fs::write(path, &new_content)
             .with_context(|| format!("edit_file: cannot write '{path}'"))?;
         let ctx = post_edit_context(path, anchor_line);
-        return Ok(format!("✓ Edited {path} (fuzzy match — {label}){ctx}"));
+        let warn = anchor_warning.map(|w| format!(" {w}")).unwrap_or_default();
+        return Ok(format!("✓ Edited {path} (fuzzy match — {label}){warn}{ctx}"));
     }
 
     // 3. No match — return a useful ±15-line context around the best candidate line

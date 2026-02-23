@@ -60,6 +60,25 @@ impl FileCache {
         self.entries.remove(&key);
     }
 
+    /// Invalidate any cached paths that appear as substrings in a bash command.
+    /// This catches `sed -i`, `patch`, `git checkout`, etc. mutating cached files.
+    pub fn invalidate_if_mentioned(&mut self, command: &str) {
+        let to_remove: Vec<PathBuf> = self.entries.keys()
+            .filter(|path| {
+                // Check both the canonical path and the file name / relative form
+                let path_str = path.to_string_lossy();
+                command.contains(path_str.as_ref())
+                    || path.file_name()
+                        .map(|f| command.contains(&*f.to_string_lossy()))
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        for key in to_remove {
+            self.entries.remove(&key);
+        }
+    }
+
     /// Number of cached files.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -93,4 +112,161 @@ fn canonical(path: &str) -> PathBuf {
     Path::new(path)
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_canonical() {
+        let path = "test.txt";
+        let canonical_path = canonical(path);
+        assert!(canonical_path.is_absolute() || canonical_path.is_relative());
+    }
+
+    #[test]
+    fn test_next_turn() {
+        let mut cache = FileCache::default();
+        assert_eq!(cache.current_turn, 0);
+        cache.next_turn();
+        assert_eq!(cache.current_turn, 1);
+    }
+
+    #[test]
+    fn test_store_check() {
+        let mut cache = FileCache::default();
+        cache.next_turn(); // turn 1
+        cache.store("test.txt", "content".to_string());
+        let hit = cache.check("test.txt").unwrap();
+        assert_eq!(hit.content, "content");
+        assert_eq!(hit.turns_ago, 0);
+    }
+
+    #[test]
+    fn test_invalidate() {
+        let mut cache = FileCache::default();
+        cache.next_turn(); // turn 1
+        cache.store("test.txt", "content".to_string());
+        cache.invalidate("test.txt");
+        assert!(cache.check("test.txt").is_none());
+    }
+
+    #[test]
+    fn test_invalidate_if_mentioned() {
+        let mut cache = FileCache::default();
+        cache.next_turn(); // turn 1
+        cache.store("test.txt", "content".to_string());
+
+        // Command contains the full path
+        cache.invalidate_if_mentioned("sed -i test.txt");
+        assert!(cache.check("test.txt").is_none());
+
+        // Command contains the filename
+        cache.store("test.txt", "content".to_string());
+        cache.invalidate_if_mentioned("sed -i src/test.txt");
+        assert!(cache.check("test.txt").is_none());
+    }
+
+    #[test]
+    fn test_cache_hit_message() {
+        let hit = CacheHit {
+            content: "test".to_string(),
+            turns_ago: 0,
+        };
+        assert_eq!(hit.into_message(), "[Returning cached version — file was read this turn. Content is shown below. If you believe the file has changed, use edit_file or write_file to update it first.]\n\ntest");
+
+        let hit = CacheHit {
+            content: "test".to_string(),
+            turns_ago: 1,
+        };
+        assert_eq!(hit.into_message(), "[Returning cached version — file was read 1 turn ago. Content is shown below. If you believe the file has changed, use edit_file or write_file to update it first.]\n\ntest");
+
+        let hit = CacheHit {
+            content: "test".to_string(),
+            turns_ago: 2,
+        };
+        assert_eq!(hit.into_message(), "[Returning cached version — file was read 2 turns ago. Content is shown below. If you believe the file has changed, use edit_file or write_file to update it first.]\n\ntest");
+    }
+
+    #[test]
+    fn test_canonical_edge_cases() {
+        let cases = [
+            ("test.txt", "test.txt"),
+            ("./test.txt", "./test.txt"),
+            ("../test.txt", "../test.txt"),
+            ("/absolute/path.txt", "/absolute/path.txt"),
+        ];
+        
+        for (input, expected) in &cases {
+            let result = canonical(input);
+            assert_eq!(result.to_string_lossy(), *expected);
+        }
+    }
+
+    #[test]
+    fn test_cache_lifecycle() {
+        let mut cache = FileCache::default();
+        let path = "test.txt";
+        
+        // Initial store
+        cache.store(path, "initial content".to_string());
+        
+        // Check cache hit
+        let hit = cache.check(path).unwrap();
+        assert_eq!(hit.content, "initial content");
+        assert_eq!(hit.turns_ago, 0);
+        
+        // Advance turn
+        cache.next_turn();
+        
+        // Check again (should still be cached)
+        let hit = cache.check(path).unwrap();
+        assert_eq!(hit.content, "initial content");
+        assert_eq!(hit.turns_ago, 1);
+        
+        // Update content
+        cache.store(path, "updated content".to_string());
+        
+        // Check again (should see new content)
+        let hit = cache.check(path).unwrap();
+        assert_eq!(hit.content, "updated content");
+        assert_eq!(hit.turns_ago, 0);
+    }
+
+    #[test]
+    fn test_cache_invalidations() {
+        let mut cache = FileCache::default();
+        
+        // Store some files
+        cache.store("file1.txt", "content1".to_string());
+        cache.store("file2.txt", "content2".to_string());
+        
+        // Check initial state
+        assert_eq!(cache.len(), 2);
+        
+        // Invalidate one file
+        cache.invalidate("file1.txt");
+        
+        // Check invalidation
+        assert!(cache.check("file1.txt").is_none());
+        assert!(cache.check("file2.txt").is_some());
+        
+        // Test command-based invalidation
+        cache.invalidate_if_mentioned("sed -i file2.txt");
+        assert!(cache.check("file2.txt").is_none());
+    }
+
+    #[test]
+    fn test_cache_hit_message_formats() {
+        let hit = CacheHit {
+            content: "test content".to_string(),
+            turns_ago: 2,
+        };
+        
+        let message = hit.into_message();
+        
+        assert!(message.starts_with("[Returning cached version — file was read 2 turns ago."));
+        assert!(message.ends_with("test content"));
+    }
 }
