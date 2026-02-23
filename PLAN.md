@@ -837,11 +837,272 @@ auto_commit_prefix = "forge: "  # prefix for auto-commit messages
 - `src/plan.rs` — co-change suggestions in plan generation
 - `src/tools/read.rs` — optional `blame` parameter
 
-**GIT WARNING** 
+
+## Phase 6p — TUI Visual Overhaul
+
+**Turn the TUI from "functional terminal app" into "this looks like a real product."** Ratatui was absolutely the right choice here — it has first-class `Tabs`, `Table`, split layouts, scrollable viewports, and inline syntax highlighting via `syntect`. Everything below is achievable without changing framework. This is the phase where Forge stops looking like a dev tool and starts looking like a product.
+
+### 6p-i. Tab bar (top of screen)
+
+Replace the current single-view layout with a tab bar across the top. Each tab is a full-screen view. `1-5` number keys or `Ctrl+Tab` to switch.
+
+```
+┌─ ⚒ Chat ─┬─ ⚙ Config ─┬─  Git ─┬─ 📊 Stats ─┬─ 📋 Plan ─┐
+│                                                              │
+```
+
+| Tab | Contents | Key |
+|---|---|---|
+| **Chat** (default) | Current conversation view — what exists today | `1` |
+| **Config** | Profile switcher, hooks status, MCP servers, conventions preview | `2` |
+| **Git** | Diff viewer, commit history, checkpoint list, undo controls | `3` |
+| **Stats** | Telemetry dashboard — session totals, per-task breakdown, cost tracking | `4` |
+| **Plan** | Plan viewer when a plan is active — step list, status, carry-forward summaries | `5` |
+
+**Design notes:**
+- Tabs use ratatui's `Tabs` widget — already built into the library, just needs importing
+- Only the Chat tab exists at launch; other tabs appear contextually (Git tab only if in a git repo, Plan tab only when a plan is active)
+- Tab bar is a single row — minimal vertical space cost
+- Active tab highlighted, inactive tabs dimmed
+- Each tab has its own scroll state — switching tabs preserves position
+
+### 6p-ii. Session sidebar (left panel, Chat tab)
+
+A collapsible sidebar on the left showing session history — like the sidebar in ChatGPT/Claude web UI. This is the single biggest UX improvement for multi-session users.
+
+```
+┌──────────┬────────────────────────────────────────┐
+│ Sessions │  Chat                                  │
+│──────────│                                        │
+│ ▶ Today  │  You: add auth to the API              │
+│  jwt auth│  ⚒ reading src/routes.ts...            │
+│  fix css │                                        │
+│          │                                        │
+│ ▶ Yday   │                                        │
+│  refactor│                                        │
+│  tests   │                                        │
+│──────────│                                        │
+│ [+] New  │                                        │
+└──────────┴────────────────────────────────────────┘
+```
+
+**Behaviour:**
+- `Ctrl+B` toggles sidebar visibility (like VSCode)
+- Default: hidden on terminals < 120 cols, visible on wider terminals
+- Sidebar width: 20 chars fixed, or configurable
+- Sessions grouped by date (Today, Yesterday, This Week, Older)
+- Click/Enter on a session to resume it — replaces `/resume` for most users
+- Active session highlighted
+- `[+] New` at bottom to start fresh session (replaces `/new` for most users)
+- Session entries show: first message preview (truncated), turn count, model used
+
+**Implementation:**
+- `src/tui/render.rs` — `Layout::default().direction(Direction::Horizontal)` split: sidebar + main chat area
+- `src/tui/mod.rs` — `AppState.sidebar_visible: bool`, `AppState.sidebar_selected: usize`
+- Sessions loaded from existing `~/.local/share/forge/sessions/` JSONL files
+
+### 6p-iii. Git tab (full diff viewer)
+
+**The terminal diff viewer.** This is the "mad but really cool" one — and it's very doable in ratatui. `delta` and `diff-so-fancy` proved terminal diffs can look great. We don't need to shell out — we can render it natively.
+
+```
+┌─ ⚒ Chat ─┬─ ⚙ Config ─┬─  Git ─┬─ 📊 Stats ─┐
+│                                                   │
+│  Checkpoint: forge: before "add JWT auth"         │
+│  3 files changed, +42 -8                          │
+│                                                   │
+│  src/auth.rs ──────────────────────────────────── │
+│  @@ -12,6 +12,14 @@                               │
+│    fn validate_token(token: &str) -> Result<...>  │
+│  - let claims = decode(token)?;                   │
+│  + let claims = decode(token)                     │
+│  +     .map_err(|e| AuthError::Invalid(...))?;    │
+│  + log::info!("validated: {}", claims.sub);       │
+│    Ok(claims)                                     │
+│                                                   │
+│  [u] Undo to checkpoint  [c] Commit  [s] Stash   │
+└───────────────────────────────────────────────────┘
+```
+
+**Features:**
+- Syntax-highlighted diff — added lines green, removed lines red, context lines dimmed
+- File headers as collapsible sections (Enter to expand/collapse a file's hunks)
+- Scrollable — `j/k` or `↑↓` to navigate, `Page Up/Down` for fast scroll
+- Bottom action bar: `u` undo to checkpoint, `c` commit changes, `s` stash
+- Checkpoint history list (left side or top selector): navigate between checkpoints
+- `git diff --stat` summary at the top
+
+**Implementation:**
+- `src/tui/git_view.rs` — new module for git tab rendering
+- Parse `git diff` output into structured hunks (or use `src/git.rs` from Phase 6m)
+- Syntax colouring: line-prefix-based (`+` = green, `-` = red, `@@` = cyan) — no `syntect` needed for diffs
+- Scrollable viewport: ratatui's built-in scroll support
+
+### 6p-iv. Config tab (profile/hooks/MCP management)
+
+A read/edit view of the current configuration — eliminates the need to leave Forge to edit `config.toml`.
+
+```
+┌─ ⚒ Chat ─┬─ ⚙ Config ─┬─  Git ─┬─ 📊 Stats ─┐
+│                                                   │
+│  Profile: local (active)                          │
+│  ─────────────────────────                        │
+│  endpoint:       http://localhost:11434            │
+│  model:          qwen3:14b                        │
+│  context_tokens: 32768                            │
+│  planner_model:  —                                │
+│                                                   │
+│  Hooks                                            │
+│  ─────                                            │
+│  on_edit:      cargo check -q  ✓ enabled          │
+│  on_task_done: cargo test -q   ✓ enabled          │
+│                                                   │
+│  MCP Servers                                      │
+│  ───────────                                      │
+│  brave:  running (3 tools)                        │
+│  fetch:  running (1 tool)                         │
+│                                                   │
+│  Conventions: .forge/conventions.md (loaded)      │
+│                                                   │
+│  [p] Switch profile  [e] Edit config  [h] Toggle  │
+└───────────────────────────────────────────────────┘
+```
+
+**Features:**
+- Shows all profile fields, hooks, MCP server status (running/stopped/error + tool count)
+- `p` to switch profile (triggers the existing `/profile` logic)
+- `h` to toggle hooks on/off (existing `/hooks on|off`)
+- `e` to open config file in `$EDITOR` (shell out, return to TUI after)
+- Conventions preview — first 10 lines of loaded conventions file
+- Profile list on the left if multiple profiles exist — highlight active, arrow keys to browse
+
+### 6p-v. Stats tab (telemetry dashboard)
+
+The existing stats bar is great. This tab expands it into a full dashboard — the kind of thing you screenshot and share.
+
+```
+┌─ ⚒ Chat ─┬─ ⚙ Config ─┬─  Git ─┬─ 📊 Stats ─┐
+│                                                   │
+│  Session: 12 tasks · 4.2h · claude-sonnet         │
+│                                                   │
+│  Tokens        ████████████░░░░  74.2k (avg 6.2k) │
+│  Tool calls    ████████░░░░░░░░  48 (avg 4/task)  │
+│  Compression   ███░░░░░░░░░░░░░  22% avg          │
+│  Budget hits   █░░░░░░░░░░░░░░░  3 enforcements   │
+│                                                   │
+│  Task breakdown:                                  │
+│  ─────────────                                    │
+│  #1  "add JWT auth"     12.4k tok  8 tools  ✓     │
+│  #2  "fix CSS header"    3.1k tok  3 tools  ✓     │
+│  #3  "rename columns"    1.8k tok  2 tools  ✓     │
+│  ...                                              │
+│                                                   │
+│  Est. cost this session: $0.12                    │
+│  vs estimated OpenCode equiv: ~$0.80              │
+└───────────────────────────────────────────────────┘
+```
+
+**Features:**
+- Bar charts using Unicode block characters (▏▎▍▌▋▊▉█) — no external charting needed
+- Per-task breakdown with token count, tool calls, success/failure
+- Running cost estimate (using profile's `cost_per_mtok` if configured)
+- Comparative estimate ("vs OpenCode equivalent") — based on the 5-10x multiplier. This is the screenshot-worthy feature.
+- Session totals and averages
+- Export: `x` key to dump session stats to `.forge/stats-export.json`
+
+### 6p-vi. Plan tab (active plan viewer)
+
+Only appears when a plan is active or was recently completed. Shows the full plan with live step status.
+
+```
+┌─ ⚒ Chat ─┬─ ⚙ Config ─┬─  Git ─┬─ 📋 Plan ──┐
+│                                                   │
+│  Plan: add JWT authentication                     │
+│  4 steps · est. 12k–18k tokens · ~$0.004         │
+│                                                   │
+│  ✓ Step 1: Add JWT dependency to Cargo.toml       │
+│    └─ modified: Cargo.toml [jsonwebtoken]         │
+│    └─ 2.1k tokens, 3 tool calls                  │
+│                                                   │
+│  ⟳ Step 2: Implement token validation middleware  │
+│    └─ files: src/auth.rs, src/middleware.rs        │
+│    └─ running... 4.2k tokens so far               │
+│                                                   │
+│  ○ Step 3: Add auth routes                        │
+│  ○ Step 4: Integration tests                      │
+│                                                   │
+│  [a] Annotate step  [p] Pause  [Enter] View step  │
+└───────────────────────────────────────────────────┘
+```
+
+**Features:**
+- Live-updating step status (✓ complete, ⟳ running, ○ pending, ✗ failed)
+- Expand a step (Enter) to see its carry-forward summary, tool calls, files modified
+- Annotations visible inline
+- Running token count per step and cumulative
+- Plan review mode accessible from this tab (before execution starts)
+
+### 6p-vii. Visual polish (cross-cutting)
+
+**Syntax highlighting in chat:**
+- Code blocks in model responses get language-aware syntax colouring
+- Use `syntect` crate (commonly paired with ratatui) or `tree-sitter-highlight`
+- Fallback: backtick-delimited blocks get monospace styling without colour
+
+**Markdown rendering in chat:**
+- Bold, italic, headers, bullet lists rendered with proper ratatui `Style`
+- Links shown as underlined + blue
+- Tables rendered with box-drawing characters
+- This alone makes the chat output dramatically more readable
+
+**Responsive layout:**
+- < 80 cols: compact mode — no sidebar, abbreviated status bar, single-line tabs
+- 80–120 cols: standard mode — current layout + tabs
+- > 120 cols: full mode — sidebar visible by default, expanded stats
+
+**Theme support (config-driven):**
+- `theme = "dark"` (default), `"light"`, `"monokai"`, `"solarized"`
+- Defined as named colour palettes in config — simple to add community themes later
+- `[theme.colors]` table in config for per-element customisation
+
+### 6p-viii. Ratatui feasibility notes
+
+All of this is achievable with ratatui's built-in widget set:
+
+| Feature | Ratatui widget/approach |
+|---|---|
+| Tab bar | `Tabs` widget (built-in) |
+| Sidebar | `Layout::Horizontal` split |
+| Diff viewer | `Paragraph` with styled `Span`s per line |
+| Bar charts | `Paragraph` with Unicode block chars, or `BarChart` widget |
+| Scrollable lists | `List` with `ListState` scroll tracking |
+| Collapsible sections | Custom `StatefulWidget` tracking expanded state |
+| Syntax highlighting | `syntect` → `Style` mapping, or manual keyword colouring |
+| Markdown rendering | Parse to `Vec<Line<'_>>` with styled `Span`s |
+| Responsive layout | `Constraint::Percentage` + terminal size check |
+
+The tab architecture requires restructuring `draw_ui()` in `render.rs` from a single monolithic function to a dispatcher: `match active_tab { Tab::Chat => draw_chat(f, area, state), Tab::Git => draw_git(f, area, state), ... }`. Each tab becomes its own render function in its own module under `src/tui/`.
+
+**Proposed file structure:**
+```
+src/tui/
+├── mod.rs          # event loop, state, tab switching
+├── render.rs       # top-level draw dispatcher, tab bar, status bar
+├── chat.rs         # chat view (most of current render.rs moves here)
+├── sidebar.rs      # session sidebar
+├── git_view.rs     # git tab — diff viewer, checkpoint list
+├── config_view.rs  # config tab — profile/hooks/MCP display
+├── stats_view.rs   # stats tab — telemetry dashboard
+├── plan_view.rs    # plan tab — step list, live status
+├── markdown.rs     # markdown → ratatui Span/Line converter
+└── theme.rs        # colour palette definitions
+```
+
+**GIT WARNING**
 Git integration complexity. 6m is marked ESSENTIAL and it is, but git is a minefield. Dirty working trees, detached HEAD, submodules, shallow clones, worktrees, repos with 100k+ files. The "works automatically if in a git repo, skips silently if not" design is correct, but the edge cases will take real-world testing to flush out. Keep the initial implementation conservative — checkpoint via commit on a temp branch is safer than stash (stash has more failure modes).
 
 ### Check in with token usage - we are aiming to lead the market in efficiency
-System prompt size. You're now injecting: conventions, session context, step carry-forward summaries, git status, change-impact warnings, hook descriptions, and tool schemas. On a 32k local model, that preamble could consume 20-30% of the window before the user even types. You may need a preamble budget that mirrors the token budget — prioritize and compress injected context, not just conversation history.
+System prompt size. You're now injecting: conventions, session context, step carry-forward summaries, git status, change-impact warnings, hook descriptions, and tool schemas. On a 32k local model, that preamble could consume 20-30% of the window before the user even types. You may need a preamble budget that mirrors the token budget — prioritise and compress injected context, not just conversation history.
 
 ---
 
@@ -1050,7 +1311,7 @@ scope   = ["visual", "frontend", "test-e2e"]   # only loaded for these categorie
 
 ---
 
-## File Structure (current)
+## File Structure (target)
 
 ```
 src/
@@ -1067,18 +1328,26 @@ src/
 ├── index.rs          # project symbol index — fn/struct/class/impl → file path, used by plan gen
 ├── telemetry.rs      # SessionStats, TaskRecord, JSONL persistence
 ├── plan.rs           # plan data structure, step execution, step summaries
-└── tools/
-    ├── mod.rs         # tool registry + dispatch
-    ├── read.rs        # read_file with smart excerpting + symbols=true index
-    ├── write.rs       # write_file (overwrite guard)
-    ├── edit.rs        # edit_file (fuzzy matching, ±15 line failure hint)
-    ├── bash.rs        # bash execution (async, timeout, 200-line cap)
-    ├── recall.rs      # retrieve full stored output by id or tool name
-    ├── patch.rs       # patch_file — unified diff application, fuzzy context matching
-    ├── search.rs      # ripgrep wrapper (zero-match → declare done)
-    └── list.rs        # list_files
 ├── git.rs            # git integration — checkpoint, undo, diff, blame, co-change analysis
-tui/
-├── mod.rs            # TUI state, event loop, session browser, plan review, slash commands
-└── render.rs         # ratatui draw
+├── tools/
+│   ├── mod.rs         # tool registry + dispatch
+│   ├── read.rs        # read_file with smart excerpting + symbols=true index
+│   ├── write.rs       # write_file (overwrite guard)
+│   ├── edit.rs        # edit_file (fuzzy matching, ±15 line failure hint)
+│   ├── bash.rs        # bash execution (async, timeout, 200-line cap)
+│   ├── recall.rs      # retrieve full stored output by id or tool name
+│   ├── patch.rs       # patch_file — unified diff application, fuzzy context matching
+│   ├── search.rs      # ripgrep wrapper (zero-match → declare done)
+│   └── list.rs        # list_files
+└── tui/
+    ├── mod.rs          # event loop, state, tab switching, input handling
+    ├── render.rs       # top-level draw dispatcher, tab bar, status bar
+    ├── chat.rs         # chat view — conversation history, streaming output
+    ├── sidebar.rs      # session sidebar — grouped by date, resume on select
+    ├── git_view.rs     # git tab — syntax-highlighted diff viewer, checkpoint list
+    ├── config_view.rs  # config tab — profile/hooks/MCP status display
+    ├── stats_view.rs   # stats tab — telemetry dashboard, bar charts, cost tracking
+    ├── plan_view.rs    # plan tab — step list, live status, carry-forward summaries
+    ├── markdown.rs     # markdown → ratatui Span/Line converter
+    └── theme.rs        # colour palette definitions, theme switching
 ```
