@@ -1,6 +1,6 @@
-/// Session persistence for Forge — Phase 3.
+/// Session persistence for PareCode — Phase 3.
 ///
-/// Each TUI session is stored as a JSONL file in `~/.local/share/forge/sessions/`.
+/// Each TUI session is stored as a JSONL file in `~/.local/share/parecode/sessions/`.
 /// One line per completed conversation turn (user message + agent response + tool summary).
 ///
 /// Sessions enable:
@@ -59,7 +59,7 @@ pub fn sessions_dir() -> PathBuf {
             PathBuf::from(std::env::var("HOME").unwrap_or_default())
                 .join(".local/share")
         })
-        .join("forge/sessions")
+        .join("parecode/sessions")
 }
 
 fn cwd_basename(cwd: &str) -> &str {

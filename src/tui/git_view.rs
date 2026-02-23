@@ -68,7 +68,7 @@ fn draw_undo_picker(f: &mut Frame, state: &AppState, area: Rect) {
     if state.git_checkpoints.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled(
-                "  no forge checkpoints found",
+                "  no parecode checkpoints found",
                 Style::default().fg(Color::Rgb(80, 60, 60)),
             )),
             inner,

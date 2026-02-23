@@ -1,28 +1,28 @@
-# Forge
+# PareCode
 
 **Works with any model. Uses 5–10x fewer tokens. Installs in 30 seconds.**
 
-A terminal coding agent that doesn't waste your money or lock you in. Use Claude, GPT, Qwen, Ollama, or anything OpenAI-compatible — switch providers with one line, not a migration. Forge completes coding tasks using the tools you'd use yourself — read, edit, search, bash — with a full TUI that shows exactly what's happening and what it's costing you.
+A terminal coding agent that doesn't waste your money or lock you in. Use Claude, GPT, Qwen, Ollama, or anything OpenAI-compatible — switch providers with one line, not a migration. PareCode completes coding tasks using the tools you'd use yourself — read, edit, search, bash — with a full TUI that shows exactly what's happening and what it's costing you.
 
 ---
 
-## Why Forge
+## Why PareCode
 
 Coding agents are expensive, complicated, and want to own you. Claude Code locks you to Anthropic. OpenCode needs Node.js and a weekend of configuration. Aider needs Python, git setup, and patience. All of them burn through tokens like they're free.
 
-Forge takes a different approach:
+PareCode takes a different approach:
 
-- **5–10x fewer tokens** — context is managed proactively before every API call, not reactively when the window fills. A task that costs $0.40 in other tools costs $0.04 in Forge. You see exactly what you're spending, in real time, every session.
+- **5–10x fewer tokens** — context is managed proactively before every API call, not reactively when the window fills. A task that costs $0.40 in other tools costs $0.04 in PareCode. You see exactly what you're spending, in real time, every session.
 - **Any model, any provider** — OpenRouter, Anthropic, OpenAI, Ollama, any OpenAI-compatible endpoint. Switch between Claude and GPT and local models with `/profile`. Your workflow doesn't change.
-- **30-second setup** — single binary, no runtime dependencies. `curl | sh`, run `forge`, answer two questions, start coding. No Node. No Python. No config files to write by hand.
+- **30-second setup** — single binary, no runtime dependencies. `curl | sh`, run `parecode`, answer two questions, start coding. No Node. No Python. No config files to write by hand.
 - **Plan/execute isolation** — each plan step runs as a fresh agent call with only the relevant files loaded. The scaffold owns state. The model only ever sees one bounded step. This is why it works on small models where other agents fall apart.
 - **Full transparency** — live token count, cost estimate before plan execution, telemetry stats bar. No hidden API calls. No surprise bills.
 
 ### What makes it efficient
 
-Other agents read entire files, accumulate 40k+ tokens of conversation history, and then reactively compress when the context window fills — costing even more tokens. Forge does the opposite:
+Other agents read entire files, accumulate 40k+ tokens of conversation history, and then reactively compress when the context window fills — costing even more tokens. PareCode does the opposite:
 
-| | Other agents | Forge |
+| | Other agents | PareCode |
 |---|---|---|
 | Context management | React at 90% capacity | Enforce budget before every call |
 | File reads | Full file, up to 50KB | Smart excerpt, 150 lines max, symbol index |
@@ -47,13 +47,13 @@ Other agents read entire files, accumulate 40k+ tokens of conversation history, 
 ```bash
 # macOS / Linux — one command, zero dependencies
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/PartTimer1996/Forge/releases/latest/download/forge-installer.sh | sh
+  https://github.com/PartTimer1996/PareCode/releases/latest/download/parecode-installer.sh | sh
 
 # macOS — Homebrew
-brew install PartTimer1996/forge/forge
+brew install PartTimer1996/parecode/parecode
 
 # Windows — PowerShell
-irm https://github.com/PartTimer1996/Forge/releases/latest/download/forge-installer.ps1 | iex
+irm https://github.com/PartTimer1996/PareCode/releases/latest/download/parecode-installer.ps1 | iex
 ```
 
 No Node. No Python. No runtime. Single static binary.
@@ -62,17 +62,17 @@ No Node. No Python. No runtime. Single static binary.
 <summary>Build from source</summary>
 
 ```bash
-git clone https://github.com/PartTimer1996/Forge
-cd Forge
+git clone https://github.com/PartTimer1996/PareCode
+cd PareCode
 cargo build --release
-cp target/release/forge ~/.local/bin/
+cp target/release/parecode ~/.local/bin/
 ```
 Requires Rust 1.90+.
 </details>
 
 | Tool | Install | Requires |
 |---|---|---|
-| **Forge** | `curl \| sh` | Nothing |
+| **PareCode** | `curl \| sh` | Nothing |
 | Claude Code | `npm install -g @anthropic-ai/claude-code` | Node.js, Anthropic account |
 | OpenCode | `npm install -g opencode` | Node.js |
 | Aider | `pip install aider-chat` | Python |
@@ -83,14 +83,14 @@ Requires Rust 1.90+.
 
 ```bash
 # Just run it. First launch detects your setup automatically.
-forge
+parecode
 ```
 
-On first run, Forge detects your environment — if Ollama is running, you're coding in seconds. If you have `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` set, it auto-configures that provider. No config file needed.
+On first run, PareCode detects your environment — if Ollama is running, you're coding in seconds. If you have `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` set, it auto-configures that provider. No config file needed.
 
 ```bash
 # Or go direct
-forge "remove all console.log calls from src/"
+parecode "remove all console.log calls from src/"
 ```
 
 In the TUI: type your task, press Enter. `@` to attach files. `Ctrl+P` for commands.
@@ -105,7 +105,7 @@ For multi-step tasks, use `/plan`:
 /plan "add JWT authentication to the Express API"
 ```
 
-Forge generates a structured plan, shows it inline for review, then executes each step as a fresh, isolated agent run. The plan is also written to `.forge/plan.md` — open it in your editor while it runs.
+PareCode generates a structured plan, shows it inline for review, then executes each step as a fresh, isolated agent run. The plan is also written to `.parecode/plan.md` — open it in your editor while it runs.
 
 Review controls: `↑↓` navigate · `a` approve step · `e` annotate · `Enter` run · `Esc` cancel
 
@@ -113,10 +113,10 @@ Review controls: `↑↓` navigate · `a` approve step · `e` annotate · `Enter
 
 ## Use any provider
 
-Forge works with any OpenAI-compatible endpoint. Set up as many profiles as you want and switch between them mid-session.
+PareCode works with any OpenAI-compatible endpoint. Set up as many profiles as you want and switch between them mid-session.
 
 ```toml
-# ~/.config/forge/config.toml
+# ~/.config/parecode/config.toml
 default_profile = "openrouter"
 
 [profiles.openrouter]
@@ -137,7 +137,7 @@ model          = "qwen3:14b"
 context_tokens = 32768
 ```
 
-Switch at runtime: `forge --profile claude "task"` or `/profile claude` in the TUI. Your tools, sessions, hooks — everything stays the same. Only the model changes.
+Switch at runtime: `parecode --profile claude "task"` or `/profile claude` in the TUI. Your tools, sessions, hooks — everything stays the same. Only the model changes.
 
 Full reference: [CONFIG.md](CONFIG.md)
 
@@ -208,7 +208,7 @@ api_key       = "sk-ant-..."
 
 ## Project conventions
 
-Create `.forge/conventions.md` (or `AGENTS.md` / `CLAUDE.md`) in your project root. Forge loads it automatically and appends it to the system prompt:
+Create `.parecode/conventions.md` (or `AGENTS.md` / `CLAUDE.md`) in your project root. PareCode loads it automatically and appends it to the system prompt:
 
 ```markdown
 This is a TypeScript project using Bun, not Node.
@@ -232,7 +232,7 @@ Key files:
 | `src/plan.rs` | Plan generation, step execution, carry-forward summaries |
 | `src/mcp.rs` | MCP client — JSON-RPC, tool discovery, dispatch |
 | `src/sessions.rs` | Session persistence, context injection |
-| `src/telemetry.rs` | Per-session stats, `.forge/telemetry.jsonl` |
+| `src/telemetry.rs` | Per-session stats, `.parecode/telemetry.jsonl` |
 | `src/history.rs` | Tool output compression |
 | `src/cache.rs` | File read cache |
 | `src/tools/` | Native tools: read, write, edit, bash, search, list, recall |
@@ -242,7 +242,7 @@ Key files:
 
 ## Know what you're spending
 
-Forge records per-task stats to `.forge/telemetry.jsonl` — token spend, tool calls, compression ratio, model. The stats bar in the TUI shows session totals in real time:
+PareCode records per-task stats to `.parecode/telemetry.jsonl` — token spend, tool calls, compression ratio, model. The stats bar in the TUI shows session totals in real time:
 
 ```
 ∑ 4 tasks  18.2ktok  avg 4.5k/task  22 tool calls  36% compressed  peak 48%

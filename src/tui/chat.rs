@@ -142,7 +142,7 @@ pub fn build_items(state: &AppState, term_width: u16) -> Vec<ListItem<'static>> 
                             first = false;
                             items.push(ListItem::new(Line::from(vec![
                                 Span::raw("  "),
-                                Span::styled("forge", Style::default()
+                                Span::styled("parecode", Style::default()
                                     .fg(label_fg)
                                     .add_modifier(Modifier::BOLD)),
                                 Span::styled("  ", Style::default()),

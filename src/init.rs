@@ -1,6 +1,6 @@
 /// /init — one-shot project context priming.
 ///
-/// Walks the project and generates `.forge/conventions.md` from existing
+/// Walks the project and generates `.parecode/conventions.md` from existing
 /// project files. Zero model calls — pure deterministic text extraction.
 ///
 /// Sources (priority order):
@@ -49,7 +49,7 @@ pub fn run_project_init(cwd: &Path) -> String {
     }
 
     // ── 4. Merge existing AGENTS.md / CLAUDE.md if present ───────────────────
-    for existing in &["AGENTS.md", "CLAUDE.md", ".forge/conventions.md"] {
+    for existing in &["AGENTS.md", "CLAUDE.md", ".parecode/conventions.md"] {
         let p = cwd.join(existing);
         if p.exists() {
             if let Ok(content) = fs::read_to_string(&p) {
@@ -64,11 +64,11 @@ pub fn run_project_init(cwd: &Path) -> String {
     out
 }
 
-/// Save the generated content to `.forge/conventions.md`.
+/// Save the generated content to `.parecode/conventions.md`.
 pub fn save_conventions(cwd: &Path, content: &str) -> anyhow::Result<std::path::PathBuf> {
-    let forge_dir = cwd.join(".forge");
-    fs::create_dir_all(&forge_dir)?;
-    let path = forge_dir.join("conventions.md");
+    let parecode_dir = cwd.join(".parecode");
+    fs::create_dir_all(&parecode_dir)?;
+    let path = parecode_dir.join("conventions.md");
     fs::write(&path, content)?;
     Ok(path)
 }

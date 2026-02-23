@@ -243,7 +243,7 @@ async fn spawn_and_init(cfg: &crate::config::McpServerConfig) -> Result<ServerCo
             Some(json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": { "tools": {} },
-                "clientInfo": { "name": "forge", "version": "0.1.0" }
+                "clientInfo": { "name": "parecode", "version": "0.1.0" }
             })),
         )
         .await

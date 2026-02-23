@@ -32,7 +32,7 @@ pub struct Profile {
     /// Optional API key (sent as Bearer token)
     pub api_key: Option<String>,
     /// Optional separate model for plan generation.
-    /// If set, Forge uses this model to think/plan and `model` for step execution.
+    /// If set, PareCode uses this model to think/plan and `model` for step execution.
     /// Example: planner_model = "claude-opus-4-6" with model = "claude-haiku-4-5"
     #[serde(default)]
     pub planner_model: Option<String>,
@@ -51,7 +51,7 @@ pub struct Profile {
     /// Auto-commit all changes after each successful task. Default: false.
     #[serde(default)]
     pub auto_commit: bool,
-    /// Prefix for auto-commit messages. Default: "forge: ".
+    /// Prefix for auto-commit messages. Default: "parecode: ".
     #[serde(default = "default_auto_commit_prefix")]
     pub auto_commit_prefix: String,
     /// Inject `git status` into system prompt and create checkpoints before tasks.
@@ -65,7 +65,7 @@ fn default_context_tokens() -> u32 {
 }
 
 fn default_auto_commit_prefix() -> String {
-    "forge: ".to_string()
+    "parecode: ".to_string()
 }
 
 fn default_git_context() -> bool {
@@ -216,7 +216,7 @@ impl ResolvedConfig {
 pub fn config_path() -> PathBuf {
     dirs_config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("forge")
+        .join("parecode")
         .join("config.toml")
 }
 
@@ -234,8 +234,8 @@ fn dirs_config_dir() -> Option<PathBuf> {
 
 // ── Default config template written on first run ──────────────────────────────
 
-const DEFAULT_CONFIG_TOML: &str = r#"# Forge configuration
-# Run `forge --init` to regenerate this file.
+const DEFAULT_CONFIG_TOML: &str = r#"# PareCode configuration
+# Run `parecode --init` to regenerate this file.
 
 default_profile = "local"
 
@@ -287,7 +287,7 @@ context_tokens = 32768
 # ── Git integration (optional, per-profile) ──────────────────────────────────
 # git_context = true           # inject git status into system prompt; enables checkpoints/diffs
 # auto_commit = false          # auto-commit all changes after each successful task
-# auto_commit_prefix = "forge: "
+# auto_commit_prefix = "parecode: "
 
 # ── MCP servers (optional, per-profile) ──────────────────────────────────────
 # Add MCP servers to any profile to give the model extra tools.

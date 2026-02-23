@@ -1,7 +1,7 @@
 /// Proactive token budget enforcement.
 ///
 /// Unlike OpenCode (which reacts at 90% capacity with an LLM summarisation
-/// call), Forge enforces budgets *before* each API call using deterministic
+/// call), PareCode enforces budgets *before* each API call using deterministic
 /// compression — no model calls, no token cost to save tokens.
 ///
 /// Strategy when over budget:

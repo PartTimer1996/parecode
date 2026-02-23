@@ -1,7 +1,7 @@
-# Forge Configuration Reference
+# PareCode Configuration Reference
 
-Config file location: `~/.config/forge/config.toml`
-Run `forge --init` to create it with commented examples.
+Config file location: `~/.config/parecode/config.toml`
+Run `parecode --init` to create it with commented examples.
 
 ---
 
@@ -16,7 +16,7 @@ model         = "qwen3:14b"
 context_tokens = 32768
 ```
 
-Run with a specific profile: `forge --profile claude "your task"`
+Run with a specific profile: `parecode --profile claude "your task"`
 
 ---
 
@@ -181,7 +181,7 @@ api_key  = "sk-ant-..."
 ```
 
 Switch at runtime:
-- CLI: `forge --profile claude "task"`
+- CLI: `parecode --profile claude "task"`
 - TUI: `/profile claude` or `Ctrl+P` → type profile name
 
 ---
@@ -189,7 +189,7 @@ Switch at runtime:
 ## Context window sizing (`context_tokens`)
 
 Set this to match your model's actual context window.
-Forge uses it for proactive budget enforcement — compressing history before the window fills,
+PareCode uses it for proactive budget enforcement — compressing history before the window fills,
 not reactively after.
 
 | Model | Recommended `context_tokens` |
@@ -207,13 +207,13 @@ Setting it too low triggers premature compression.
 
 ## Project conventions
 
-Forge auto-loads project-specific instructions from (in order):
+PareCode auto-loads project-specific instructions from (in order):
 1. `AGENTS.md` in the current directory
 2. `CLAUDE.md` in the current directory
-3. `.forge/conventions.md`
+3. `.parecode/conventions.md`
 
 These are appended to the system prompt. Use them to tell the model about your stack,
-style rules, or things to avoid. Example `.forge/conventions.md`:
+style rules, or things to avoid. Example `.parecode/conventions.md`:
 
 ```markdown
 This is a TypeScript project using Bun (not Node).
@@ -226,9 +226,9 @@ This is a TypeScript project using Bun (not Node).
 
 ## Plan output
 
-When you run `/plan "task"`, Forge writes two files:
+When you run `/plan "task"`, PareCode writes two files:
 
-- `.forge/plans/{timestamp}-plan.json` — machine-readable, used for resume/reload
-- `.forge/plan.md` — human-readable markdown, open in your editor while the plan runs
+- `.parecode/plans/{timestamp}-plan.json` — machine-readable, used for resume/reload
+- `.parecode/plan.md` — human-readable markdown, open in your editor while the plan runs
 
 The markdown version is overwritten each time a new plan is generated.

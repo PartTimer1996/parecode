@@ -207,10 +207,10 @@ impl Client {
         // Track whether we're mid-reasoning-block (for models that use reasoning_content field)
         let mut reasoning_open = false;
 
-        // Debug log — raw stream to /tmp/forge-stream.log for diagnosing model output
+        // Debug log — raw stream to /tmp/parecode-stream.log for diagnosing model output
         let mut debug_log: Option<std::fs::File> = std::fs::OpenOptions::new()
             .create(true).append(true)
-            .open("/tmp/forge-stream.log")
+            .open("/tmp/parecode-stream.log")
             .ok();
 
         while let Some(chunk) = stream.next().await {

@@ -1,4 +1,4 @@
-/// Telemetry — global usage stats, persisted to `~/.local/share/forge/telemetry.jsonl`.
+/// Telemetry — global usage stats, persisted to `~/.local/share/parecode/telemetry.jsonl`.
 ///
 /// Stats are:
 /// - Accumulated live in AppState during a TUI session
@@ -24,7 +24,7 @@ fn telemetry_path() -> PathBuf {
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join(".local/share")
         });
-    base.join("forge").join("telemetry.jsonl")
+    base.join("parecode").join("telemetry.jsonl")
 }
 
 // ── Per-task record (one line in telemetry.jsonl) ─────────────────────────────
@@ -33,7 +33,7 @@ fn telemetry_path() -> PathBuf {
 pub struct TaskRecord {
     pub timestamp: i64,
     pub session_id: String,
-    /// Project directory basename (e.g. "forge", "my-app")
+    /// Project directory basename (e.g. "parecode", "my-app")
     #[serde(default)]
     pub cwd: String,
     /// First 80 chars of the user message

@@ -81,7 +81,7 @@ pub fn draw(f: &mut Frame, state: &AppState, area: Rect) {
     // ── Conventions ───────────────────────────────────────────────────────────
     items.push(h("Conventions"));
     let cwd = super::cwd_str();
-    let conv_path = std::path::Path::new(&cwd).join(".forge/conventions.md");
+    let conv_path = std::path::Path::new(&cwd).join(".parecode/conventions.md");
     if conv_path.exists() {
         items.push(kv("file", conv_path.display().to_string()));
         items.push(dim("  [loaded]".to_string()));
@@ -93,7 +93,7 @@ pub fn draw(f: &mut Frame, state: &AppState, area: Rect) {
 
     // ── Footer hint ───────────────────────────────────────────────────────────
     items.push(dim(format!(
-        "Edit ~/.config/forge/config.toml to change profile settings."
+        "Edit ~/.config/parecode/config.toml to change profile settings."
     )));
     items.push(blank());
 

@@ -1,4 +1,4 @@
-/// Ratatui-based TUI for Forge.
+/// Ratatui-based TUI for PareCode.
 ///
 /// Architecture:
 ///   main thread:  event loop — crossterm keyboard events + mpsc UiEvent drain
@@ -403,7 +403,7 @@ pub struct AppState {
     pub diff_overlay_scroll: usize,
     /// Whether the full-diff overlay is currently open
     pub diff_overlay_visible: bool,
-    /// Cached list of forge checkpoints (for /undo and Git tab)
+    /// Cached list of parecode checkpoints (for /undo and Git tab)
     pub git_checkpoints: Vec<crate::git::CheckpointInfo>,
     /// Selected index in the UndoPicker list
     pub undo_picker_selected: usize,
@@ -753,7 +753,7 @@ fn palette_commands() -> Vec<PaletteCommand> {
     vec![
         PaletteCommand { key: "/plan",        label: "Generate and review a plan for a task" },
         PaletteCommand { key: "/quick",       label: "Run a lightweight single-shot query" },
-        PaletteCommand { key: "/init",        label: "Generate .forge/conventions.md for this project" },
+        PaletteCommand { key: "/init",        label: "Generate .parecode/conventions.md for this project" },
         PaletteCommand { key: "/cd",          label: "Change working directory" },
         PaletteCommand { key: "/profile",     label: "Switch profile" },
         PaletteCommand { key: "/profiles",    label: "List profiles" },
@@ -1841,7 +1841,7 @@ fn execute_command(
             };
             let detail = resolved.hooks.detail();
             state.push(ConversationEntry::SystemMsg(
-                format!("Hooks — {status}\n{detail}\nEdit ~/.config/forge/config.toml to change. /hooks on|off to toggle."),
+                format!("Hooks — {status}\n{detail}\nEdit ~/.config/parecode/config.toml to change. /hooks on|off to toggle."),
             ));
         }
         "/undo" => {
@@ -1854,7 +1854,7 @@ fn execute_command(
                 Some(repo) => match repo.list_checkpoints() {
                     Ok(checkpoints) if checkpoints.is_empty() => {
                         state.push(ConversationEntry::SystemMsg(
-                            "no forge checkpoints found — run a task first".to_string(),
+                            "no parecode checkpoints found — run a task first".to_string(),
                         ));
                     }
                     Ok(checkpoints) => {

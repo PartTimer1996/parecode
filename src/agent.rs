@@ -14,7 +14,7 @@ use crate::tui::UiEvent;
 
 const MAX_TOOL_CALLS: usize = 40;
 
-const SYSTEM_PROMPT_BASE: &str = r#"You are Forge, a focused coding assistant. You help with software engineering tasks by using the available tools.
+const SYSTEM_PROMPT_BASE: &str = r#"You are PareCode, a focused coding assistant. You help with software engineering tasks by using the available tools.
 
 Guidelines:
 - Be direct and efficient — use the minimum tool calls needed
@@ -26,7 +26,8 @@ Guidelines:
 - For replacement tasks (e.g. "replace X with Y"), use search to confirm no instances of X remain before declaring done
 - When a task is complete, say so clearly and stop calling tools
 - edit_file returns a fresh excerpt of the file around the edit site after every successful edit — use those hashes directly for follow-up edits; do NOT call read_file again to verify an edit you just made
-- IMPORTANT: Only make ONE edit_file call per file per response. After editing a file, wait for the result before planning the next edit — the file's line numbers and hashes change after every edit, so batching multiple edits to the same file will fail.
+- IMPORTANT: Only make ONE edit_file or patch_file call per file per response. After editing a file, wait for the result before planning the next edit — the file's line numbers and hashes change after every edit, so batching multiple edits to the same file will fail.
+- Use patch_file (unified diff) when making changes to multiple separate locations in the same file, or when the changes are large and structured. Use edit_file for single-location changes. Both tools are equally valid — choose whichever uses fewer tokens for the task.
 - For large files: use read_file with symbols=true to get a function/class index first, then read_file with line_range=[start,end] to fetch only the section you need
 - read_file output lines are prefixed `N [hash] | content` — the 4-char hash in brackets is the anchor for edit_file. Example: from `  42 [a3f2] | fn foo()`, pass anchor="a3f2" (just the 4 chars, no brackets, no line number). This prevents stale-line errors if the file changed between read and edit. Symbol index output also includes hashes — use them the same way.
 - append=true adds content after the LAST LINE of the file. Only use it when the file has no relevant closing block yet (e.g. creating the very first test module in a file that has none at all). If you can see a test block, a class, or any closing brace at the end of the file — use old_str to insert inside it, not append=true.
@@ -44,7 +45,7 @@ fn build_project_map() -> Option<String> {
     // Only inject if there's a recognisable project root marker
     let markers = [
         "Cargo.toml", "package.json", "pyproject.toml", "go.mod",
-        "Makefile", "CMakeLists.txt", ".forge", "src",
+        "Makefile", "CMakeLists.txt", ".parecode", "src",
     ];
     if !markers.iter().any(|m| Path::new(m).exists()) {
         return None;
@@ -92,7 +93,7 @@ fn collect_paths(
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         // Skip hidden files/dirs and ignored dirs
-        if name_str.starts_with('.') && name_str != ".forge" {
+        if name_str.starts_with('.') && name_str != ".parecode" {
             continue;
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -113,13 +114,13 @@ fn collect_paths(
     }
 }
 
-/// Load project conventions from AGENTS.md, CLAUDE.md, or .forge/conventions.md.
+/// Load project conventions from AGENTS.md, CLAUDE.md, or .parecode/conventions.md.
 /// Returns None if no conventions file is found.
 fn load_conventions() -> Option<String> {
     let candidates = [
         "AGENTS.md",
         "CLAUDE.md",
-        ".forge/conventions.md",
+        ".parecode/conventions.md",
     ];
     for path in &candidates {
         if let Ok(content) = std::fs::read_to_string(path) {
@@ -146,7 +147,7 @@ pub struct AgentConfig {
     pub hooks_enabled: bool,
     /// Auto-commit all changes after successful task completion.
     pub auto_commit: bool,
-    /// Prefix for auto-commit messages (e.g. "forge: ").
+    /// Prefix for auto-commit messages (e.g. "parecode: ").
     pub auto_commit_prefix: String,
     /// Enable git integration: checkpoint before task, git status in system prompt, diff after.
     pub git_context: bool,
@@ -392,7 +393,7 @@ pub async fn run_tui(
             tool_call_count += 1;
 
             // Extract the target path for mutation-detection (edit/write/append ops)
-            let is_mutating = matches!(tc.name.as_str(), "edit_file" | "write_file");
+            let is_mutating = matches!(tc.name.as_str(), "edit_file" | "write_file" | "patch_file");
             let target_path = if is_mutating {
                 serde_json::from_str::<serde_json::Value>(&tc.arguments)
                     .ok()
@@ -592,7 +593,7 @@ pub async fn run_quick(
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "unknown".to_string());
-    const QUICK_SYSTEM: &str = "You are Forge in quick mode. Answer concisely in one response. \
+    const QUICK_SYSTEM: &str = "You are PareCode in quick mode. Answer concisely in one response. \
 If a tool call is needed, make exactly one — prefer edit_file or search. \
 Do not read files unless strictly necessary. Keep responses short.";
 
@@ -710,7 +711,7 @@ async fn execute_tool(
                 Err(e) => format!("[Tool error: {e}]"),
             }
         }
-        "write_file" | "edit_file" => {
+        "write_file" | "edit_file" | "patch_file" => {
             let path = args["path"].as_str().unwrap_or("");
             match tools::dispatch(&tc.name, &args) {
                 Ok(o) => {

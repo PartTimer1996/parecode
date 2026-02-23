@@ -1,4 +1,4 @@
-# Forge — Implementation Plan
+# PareCode — Implementation Plan
 
 > Build a Rust CLI coding agent that matches OpenCode's baseline, then beats it on token efficiency and small-model reliability. Hyper-optimised orchestration + smart deterministic programming where a model call would be wasteful.
 
@@ -10,7 +10,7 @@
 
 **Why this wins:**
 
-| Dimension | OpenCode / Cursor / Claude Code | Forge |
+| Dimension | OpenCode / Cursor / Claude Code | PareCode |
 |---|---|---|
 | Token usage per task | 20k–60k (reactive compression, full file reads) | 3k–12k (proactive, compressed from the start) |
 | Local model support | Broken on most OSS backends (Zod schemas, context bloat) | First-class — designed for Qwen3 14B, Ollama |
@@ -19,7 +19,7 @@
 | Cost | Cloud API required; usage compounds | Works on free local inference; cloud optional |
 | Enterprise / IP | Code leaves the building | Self-hosted, air-gapped capable |
 
-**The efficiency story compounds over time.** As local models improve (Qwen4, etc), Forge gets better for free. We're not locked to any provider's pricing decisions. And every token saved is real money: a team of 10 running 50 tasks/day at OpenCode's token rate vs Forge's is hundreds of dollars a month difference.
+**The efficiency story compounds over time.** As local models improve (Qwen4, etc), PareCode gets better for free. We're not locked to any provider's pricing decisions. And every token saved is real money: a team of 10 running 50 tasks/day at OpenCode's token rate vs PareCode's is hundreds of dollars a month difference.
 
 **What's genuinely novel:**
 - Plan/execute separation where the scaffold owns state and the model only sees one bounded step at a time. No other agent does this.
@@ -51,7 +51,7 @@
 - POST to `/v1/chat/completions` with streaming SSE
 - Parse streamed tool call deltas into complete tool calls
 - `stream_options: {include_usage: true}` for Ollama token counts
-- Config: endpoint URL + model from `~/.config/forge/config.toml`
+- Config: endpoint URL + model from `~/.config/parecode/config.toml`
 
 **`src/tools/`** — Core tool set with lean handwritten JSON schemas
 - `read_file`, `write_file`, `edit_file`, `bash`, `search`, `list_files`
@@ -59,7 +59,7 @@
 
 **`src/agent.rs`** — Agent loop with streaming output
 
-**`src/main.rs`** — CLI via `clap` — `forge "task"`, `--dry-run`, `-v`, `--profile`, `--init`, `--profiles`
+**`src/main.rs`** — CLI via `clap` — `parecode "task"`, `--dry-run`, `-v`, `--profile`, `--init`, `--profiles`
 
 ---
 
@@ -95,7 +95,7 @@
 - **Attached files panel** — `@` adds file as a pinned chip above input; content injected as preamble in every agent call; protected from budget eviction; Tab/Del to manage chips
 - Ctrl+P command palette (`/cd`, `/profile`, `/profiles`, `/clear`, `/ts`, `/quit`)
 - Agent cancellation (Ctrl+C)
-- Conventions loading: auto-discovers `AGENTS.md` / `CLAUDE.md` / `.forge/conventions.md`
+- Conventions loading: auto-discovers `AGENTS.md` / `CLAUDE.md` / `.parecode/conventions.md`
 
 ### Observed results vs OpenCode
 - ~2.3k tokens for a file analysis task that cost OpenCode 20k+ tokens
@@ -114,7 +114,7 @@
 - Short reply hint: model told "yes/ok/go ahead" are responses to the previous message
 
 ### ✅ 3b. Persistent conversation storage
-- JSONL files in `~/.local/share/forge/sessions/{ts}_{basename}.jsonl`
+- JSONL files in `~/.local/share/parecode/sessions/{ts}_{basename}.jsonl`
 - Auto-resumed on startup for the matching cwd
 
 ### ✅ 3c. Session management
@@ -156,8 +156,8 @@
 - Per-step ✓/✗ shown in conversation history during execution
 
 ### ✅ Plan persistence
-- Plans saved to `.forge/plans/{timestamp}-plan.json` (JSON, machine-readable)
-- Plans written to `.forge/plan.md` (Markdown, human-readable — open in editor while plan runs)
+- Plans saved to `.parecode/plans/{timestamp}-plan.json` (JSON, machine-readable)
+- Plans written to `.parecode/plan.md` (Markdown, human-readable — open in editor while plan runs)
 - Failed plans paused at the failing step, resumable
 
 ### ✅ Plan UX polish
@@ -242,7 +242,7 @@ Full Model Context Protocol client (`src/mcp.rs`):
 
 ## Phase 6b — Distribution & First-Run Experience 
 
-The Rust binary is Forge's biggest distribution advantage. Every competitor requires a language runtime: OpenCode and Claude Code need Node.js, Aider needs Python, oh-my-opencode needs both. Forge is a single static binary — zero dependencies, starts in <10ms. The goal: install to productive in under 60 seconds, better than any competitor.
+The Rust binary is PareCode's biggest distribution advantage. Every competitor requires a language runtime: OpenCode and Claude Code need Node.js, Aider needs Python, oh-my-opencode needs both. PareCode is a single static binary — zero dependencies, starts in <10ms. The goal: install to productive in under 60 seconds, better than any competitor.
 
 ### 6b-i. Binary releases with cargo-dist SECOND NEXT - TEST MYSELF - install setup, qwen scenarios, then Claude
 
@@ -265,7 +265,7 @@ The Rust binary is Forge's biggest distribution advantage. Every competitor requ
 cargo-dist-version = "0.30.4"
 ci = ["github"]
 installers = ["shell", "powershell", "homebrew"]
-tap = "PartTimer1996/homebrew-forge"
+tap = "PartTimer1996/homebrew-parecode"
 targets = [
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
@@ -284,35 +284,35 @@ lto = "thin"
 
 **What cargo-dist produces automatically:**
 - GitHub Release with 5 platform binaries + SHA256 checksums for each
-- Shell installer script (`forge-installer.sh`) with checksum validation
-- PowerShell installer script (`forge-installer.ps1`) for Windows
-- Homebrew formula pushed to `PartTimer1996/homebrew-forge` tap
+- Shell installer script (`parecode-installer.sh`) with checksum validation
+- PowerShell installer script (`parecode-installer.ps1`) for Windows
+- Homebrew formula pushed to `PartTimer1996/homebrew-parecode` tap
 
 ### 6b-ii. Install methods (README-ready)
 
 ```bash
 # macOS / Linux — one-liner, zero dependencies
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/PartTimer1996/Forge/releases/latest/download/forge-installer.sh | sh
+  https://github.com/PartTimer1996/PareCode/releases/latest/download/parecode-installer.sh | sh
 
 # macOS — Homebrew
-brew install PartTimer1996/forge/forge
+brew install PartTimer1996/parecode/parecode
 
 # Windows — PowerShell
-irm https://github.com/PartTimer1996/Forge/releases/latest/download/forge-installer.ps1 | iex
+irm https://github.com/PartTimer1996/PareCode/releases/latest/download/parecode-installer.ps1 | iex
 ```
 
 **Competitive install comparison:**
 | Tool | Install command | Requires |
 |---|---|---|
-| **Forge** | `curl ... \| sh` | Nothing |
+| **PareCode** | `curl ... \| sh` | Nothing |
 | OpenCode | `npm install -g opencode` | Node.js |
 | oh-my-opencode | npm + manual agent config | Node.js + setup time |
 | Claude Code | `npm install -g @anthropic-ai/claude-code` | Node.js |
 | Aider | `pip install aider-chat` | Python |
 | Plandex | `curl ... \| bash` | Nothing (also compiled binary) |
 
-Forge and Plandex are the only zero-dependency installs in the category.
+PareCode and Plandex are the only zero-dependency installs in the category.
 
 ### 6b-iii. Distribution channel rollout
 
@@ -322,12 +322,12 @@ Forge and Plandex are the only zero-dependency installs in the category.
 - Homebrew tap (cargo-dist, automated)
 
 **Week 2:**
-- **AUR** (`forge-bin`) — binary PKGBUILD, targets Arch Linux developers. Highly technical early-adopter audience. Minimal maintenance: update `pkgver` + `sha256sums` on each release.
+- **AUR** (`parecode-bin`) — binary PKGBUILD, targets Arch Linux developers. Highly technical early-adopter audience. Minimal maintenance: update `pkgver` + `sha256sums` on each release.
 - **WinGet** — pre-installed on Windows 11. `wingetcreate new <release-url>` generates the manifest; `vedantmgoyal9/winget-releaser` GitHub Action automates future updates.
-- **Shell completions** — generate for bash/zsh/fish via clap's `generate` feature. Included in the tarball, install instructions in README. Makes Forge feel native.
+- **Shell completions** — generate for bash/zsh/fish via clap's `generate` feature. Included in the tarball, install instructions in README. Makes PareCode feel native.
 
 **Later (when users ask):**
-- `flake.nix` for Nix users — provide in repo, they can `nix profile install github:PartTimer1996/Forge`
+- `flake.nix` for Nix users — provide in repo, they can `nix profile install github:PartTimer1996/PareCode`
 - nixpkgs submission — often happens organically when the tool gains traction
 - deb/rpm — only worth building if significant Ubuntu/Fedora user base requests it
 
@@ -337,17 +337,17 @@ Forge and Plandex are the only zero-dependency installs in the category.
 - Docker (not a server application)
 - npm/pip wrappers (adds maintenance surface for marginal gain)
 
-### 6b-iv. `forge update` self-upgrade command
+### 6b-iv. `parecode update` self-upgrade command
 
-curl-installed users have no package manager to update through. `forge update` re-runs the install script against latest, replaces the binary in-place.
+curl-installed users have no package manager to update through. `parecode update` re-runs the install script against latest, replaces the binary in-place.
 
 ```
-$ forge update
-Checking for updates... forge 0.1.0 → 0.2.1 available
-Downloading forge 0.2.1 for aarch64-apple-darwin... ✓
+$ parecode update
+Checking for updates... parecode 0.1.0 → 0.2.1 available
+Downloading parecode 0.2.1 for aarch64-apple-darwin... ✓
 Verifying checksum... ✓
-Replacing /home/user/.local/bin/forge... ✓
-forge 0.2.1 installed.
+Replacing /home/user/.local/bin/parecode... ✓
+parecode 0.2.1 installed.
 ```
 
 Implementation: `src/main.rs` — `--update` subcommand, fetches GitHub API `/releases/latest`, compares version, re-runs platform-specific installer script.
@@ -364,13 +364,13 @@ Run on the tasks that caused Qwen3 14B to loop in OpenCode. Record token counts,
 
 Model matrix: Qwen3 14B (Ollama), Mistral 7B, DeepSeek-Coder, Claude Sonnet (API). Publish side-by-side with OpenCode numbers.
 
-### 6b-vi. Expose Forge as an MCP server (`--mcp` flag)
+### 6b-vi. Expose PareCode as an MCP server (`--mcp` flag)
 - JSON-RPC over stdin/stdout, `--mcp` flag
-- Makes Forge usable as a backend from any MCP-compatible IDE (Cursor, Zed, etc.)
+- Makes PareCode usable as a backend from any MCP-compatible IDE (Cursor, Zed, etc.)
 - Reuses all existing tool infrastructure
 
 ### 6b-vii. VSCode extension (trivial packaging, large surface area)
-- `package.json` + launch Forge subprocess + pipe events to webview
+- `package.json` + launch PareCode subprocess + pipe events to webview
 - Reuses all existing TUI event infrastructure
 - Gives access to VSCode's file tree, git integration, diff viewer
 
@@ -380,7 +380,7 @@ Model matrix: Qwen3 14B (Ollama), Mistral 7B, DeepSeek-Coder, Claude Sonnet (API
 
 **The target flow:**
 ```
-install → forge → interactive setup → working
+install → parecode → interactive setup → working
 ```
 
 **Nobody's current flow:**
@@ -388,18 +388,18 @@ install → forge → interactive setup → working
 install → run → error: no config → read docs → create config → run again → maybe works
 ```
 
-Forge should be the tool that just works.
+PareCode should be the tool that just works.
 
 ### 6c-i. First-run detection and setup wizard
 
-When `forge` is launched with no config file present, run an interactive setup wizard instead of erroring:
+When `parecode` is launched with no config file present, run an interactive setup wizard instead of erroring:
 
 ```
-Welcome to Forge ⚒
+Welcome to PareCode ⚒
 
-No config found at ~/.config/forge/config.toml. Let's get you set up.
+No config found at ~/.config/parecode/config.toml. Let's get you set up.
 
-? How do you want to run Forge?
+? How do you want to run PareCode?
   ❯ Local (Ollama) — free, private, works offline
     Anthropic Claude — best quality, requires API key
     OpenAI — GPT-4o, requires API key
@@ -414,8 +414,8 @@ No config found at ~/.config/forge/config.toml. Let's get you set up.
     qwen2.5-coder:14b
     llama3.1:8b
 
-Config written to ~/.config/forge/config.toml ✓
-Running /init to detect project context... ✓ written to .forge/conventions.md
+Config written to ~/.config/parecode/config.toml ✓
+Running /init to detect project context... ✓ written to .parecode/conventions.md
 
 Ready. What would you like to build?
 ▶
@@ -441,32 +441,32 @@ On every startup (not just first run), silently probe `localhost:11434/api/tags`
 
 ### 6c-iii. `/init` auto-prompt on new project
 
-On first `forge` launch in a directory with no `.forge/` folder:
+On first `parecode` launch in a directory with no `.parecode/` folder:
 
 ```
 No project conventions found.
-Run /init to prime Forge with your project's stack and style? [Y/n]
+Run /init to prime PareCode with your project's stack and style? [Y/n]
 ```
 
 If Y: runs `/init` inline (see Phase 6i), shows result, asks to save. If N: continues normally, can run `/init` later.
 
-### 6c-iv. `forge update` and version awareness
+### 6c-iv. `parecode update` and version awareness
 
 Status bar shows version and available update indicator:
 ```
-forge 0.1.0 · new version 0.2.1 available — run `forge update`
+parecode 0.1.0 · new version 0.2.1 available — run `parecode update`
 ```
 
-Checked once per session against GitHub API (cached for 24h in `~/.local/share/forge/update-check`). Never blocks startup.
+Checked once per session against GitHub API (cached for 24h in `~/.local/share/parecode/update-check`). Never blocks startup.
 
 ### 6c-v. Shell completion install hint
 
 On first run after install, if completions aren't installed:
 ```
 Tip: install shell completions for tab-completion of commands and flags:
-  forge --completions zsh > ~/.zfunc/_forge   # zsh
-  forge --completions bash > ~/.bash_completion.d/forge  # bash
-  forge --completions fish > ~/.config/fish/completions/forge.fish  # fish
+  parecode --completions zsh > ~/.zfunc/_parecode   # zsh
+  parecode --completions bash > ~/.bash_completion.d/parecode  # bash
+  parecode --completions fish > ~/.config/fish/completions/parecode.fish  # fish
 ```
 
 Shown once, suppressed after. Completions generated via clap's `generate` feature, shipped in release tarballs.
@@ -483,13 +483,13 @@ Shown once, suppressed after. Completions generated via clap's `generate` featur
 
 ### 6e. Mechanical mode (`--mechanical`)
 - Pure grep/sed for pattern tasks, zero model calls
-- `forge --mechanical "replace foo with bar in src/"` — explicit flag only, never auto-routed
+- `parecode --mechanical "replace foo with bar in src/"` — explicit flag only, never auto-routed
 - For rename/replace tasks this is 100x faster and cheaper than any model approach
 
 ### ✅ 6f. Telemetry & analytics — COMPLETE
 - `src/telemetry.rs` — `SessionStats` (live) + `TaskRecord` (persisted)
 - Per-task: input/output tokens, tool calls, compression ratio, model, profile
-- Flushed to `.forge/telemetry.jsonl` after every completed agent run (JSONL, appendable, aggregatable)
+- Flushed to `.parecode/telemetry.jsonl` after every completed agent run (JSONL, appendable, aggregatable)
 - **Always-visible stats bar** in TUI — second line below status bar, no toggle needed:
   - `∑ N tasks  X.Xktok  avg Y/task  Z tool calls  W% compressed  peak P%`
   - Dimmed/purple palette so it doesn't compete with active status bar
@@ -538,7 +538,7 @@ Shown once, suppressed after. Completions generated via clap's `generate` featur
 
 **Auto-detection (the key UX win):**
 
-On first run with no hooks in config, Forge scans the project root for language markers and auto-configures sensible defaults — no manual setup required:
+On first run with no hooks in config, PareCode scans the project root for language markers and auto-configures sensible defaults — no manual setup required:
 | Marker | `on_edit` | `on_task_done` |
 |---|---|---|
 | `Cargo.toml` | `cargo check -q` | `cargo test -q 2>&1 \| tail -5` |
@@ -546,7 +546,7 @@ On first run with no hooks in config, Forge scans the project root for language 
 | `go.mod` | `go build ./...` | — |
 | `pyproject.toml` / `setup.py` + ruff in PATH | `ruff check .` | — |
 
-Detection runs **once** then writes a `[profiles.{name}.hooks]` section into `~/.config/forge/config.toml` (append-only, preserving all comments). The written block includes active detected commands plus all 5 event types commented out as examples — so users can see and edit every option. Subsequent startups read from config; detection never repeats.
+Detection runs **once** then writes a `[profiles.{name}.hooks]` section into `~/.config/parecode/config.toml` (append-only, preserving all comments). The written block includes active detected commands plus all 5 event types commented out as examples — so users can see and edit every option. Subsequent startups read from config; detection never repeats.
 
 **Config (per-profile):**
 ```toml
@@ -581,7 +581,7 @@ Set `hooks_disabled = true` in a profile to permanently suppress all hooks inclu
 
 ## ✅ Phase 6i — `/init` Command — COMPLETE
 
-**One-shot project context priming.** Walks the project and auto-generates `.forge/conventions.md` from existing project files. Eliminates manual conventions setup for new projects.
+**One-shot project context priming.** Walks the project and auto-generates `.parecode/conventions.md` from existing project files. Eliminates manual conventions setup for new projects.
 
 **Sources (in priority order):**
 1. `README.md` — first 50 lines (project description, stack, install)
@@ -590,7 +590,7 @@ Set `hooks_disabled = true` in a profile to permanently suppress all hooks inclu
 4. `.eslintrc` / `rustfmt.toml` / `pyproject.toml [tool.ruff]` — style rules detected
 5. Test directory structure — infer test runner from `jest.config`, `pytest.ini`, `#[cfg(test)]`
 
-**Output format (`.forge/conventions.md`):**
+**Output format (`.parecode/conventions.md`):**
 ```markdown
 # Project: my-app
 Language: TypeScript (Bun runtime)
@@ -606,8 +606,8 @@ Key dependencies: React 19, Drizzle ORM, Hono
 
 **TUI integration:**
 - `/init` slash command — runs inline, shows progress, opens result in pager overlay for review/edit before saving
-- On first `forge` run in a new directory (no `.forge/` present): prompt "No conventions found. Run `/init` to prime project context? [y/N]"
-- `forge --init` CLI flag (already exists for config) — extend to also run project init if in a project directory
+- On first `parecode` run in a new directory (no `.parecode/` present): prompt "No conventions found. Run `/init` to prime project context? [y/N]"
+- `parecode --init` CLI flag (already exists for config) — extend to also run project init if in a project directory
 
 **Implementation:**
 - `src/init.rs` — `run_project_init(cwd) -> String` — pure text extraction, no model calls
@@ -653,7 +653,7 @@ cost_per_mtok_output = 1.25
 **Right-sized agent for right-sized tasks.** The full agent loop (plan → load context → multi-turn tool loop → verify) is overkill for a one-line fix. Quick mode skips the overhead entirely.
 
 **Trigger:**
-- `forge --quick "task"` — explicit flag
+- `parecode --quick "task"` — explicit flag
 - Auto-detect heuristic (opt-in via config `auto_quick = true`): task < 20 words, no file `@` attachments, no `/plan` prefix → quick mode
 - `/quick "task"` in TUI
 
@@ -682,119 +682,75 @@ Simple for / autocomplete show options, similar to @, simple yet massive for UX
 
 ---
 
-## Phase 6m — Git Integration — ESSENTIAL
+## ✅ Phase 6m — Git Integration — COMPLETE
 
-**The single most critical missing feature.** Every competitor has git integration. Aider's entire edit model is built on git diffs. Claude Code auto-commits. OpenCode has git tools. For a tool that modifies files, not having automatic checkpoints is a safety gap users will notice immediately — one bad edit with no easy undo and you've lost a user forever.
+**Every competitor has git integration.** Aider's entire edit model is built on git diffs. Claude Code auto-commits. OpenCode has git tools. For a tool that modifies files, not having automatic checkpoints is a safety gap users will notice immediately — one bad edit with no easy undo and you've lost a user forever.
 
-**Core capabilities:**
+### ✅ 6m-i. Auto-checkpoint before tasks
+- Before every agent run, `git add -A && git commit --no-verify -m "parecode: checkpoint before \"<task>\""` if tree is dirty
+- Clean tree → record HEAD hash as checkpoint (zero cost, no commit created)
+- `--no-verify` bypasses user pre-commit hooks — checkpoints must never be blocked by lint
+- Skip silently if not in a git repo
 
-### 6m-i. Auto-checkpoint before tasks
-- Before every agent run (normal or plan step), auto-create a git stash or checkpoint commit on a detached/temp branch
-- Message format: `forge: checkpoint before "<task summary>"`
-- If working tree is dirty, stash first, then checkpoint — user's uncommitted work is never lost
-- Zero config — works automatically if `cwd` is inside a git repo
-- Skip silently if not in a git repo (don't force git on non-git projects)
+### ✅ 6m-ii. Post-task diff display
+- After every completed agent run, `⎇ N files changed — press 5 to review, d to diff, /undo to revert` in chat
+- `d` key from any tab opens full-screen syntax-coloured diff overlay (green/red/cyan, j/k scroll)
+- `/diff` command switches to Git tab + opens diff overlay
+- **Bug fixed**: diffs compare checkpoint against working tree (`git diff <hash>`), not commit-to-commit (`git diff <hash> HEAD`)
 
-### 6m-ii. Post-task diff display
-- After every completed agent run, show `git diff --stat` summary in TUI
-- Expandable: `d` key to show full diff in a scrollable overlay (ratatui pager)
-- For plan mode: cumulative diff shown after all steps complete, per-step diffs available in step detail view
-- Diff output also available via `/diff` slash command at any time
+### ✅ 6m-iii. Undo via git
+- `/undo` slash command — opens interactive checkpoint picker in Git tab (↑↓ select, Enter revert, Esc cancel)
+- `u` key in Git tab opens the same picker
+- `UndoPicker` mode: full-area checkpoint list with hash, age, message columns; amber/orange danger palette
+- Warning bar: `⚠ git reset --hard — this cannot be undone`
+- After undo: clears checkpoint hash, diff content, and stat so stale data doesn't linger
 
-### 6m-iii. Undo via git
-- `/undo` slash command — reverts to the last checkpoint
-- Implementation: `git checkout -- .` to the checkpoint ref, or `git stash pop` if stashed
-- Confirmation prompt: `"Revert all changes from last task? [y/N]"`
-- Multiple undo levels: `/undo 2` reverts last 2 task checkpoints
-- Rollback (session) + undo (files) = complete state recovery
-
-### 6m-iv. Auto-commit on task success (opt-in)
+### ✅ 6m-iv. Auto-commit on task success (opt-in)
 - Config: `auto_commit = true` in profile (default: false)
-- On successful task completion: `git add -A && git commit -m "forge: <task summary>"`
-- For plan mode: one commit per plan (not per step) with full plan summary as commit message
-- `auto_commit_prefix = "forge: "` configurable
+- On successful task completion: `git add -A && git commit --no-verify -m "<prefix><task summary>"`
+- `auto_commit_prefix = "parecode: "` configurable
 
-### 6m-v. Git-aware context
-- `git status --short` output available to the model as lightweight context ("these files have uncommitted changes")
-- `git log --oneline -5` available for recent project context
-- `git diff --cached` available when user has staged changes — model knows what's about to be committed
-- Exposed as a `git_context` tool or injected into system prompt preamble (TBD — tool is more flexible, preamble is cheaper)
+### ✅ 6m-v. Git-aware context
+- `git status --short` injected into system prompt preamble when `git_context = true` (default)
+- Lightweight — model knows which files have uncommitted changes without a tool call
 
 **Implementation:**
-- `src/git.rs` — `GitRepo { root: PathBuf }`, `checkpoint()`, `undo()`, `diff_stat()`, `diff_full()`, `auto_commit()`, `status_short()`, `is_git_repo(path) -> bool`
-- Uses `std::process::Command` calling `git` directly (no libgit2 dependency — keeps the binary lean and avoids linking headaches on musl)
-- `src/agent.rs` — call `checkpoint()` before agent loop, `diff_stat()` after
-- `src/tui/mod.rs` — `/undo`, `/diff` commands, diff overlay, post-task diff display
-- `src/config.rs` — `auto_commit: bool`, `auto_commit_prefix: String` on `Profile`
+- `src/git.rs` — `GitRepo { root: PathBuf }`, `checkpoint()`, `undo()`, `diff_stat_from()`, `diff_full_from()`, `auto_commit()`, `status_short()`, `list_checkpoints()`, `is_git_repo(path) -> bool`
+- Uses `std::process::Command` — no libgit2, keeps binary lean
+- `src/tui/git_view.rs` — Git tab: checkpoint header, diff stat, undo picker overlay
+- `src/tui/overlays.rs` — `draw_diff_overlay()` — full-screen syntax-coloured diff viewer
+- `src/tui/mod.rs` — `/undo`, `/diff` commands, `UndoPicker` mode, `UiEvent::GitChanges/GitAutoCommit/GitError`
+- `src/config.rs` — `auto_commit`, `auto_commit_prefix`, `git_context` on `Profile`
 
 **Config:**
 ```toml
 [profiles.local]
-auto_commit = false        # default — don't auto-commit
-auto_commit_prefix = "forge: "  # prefix for auto-commit messages
+git_context = true                # inject git status into system prompt; enables checkpoints
+auto_commit = false               # default — don't auto-commit
+auto_commit_prefix = "parecode: "   # prefix for auto-commit messages
 ```
 
 ---
 
-## Phase 6n — Diff/Patch Edit Mode - Before distrobution - should actually be pretty easy - just an additional tool
+## ✅ Phase 6n — Diff/Patch Edit Mode — COMPLETE
 
-**More token-efficient editing for multi-hunk changes.** The current `edit_file` tool uses search-and-replace (`old_str` → `new_str`), which works well for single edits but becomes expensive for multi-hunk changes — the model must send the full old content and full new content for each hunk. A unified-diff mode sends only the changes, which aligns directly with Forge's efficiency thesis.
+**More token-efficient editing for multi-hunk changes.** The current `edit_file` tool uses search-and-replace (`old_str` → `new_str`), which works well for single edits but becomes expensive for multi-hunk changes — the model must send the full old content and full new content for each hunk. A unified-diff mode sends only the changes, which aligns directly with PareCode's efficiency thesis.
 
 **Aider proved this works.** Their unified-diff edit format reduced token usage by 30-50% on multi-hunk edits compared to search-and-replace, with comparable accuracy on capable models. The key insight: models are already trained on diff output — it's a natural format for them.
 
-### 6n-i. `patch_file` tool (new tool, alongside `edit_file`)
-
-**Schema:**
-```json
-{
-  "name": "patch_file",
-  "parameters": {
-    "path": "string (required)",
-    "patch": "string (required) — unified diff format",
-    "anchor": "string (optional) — hash anchor from read_file"
-  }
-}
-```
-
-**Unified diff format the model produces:**
-```diff
---- a/src/auth.rs
-+++ b/src/auth.rs
-@@ -15,7 +15,9 @@
- fn validate_token(token: &str) -> Result<Claims> {
--    let claims = decode(token)?;
-+    let claims = decode(token)
-+        .map_err(|e| AuthError::InvalidToken(e.to_string()))?;
-+    log::info!("token validated for user: {}", claims.sub);
-     Ok(claims)
- }
-```
-
-**Application:**
-- Parse unified diff hunks from the `patch` string
-- For each hunk: locate the context lines in the target file, verify they match, apply the `-`/`+` changes
-- If context lines don't match: return error with the mismatched region (same as edit_file failure hint)
-- Hash anchor verification (from Phase 6g) applies to the first line of each hunk if provided
-
-### 6n-ii. Adaptive tool selection
+### ✅ 6n-ii. Adaptive tool selection
 - System prompt guidance: "Use `edit_file` for single-location changes. Use `patch_file` for multi-hunk edits or when changing multiple related locations in the same file."
 - Both tools remain available — model chooses based on task
-- Token budget tracking records per-tool efficiency: if `patch_file` consistently uses fewer tokens for equivalent edits, surface this in telemetry
 
-### 6n-iii. Fuzzy patch application
-- Same cascade as `edit_file`: exact match → whitespace-normalised → trimmed
-- Context lines (lines without `+` or `-` prefix) used for anchoring — if context matches but line numbers are off, apply at the matched location
-- This is critical for local models that may produce slightly incorrect line numbers in the `@@` header
+### ✅ 6n-iii. Fuzzy patch application
+- 3-tier cascade: exact match → whitespace-normalised → hint-biased on multiple candidates
+- Context lines used for anchoring — if context matches but line numbers are off, apply at the matched location
+- Critical for local models that produce slightly incorrect line numbers in `@@` headers
 
 **Implementation:**
-- `src/tools/patch.rs` — `PatchTool`, `parse_unified_diff()`, `apply_hunks()`, fuzzy context matching
-- `src/tools/mod.rs` — register `patch_file` in tool list
-- System prompt addition in `src/agent.rs`
-
-**Why not replace `edit_file` entirely?**
-- `edit_file` is simpler and more reliable for single edits, especially on small models
-- Local 14B models produce cleaner search-and-replace than unified diffs
-- The two tools serve different complexity tiers — let the model choose
+- `src/tools/patch.rs` — `parse_hunks()`, `apply_hunk()`, `find_needle()` with 3-tier fuzzy matching; 6 unit tests
+- `src/tools/mod.rs` — registered in `all_definitions()`, `is_native()`, `dispatch()`
+- `src/agent.rs` — system prompt guidance, `is_mutating` check, hook/telemetry arm
 
 ---
 
@@ -840,7 +796,7 @@ auto_commit_prefix = "forge: "  # prefix for auto-commit messages
 
 ## Phase 6p — TUI Visual Overhaul
 
-**Turn the TUI from "functional terminal app" into "this looks like a real product."** Ratatui was absolutely the right choice here — it has first-class `Tabs`, `Table`, split layouts, scrollable viewports, and inline syntax highlighting via `syntect`. Everything below is achievable without changing framework. This is the phase where Forge stops looking like a dev tool and starts looking like a product.
+**Turn the TUI from "functional terminal app" into "this looks like a real product."** Ratatui was absolutely the right choice here — it has first-class `Tabs`, `Table`, split layouts, scrollable viewports, and inline syntax highlighting via `syntect`. Everything below is achievable without changing framework. This is the phase where PareCode stops looking like a dev tool and starts looking like a product.
 
 ### 6p-i. Tab bar (top of screen) - Working pretty nicely also
 
@@ -899,7 +855,7 @@ A collapsible sidebar on the left showing session history — like the sidebar i
 **Implementation:**
 - `src/tui/render.rs` — `Layout::default().direction(Direction::Horizontal)` split: sidebar + main chat area
 - `src/tui/mod.rs` — `AppState.sidebar_visible: bool`, `AppState.sidebar_selected: usize`
-- Sessions loaded from existing `~/.local/share/forge/sessions/` JSONL files
+- Sessions loaded from existing `~/.local/share/parecode/sessions/` JSONL files
 
 ### 6p-iii. Git tab (full diff viewer)
 
@@ -908,7 +864,7 @@ A collapsible sidebar on the left showing session history — like the sidebar i
 ```
 ┌─ ⚒ Chat ─┬─ ⚙ Config ─┬─  Git ─┬─ 📊 Stats ─┐
 │                                                   │
-│  Checkpoint: forge: before "add JWT auth"         │
+│  Checkpoint: parecode: before "add JWT auth"         │
 │  3 files changed, +42 -8                          │
 │                                                   │
 │  src/auth.rs ──────────────────────────────────── │
@@ -940,7 +896,7 @@ A collapsible sidebar on the left showing session history — like the sidebar i
 
 ### 6p-iv. Config tab (profile/hooks/MCP management) - Done, needs edit file functionality directly 
 
-A read/edit view of the current configuration — eliminates the need to leave Forge to edit `config.toml`.
+A read/edit view of the current configuration — eliminates the need to leave PareCode to edit `config.toml`.
 
 ```
 ┌─ ⚒ Chat ─┬─ ⚙ Config ─┬─  Git ─┬─ 📊 Stats ─┐
@@ -962,7 +918,7 @@ A read/edit view of the current configuration — eliminates the need to leave F
 │  brave:  running (3 tools)                        │
 │  fetch:  running (1 tool)                         │
 │                                                   │
-│  Conventions: .forge/conventions.md (loaded)      │
+│  Conventions: .parecode/conventions.md (loaded)      │
 │                                                   │
 │  [p] Switch profile  [e] Edit config  [h] Toggle  │
 └───────────────────────────────────────────────────┘
@@ -1008,7 +964,7 @@ The existing stats bar is great. This tab expands it into a full dashboard — t
 - Running cost estimate (using profile's `cost_per_mtok` if configured)
 - Comparative estimate ("vs OpenCode equivalent") — based on the 5-10x multiplier. This is the screenshot-worthy feature.
 - Session totals and averages
-- Export: `x` key to dump session stats to `.forge/stats-export.json`
+- Export: `x` key to dump session stats to `.parecode/stats-export.json`
 
 ### 6p-vi. Plan tab (active plan viewer)
 
@@ -1108,14 +1064,14 @@ System prompt size. You're now injecting: conventions, session context, step car
 
 ## Version 1 — Publish, Validate, and Gate Phase 7
 
-> **This is the quality gate.** Phase 7 does not start until every benchmark category below passes. The goal is publishable evidence that Forge's efficiency claims are real, and a regression baseline that protects them going forward.
+> **This is the quality gate.** Phase 7 does not start until every benchmark category below passes. The goal is publishable evidence that PareCode's efficiency claims are real, and a regression baseline that protects them going forward.
 
 **Prerequisites before starting validation:**
 - Phase 6b (distribution / cargo-dist) complete — test on a clean install, not a dev build
 - Phase 6c (first-run wizard) complete — test the real new-user flow, not a hand-configured setup
-- All 6a–6o (ideally some of the good parts of 6P) phases building and shipping in the release binary
+- All 6a–6o (ideally some of the good parts of 6P) phases building and shipping in the release binary - COMPLETE
 
-**Metrics to record for every test run** (telemetry captures most of this automatically in `.forge/telemetry.jsonl`):
+**Metrics to record for every test run** (telemetry captures most of this automatically in `.parecode/telemetry.jsonl`):
 
 | Metric | How to get it |
 |---|---|
@@ -1133,11 +1089,11 @@ Save the telemetry snapshot after each run. These become the regression baseline
 
 ### V1-A. Baseline: Qwen3 14B (Ollama, local)
 
-> The hardest test. If Forge guides a messy 14B model better than OpenCode, that's the headline claim validated.
+> The hardest test. If PareCode guides a messy 14B model better than OpenCode, that's the headline claim validated.
 
 **Setup:** `tsc --noEmit` hook auto-detected and active for TypeScript tasks. Run the same tasks in OpenCode first and record its numbers — the diff is the publishable story.
 
-| Task | OpenCode result (record before testing Forge) | Forge target |
+| Task | OpenCode result (record before testing PareCode) | PareCode target |
 |---|---|---|
 | Replace all instances of a term project-wide | Loops, re-reads, often fails | ≤ 4 tool calls, 0 re-reads, correct |
 | Update HTML + SCSS: change colours, improve styling | Loses context mid-task, wrong file edits | Completes in ≤ 6 tool calls, hook catches TSC errors |
@@ -1151,14 +1107,14 @@ For each task record the full metric set above. The `tsc --noEmit` hook injectio
 
 > This is the money shot for the hooks system. A capable model that reads `⚙ cargo check -q (exit 1): error[E0308]…` and self-corrects in the same tool loop — no extra read_file round-trip — is the proof that on_edit injection works as designed.
 
-**Setup:** Claude Sonnet profile with `cargo check -q` hook (Forge Rust codebase, or any real Rust project).
+**Setup:** Claude Sonnet profile with `cargo check -q` hook (PareCode Rust codebase, or any real Rust project).
 
 | Test | What to observe |
 |---|---|
-| Make a deliberate type error, ask Forge to add a function | Does Claude see the hook output and fix the error without re-reading? |
+| Make a deliberate type error, ask PareCode to add a function | Does Claude see the hook output and fix the error without re-reading? |
 | Multi-step plan on a real feature | Do all steps pass verification? Do step carry-forward summaries give Claude correct context? |
 | Edit a file that has shifted since last read | Does the hash anchor mismatch fire? Does Claude re-read and retry correctly? |
-| Compare token count: Forge+Claude vs Claude Code on same task | Record both. This is the efficiency headline. |
+| Compare token count: PareCode+Claude vs Claude Code on same task | Record both. This is the efficiency headline. |
 
 Hash-anchored edits (Phase 6g) are specifically worth testing here — Claude will actually use the optional `anchor` parameter, Qwen 14B likely ignores it.
 
@@ -1166,7 +1122,7 @@ Hash-anchored edits (Phase 6g) are specifically worth testing here — Claude wi
 
 ### V1-C. Cloud mid-range: Qwen3-Coder 72B (OpenRouter)
 
-> The realistic ceiling for users who want local-model quality without Anthropic pricing. If Forge makes 72B usable for complex multi-file tasks, that's a strong story for the cost-conscious segment.
+> The realistic ceiling for users who want local-model quality without Anthropic pricing. If PareCode makes 72B usable for complex multi-file tasks, that's a strong story for the cost-conscious segment.
 
 **Setup:** OpenRouter profile. Tests validate that lean schemas and context management work across provider backends — OpenRouter wraps the API differently from Ollama.
 
@@ -1199,9 +1155,9 @@ The key signal: web search should feel like a natural tool call, not a special c
 
 After V1-A through V1-D pass:
 
-1. **Save telemetry snapshots** — copy `.forge/telemetry.jsonl` to `benchmarks/v1-baseline-{model}.jsonl` for each model tested
+1. **Save telemetry snapshots** — copy `.parecode/telemetry.jsonl` to `benchmarks/v1-baseline-{model}.jsonl` for each model tested
 2. **Document the passing task set** — these become the fixed regression suite; any future change that causes a previously-passing task to fail or regress by >10% in tokens/tool-calls is a blocker before merge
-3. **Publish results** — the token efficiency comparison (Forge vs OpenCode on the same tasks) is the viral moment. Even a blog post or README table is enough for early traction.
+3. **Publish results** — the token efficiency comparison (PareCode vs OpenCode on the same tasks) is the viral moment. Even a blog post or README table is enough for early traction.
 
 **Phase 7 is gated on:** all four test categories above showing clean results, regression baseline saved, and at least the Qwen3 14B + Claude Sonnet comparisons documented.
 
@@ -1274,7 +1230,7 @@ scope   = ["visual", "frontend", "test-e2e"]   # only loaded for these categorie
 
 ### 7d. Image/multimodal support
 
-**Increasingly table-stakes.** "Fix this CSS — here's a screenshot" is a real workflow. Not critical for V1, but competitors are adding it and user expectations are shifting. Multimodal input turns Forge from a text-only coding agent into a visual-aware development partner.
+**Increasingly table-stakes.** "Fix this CSS — here's a screenshot" is a real workflow. Not critical for V1, but competitors are adding it and user expectations are shifting. Multimodal input turns PareCode from a text-only coding agent into a visual-aware development partner.
 
 **Core capabilities:**
 

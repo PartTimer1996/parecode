@@ -22,7 +22,7 @@ use config::{ConfigFile, ResolvedConfig};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "forge",
+    name = "parecode",
     about = "A hyper-efficient coding agent for local and cloud LLMs",
     long_about = None,
 )]
@@ -31,19 +31,19 @@ struct Args {
     task: Option<String>,
 
     /// Profile to use from config file
-    #[arg(short, long, env = "FORGE_PROFILE")]
+    #[arg(short, long, env = "PARECODE_PROFILE")]
     profile: Option<String>,
 
     /// Override endpoint URL
-    #[arg(long, env = "FORGE_ENDPOINT")]
+    #[arg(long, env = "PARECODE_ENDPOINT")]
     endpoint: Option<String>,
 
     /// Override model name
-    #[arg(short, long, env = "FORGE_MODEL")]
+    #[arg(short, long, env = "PARECODE_MODEL")]
     model: Option<String>,
 
     /// Override API key
-    #[arg(long, env = "FORGE_API_KEY")]
+    #[arg(long, env = "PARECODE_API_KEY")]
     api_key: Option<String>,
 
     /// Show tool calls without executing them
@@ -62,7 +62,7 @@ struct Args {
     #[arg(long)]
     timestamps: bool,
 
-    /// Write a default config file to ~/.config/forge/config.toml and exit
+    /// Write a default config file to ~/.config/parecode/config.toml and exit
     #[arg(long)]
     init: bool,
 
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
     if args.init {
         let path = ConfigFile::write_default_if_missing()?;
         println!("Config written to: {}", path.display());
-        println!("Edit it, then run: forge");
+        println!("Edit it, then run: parecode");
         return Ok(());
     }
 
@@ -125,7 +125,7 @@ async fn run_single_shot(
     use tokio::sync::mpsc;
 
     println!();
-    println!("  ▲ forge  {}  ·  {}", resolved.profile_name, resolved.model);
+    println!("  ▲ parecode  {}  ·  {}", resolved.profile_name, resolved.model);
     println!();
     println!("  task: {task}");
     println!();
@@ -243,7 +243,7 @@ async fn run_single_shot_quick(
     use tokio::sync::mpsc;
 
     println!();
-    println!("  ⚡ forge quick  {}  ·  {}", resolved.profile_name, resolved.model);
+    println!("  ⚡ parecode quick  {}  ·  {}", resolved.profile_name, resolved.model);
     println!();
 
     let mut client = client::Client::new(resolved.endpoint.clone(), resolved.model.clone());

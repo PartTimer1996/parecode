@@ -1,11 +1,11 @@
-/// Git integration for Forge — checkpoints, diffs, undo, auto-commit.
+/// Git integration for PareCode — checkpoints, diffs, undo, auto-commit.
 ///
 /// All public functions are designed to fail silently when not in a git repo.
 /// Callers use `.and_then()` / `.ok()` — git errors never surface as panics.
 ///
 /// Checkpoint strategy: WIP commits on the current branch.
 /// - Clean tree → record HEAD hash (zero cost, no commit).
-/// - Dirty tree → `git add -A && git commit --no-verify -m "forge: checkpoint ..."`.
+/// - Dirty tree → `git add -A && git commit --no-verify -m "parecode: checkpoint ..."`.
 /// - `--no-verify` bypasses user pre-commit hooks intentionally: checkpoints must never
 ///   be blocked by lint or formatting hooks.
 use anyhow::{anyhow, Result};
@@ -62,7 +62,7 @@ impl GitRepo {
     /// - If the working tree is **dirty**: stages all changes and creates a WIP commit,
     ///   returning the new HEAD hash.
     ///
-    /// The commit message prefix `"forge: checkpoint before"` is matched by
+    /// The commit message prefix `"parecode: checkpoint before"` is matched by
     /// `list_checkpoints()` — do not change it without updating that function.
     pub fn checkpoint(&self, task_summary: &str) -> Result<String> {
         let porcelain = self.run_git(&["status", "--porcelain"])?;
@@ -77,7 +77,7 @@ impl GitRepo {
 
         // Dirty tree — stage everything and commit.
         let summary: String = task_summary.chars().take(60).collect();
-        let msg = format!("forge: checkpoint before \"{}\"", summary);
+        let msg = format!("parecode: checkpoint before \"{}\"", summary);
 
         self.run_git(&["add", "-A"])?;
         self.run_git(&["commit", "--no-verify", "-m", &msg])?;
@@ -86,14 +86,14 @@ impl GitRepo {
             .map(|s| s.trim().to_string())
     }
 
-    /// Revert the working tree to the `n`th most recent forge checkpoint (1-based).
+    /// Revert the working tree to the `n`th most recent parecode checkpoint (1-based).
     ///
     /// **Destructive** — does `git reset --hard`. The caller must obtain user
     /// confirmation before calling this function.
     pub fn undo(&self, n: usize) -> Result<()> {
         let checkpoints = self.list_checkpoints()?;
         if checkpoints.is_empty() {
-            return Err(anyhow!("no forge checkpoints found"));
+            return Err(anyhow!("no parecode checkpoints found"));
         }
         let idx = n.saturating_sub(1).min(checkpoints.len() - 1);
         let target = &checkpoints[idx];
@@ -148,13 +148,13 @@ impl GitRepo {
         }
     }
 
-    /// List forge checkpoint commits, newest first.
-    /// Searches the last 20 commits for messages matching `"forge: checkpoint"`.
+    /// List parecode checkpoint commits, newest first.
+    /// Searches the last 20 commits for messages matching `"parecode: checkpoint"`.
     pub fn list_checkpoints(&self) -> Result<Vec<CheckpointInfo>> {
         let out = self.run_git(&[
             "log",
             "--format=%H|%h|%s|%ct",
-            "--grep=forge: checkpoint",
+            "--grep=parecode: checkpoint",
             "-20",
         ])?;
 

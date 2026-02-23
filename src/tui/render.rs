@@ -1,4 +1,4 @@
-/// Ratatui draw entry-point for Forge.
+/// Ratatui draw entry-point for PareCode.
 /// Thin dispatcher — most rendering lives in chat.rs and overlays.rs.
 use ratatui::{
     Frame,
@@ -277,7 +277,7 @@ fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
     let line = Line::from(vec![
         Span::raw(" "),
         Span::styled(status_glyph, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
-        Span::styled(" forge", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(" parecode", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw("  "),
         Span::styled(state.profile.clone(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),

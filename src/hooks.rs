@@ -191,7 +191,7 @@ pub fn write_hooks_to_config(profile_name: &str) -> HookConfig {
     let block = format!(
         r#"
 # ── Hooks (auto-detected) ────────────────────────────────────────────────────
-# Forge detected your project type and configured these hooks automatically.
+# PareCode detected your project type and configured these hooks automatically.
 # Edit freely — set hooks_disabled = true to disable all hooks for this profile.
 #
 # on_edit      — runs after every edit_file/write_file; output injected into
