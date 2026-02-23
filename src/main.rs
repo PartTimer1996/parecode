@@ -18,7 +18,7 @@ mod tui;
 mod ui;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use config::{ConfigFile, ResolvedConfig};
 
 #[derive(Parser, Debug)]
@@ -70,6 +70,14 @@ struct Args {
     /// List available profiles and exit
     #[arg(long)]
     profiles: bool,
+
+    /// Generate shell completions and print to stdout (bash, zsh, fish, elvish)
+    #[arg(long, value_name = "SHELL")]
+    completions: Option<String>,
+
+    /// Update parecode to the latest release
+    #[arg(long)]
+    update: bool,
 }
 
 #[tokio::main]
@@ -82,6 +90,16 @@ async fn main() -> Result<()> {
         println!("Config written to: {}", path.display());
         println!("Edit it, then run: parecode");
         return Ok(());
+    }
+
+    // ── --completions ─────────────────────────────────────────────────────────
+    if let Some(shell_name) = &args.completions {
+        return generate_completions(shell_name);
+    }
+
+    // ── --update ──────────────────────────────────────────────────────────────
+    if args.update {
+        return self_update().await;
     }
 
     // ── First-run wizard ──────────────────────────────────────────────────────
@@ -137,7 +155,10 @@ async fn main() -> Result<()> {
     }
 
     // ── Interactive TUI mode ──────────────────────────────────────────────────
-    tui::run(file, resolved, args.verbose, args.dry_run, args.timestamps).await
+    // Check for updates in the background (non-blocking)
+    let update_notice = tokio::spawn(async { setup::check_for_update().await });
+
+    tui::run(file, resolved, args.verbose, args.dry_run, args.timestamps, update_notice).await
 }
 
 // ── Single-shot mode (plain stdout, no TUI) ───────────────────────────────────
@@ -327,4 +348,274 @@ fn print_profiles(file: &ConfigFile) {
         println!("    context   {}k", ctx / 1000);
         println!();
     }
+}
+
+// ── Shell completions ─────────────────────────────────────────────────────────
+
+fn generate_completions(shell_name: &str) -> Result<()> {
+    use clap_complete::{Shell, generate};
+
+    let shell: Shell = match shell_name.to_lowercase().as_str() {
+        "bash"    => Shell::Bash,
+        "zsh"     => Shell::Zsh,
+        "fish"    => Shell::Fish,
+        "elvish"  => Shell::Elvish,
+        _ => {
+            eprintln!("Unknown shell: {shell_name}");
+            eprintln!("Supported: bash, zsh, fish, elvish");
+            std::process::exit(1);
+        }
+    };
+
+    let mut cmd = Args::command();
+    generate(shell, &mut cmd, "parecode", &mut std::io::stdout());
+    Ok(())
+}
+
+// ── Self-update ───────────────────────────────────────────────────────────────
+
+async fn self_update() -> Result<()> {
+    use std::io::Write;
+
+    let current = env!("CARGO_PKG_VERSION");
+    print!("  Checking for updates... ");
+    std::io::stdout().flush()?;
+
+    let update = setup::check_for_update().await;
+
+    match update {
+        None => {
+            println!("parecode {current} is already the latest version.");
+            return Ok(());
+        }
+        Some((_, latest)) => {
+            println!("parecode {current} → {latest} available");
+            println!();
+
+            // Determine platform target
+            let target = detect_target();
+            let Some(target) = target else {
+                eprintln!("  ✗ Could not detect platform. Update manually from:");
+                eprintln!("    https://github.com/PartTimer1996/parecode/releases/latest");
+                std::process::exit(1);
+            };
+
+            // Fetch release assets
+            print!("  Downloading parecode {latest} for {target}... ");
+            std::io::stdout().flush()?;
+
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()?;
+
+            // Fetch release info to find the right asset
+            let release_url = "https://api.github.com/repos/PartTimer1996/parecode/releases/latest";
+            let resp = client
+                .get(release_url)
+                .header("User-Agent", "parecode")
+                .send()
+                .await?;
+
+            if !resp.status().is_success() {
+                println!("✗");
+                eprintln!("  Failed to fetch release info (HTTP {})", resp.status());
+                std::process::exit(1);
+            }
+
+            let body: serde_json::Value = resp.json().await?;
+            let assets = body["assets"].as_array().ok_or_else(|| {
+                anyhow::anyhow!("No assets in release")
+            })?;
+
+            // Find the matching archive asset
+            // cargo-dist names: parecode-{target}.tar.xz (unix) or .zip (windows)
+            let is_windows = target.contains("windows");
+            let unix_exts = [".tar.xz", ".tar.gz"];
+
+            let asset_url = if is_windows {
+                assets.iter().find_map(|a| {
+                    let name = a["name"].as_str()?;
+                    if name.contains(&target) && name.ends_with(".zip") {
+                        a["browser_download_url"].as_str().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                // Try .tar.xz first (cargo-dist default), then .tar.gz fallback
+                unix_exts.iter().find_map(|ext| {
+                    assets.iter().find_map(|a| {
+                        let name = a["name"].as_str()?;
+                        if name.contains(&target) && name.ends_with(ext) {
+                            a["browser_download_url"].as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                })
+            };
+
+            let Some(download_url) = asset_url else {
+                println!("✗");
+                eprintln!("  No matching asset for target {target}");
+                eprintln!("  Check: https://github.com/PartTimer1996/parecode/releases/latest");
+                std::process::exit(1);
+            };
+
+            // Download archive
+            let resp = client
+                .get(&download_url)
+                .header("User-Agent", "parecode")
+                .send()
+                .await?;
+
+            if !resp.status().is_success() {
+                println!("✗");
+                eprintln!("  Download failed (HTTP {})", resp.status());
+                std::process::exit(1);
+            }
+
+            let bytes = resp.bytes().await?;
+            println!("✓ ({:.1} MB)", bytes.len() as f64 / 1_048_576.0);
+
+            // Extract binary from archive
+            print!("  Extracting... ");
+            std::io::stdout().flush()?;
+
+            let binary_name = if is_windows { "parecode.exe" } else { "parecode" };
+            let extracted = if is_windows {
+                extract_from_zip(&bytes, binary_name)?
+            } else if download_url.ends_with(".tar.xz") {
+                extract_from_tar_xz(&bytes, binary_name)?
+            } else {
+                extract_from_tar_gz(&bytes, binary_name)?
+            };
+            println!("✓");
+
+            // Replace self
+            let current_exe = std::env::current_exe()?;
+            print!("  Replacing {}... ", current_exe.display());
+            std::io::stdout().flush()?;
+
+            replace_exe(&current_exe, &extracted)?;
+            println!("✓");
+
+            println!();
+            println!("  parecode {latest} installed.");
+        }
+    }
+    Ok(())
+}
+
+/// Detect the cargo-dist target triple for the current platform.
+fn detect_target() -> Option<String> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+
+    match (arch, os) {
+        ("x86_64",  "linux")   => Some("x86_64-unknown-linux-musl".to_string()),
+        ("aarch64", "linux")   => Some("aarch64-unknown-linux-musl".to_string()),
+        ("x86_64",  "macos")   => Some("x86_64-apple-darwin".to_string()),
+        ("aarch64", "macos")   => Some("aarch64-apple-darwin".to_string()),
+        ("x86_64",  "windows") => Some("x86_64-pc-windows-msvc".to_string()),
+        _ => None,
+    }
+}
+
+/// Extract a named file from a .tar.xz archive in memory.
+fn extract_from_tar_xz(data: &[u8], target_name: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    let decoder = xz2::read::XzDecoder::new(data);
+    let mut archive = tar::Archive::new(decoder);
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        if let Some(fname) = path.file_name() {
+            if fname == target_name {
+                let mut buf = Vec::new();
+                entry.read_to_end(&mut buf)?;
+                return Ok(buf);
+            }
+        }
+    }
+    anyhow::bail!("Binary '{target_name}' not found in archive")
+}
+
+/// Extract a named file from a .tar.gz archive in memory.
+fn extract_from_tar_gz(data: &[u8], target_name: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    let decoder = flate2::read::GzDecoder::new(data);
+    let mut archive = tar::Archive::new(decoder);
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        if let Some(fname) = path.file_name() {
+            if fname == target_name {
+                let mut buf = Vec::new();
+                entry.read_to_end(&mut buf)?;
+                return Ok(buf);
+            }
+        }
+    }
+    anyhow::bail!("Binary '{target_name}' not found in archive")
+}
+
+/// Extract a named file from a .zip archive in memory.
+fn extract_from_zip(data: &[u8], target_name: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    let reader = std::io::Cursor::new(data);
+    let mut zip = zip::ZipArchive::new(reader)?;
+
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i)?;
+        let path = std::path::Path::new(file.name());
+        if let Some(fname) = path.file_name() {
+            if fname == target_name {
+                let mut buf = Vec::new();
+                file.read_to_end(&mut buf)?;
+                return Ok(buf);
+            }
+        }
+    }
+    anyhow::bail!("Binary '{target_name}' not found in zip")
+}
+
+/// Replace the running executable with new binary data.
+/// Uses rename-swap pattern for atomic replacement on all platforms.
+fn replace_exe(current_path: &std::path::Path, new_data: &[u8]) -> Result<()> {
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = current_path.parent().unwrap_or(std::path::Path::new("."));
+    let backup = dir.join("parecode.old");
+    let staging = dir.join("parecode.new");
+
+    // Write new binary to staging file
+    fs::write(&staging, new_data)?;
+
+    // Set executable permissions on unix
+    #[cfg(unix)]
+    fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))?;
+
+    // Move current → backup, staging → current
+    if backup.exists() {
+        let _ = fs::remove_file(&backup);
+    }
+    fs::rename(current_path, &backup)?;
+    if let Err(e) = fs::rename(&staging, current_path) {
+        // Roll back
+        let _ = fs::rename(&backup, current_path);
+        return Err(e.into());
+    }
+
+    // Clean up backup
+    let _ = fs::remove_file(&backup);
+
+    Ok(())
 }

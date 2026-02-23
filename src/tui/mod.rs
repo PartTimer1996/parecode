@@ -841,6 +841,7 @@ pub async fn run(
     verbose: bool,
     dry_run: bool,
     show_timestamps: bool,
+    update_notice: tokio::task::JoinHandle<Option<(String, String)>>,
 ) -> Result<()> {
     let mut terminal = setup_terminal()?;
 
@@ -859,6 +860,7 @@ pub async fn run(
         verbose,
         dry_run,
         show_timestamps,
+        update_notice,
     )
     .await;
 
@@ -873,6 +875,7 @@ async fn event_loop(
     verbose: bool,
     dry_run: bool,
     show_timestamps: bool,
+    update_notice: tokio::task::JoinHandle<Option<(String, String)>>,
 ) -> Result<()> {
     let mcp = McpClient::new(&resolved.mcp_servers).await;
 
@@ -902,6 +905,13 @@ async fn event_loop(
         state.push(ConversationEntry::SystemMsg("⚙ hooks disabled for this profile".to_string()));
     } else if let Some(summary) = resolved.hooks.summary() {
         state.push(ConversationEntry::SystemMsg(format!("⚙ hooks  {summary}  (/list-hooks for details)")));
+    }
+
+    // ── Update notification ───────────────────────────────────────────────────
+    if let Ok(Some((current, latest))) = update_notice.await {
+        state.push(ConversationEntry::SystemMsg(
+            format!("⬆ update available: parecode {current} → {latest}  (run `parecode --update`)"),
+        ));
     }
 
     // Auto-resume the most recent session for this cwd (load turns for context + display)

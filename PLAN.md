@@ -240,7 +240,7 @@ Full Model Context Protocol client (`src/mcp.rs`):
 
 ---
 
-## Phase 6b — Distribution & First-Run Experience 
+## Phase 6b — Distribution
 
 The Rust binary is PareCode's biggest distribution advantage. Every competitor requires a language runtime: OpenCode and Claude Code need Node.js, Aider needs Python, oh-my-opencode needs both. PareCode is a single static binary — zero dependencies, starts in <10ms. The goal: install to productive in under 60 seconds, better than any competitor.
 
@@ -376,7 +376,7 @@ Model matrix: Qwen3 14B (Ollama), Mistral 7B, DeepSeek-Coder, Claude Sonnet (API
 
 ---
 
-## Phase 6c NEXT! — First-Run Experience (install → productive in 60 seconds)
+## Phase 6c DONE! — First-Run Experience (install → productive in 60 seconds)
 
 **The target flow:**
 ```
