@@ -27,7 +27,7 @@ pub fn definition() -> Value {
                 },
                 "append": {
                     "type": "boolean",
-                    "description": "If true, appends new_str to the end of the file. Use only for adding content that belongs at the top level and does not yet exist. If the target block already exists, use old_str to insert inside it instead — appending would place code outside the closing brace."
+                    "description": "If true, appends new_str to the end of the file. Use for adding top-level items (functions, impl blocks, test modules, etc.) that belong after the existing content. If you need to insert content inside an existing block, use old_str instead."
                 }
             },
             "required": ["path", "new_str"]
@@ -45,30 +45,6 @@ pub fn execute(args: &Value) -> Result<String> {
     if args["append"].as_bool().unwrap_or(false) {
         let mut content = fs::read_to_string(path)
             .with_context(|| format!("edit_file: cannot read '{path}'"))?;
-
-        // Guard: if the file already ends with a closing block (brace, etc.),
-        // appending will place code outside it — almost always wrong.
-        // Reject and tell the model to use old_str to insert inside the block.
-        let trimmed = content.trim_end();
-        let ends_with_block = trimmed.ends_with('}')
-            || trimmed.ends_with("end")
-            || trimmed.ends_with("endif");
-        if ends_with_block {
-            // Show the last few lines so the model can use old_str to target the right spot
-            let tail: Vec<&str> = content.lines().rev().take(8).collect();
-            let tail: Vec<&str> = tail.into_iter().rev().collect();
-            let tail_start = content.lines().count().saturating_sub(tail.len()) + 1;
-            let mut hint = String::new();
-            for (i, line) in tail.iter().enumerate() {
-                hint.push_str(&crate::tools::read::format_line(tail_start + i, line));
-            }
-            return Err(anyhow::anyhow!(
-                "edit_file: append=true rejected — '{path}' already has a closing block \
-                 (test module or braces at end). Appending would place code outside it.\n\
-                 Use old_str to match the closing brace and insert your content inside.\n\
-                 Last lines of file:\n{hint}"
-            ));
-        }
 
         // Ensure file ends with a blank line so appended content starts cleanly
         if !content.ends_with('\n') {
