@@ -293,13 +293,13 @@ lto = "thin"
 ```bash
 # macOS / Linux — one-liner, zero dependencies
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/PartTimer1996/PareCode/releases/latest/download/parecode-installer.sh | sh
+  https://github.com/PartTimer1996/parecode/releases/latest/download/parecode-installer.sh | sh
 
 # macOS — Homebrew
 brew install PartTimer1996/parecode/parecode
 
 # Windows — PowerShell
-irm https://github.com/PartTimer1996/PareCode/releases/latest/download/parecode-installer.ps1 | iex
+irm https://github.com/PartTimer1996/parecode/releases/latest/download/parecode-installer.ps1 | iex
 ```
 
 **Competitive install comparison:**
@@ -327,7 +327,7 @@ PareCode and Plandex are the only zero-dependency installs in the category.
 - **Shell completions** — generate for bash/zsh/fish via clap's `generate` feature. Included in the tarball, install instructions in README. Makes PareCode feel native.
 
 **Later (when users ask):**
-- `flake.nix` for Nix users — provide in repo, they can `nix profile install github:PartTimer1996/PareCode`
+- `flake.nix` for Nix users — provide in repo, they can `nix profile install github:PartTimer1996/parecode`
 - nixpkgs submission — often happens organically when the tool gains traction
 - deb/rpm — only worth building if significant Ubuntu/Fedora user base requests it
 

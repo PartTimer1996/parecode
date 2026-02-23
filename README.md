@@ -47,13 +47,13 @@ Other agents read entire files, accumulate 40k+ tokens of conversation history, 
 ```bash
 # macOS / Linux — one command, zero dependencies
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/PartTimer1996/PareCode/releases/latest/download/parecode-installer.sh | sh
+  https://github.com/PartTimer1996/parecode/releases/latest/download/parecode-installer.sh | sh
 
 # macOS — Homebrew
 brew install PartTimer1996/parecode/parecode
 
 # Windows — PowerShell
-irm https://github.com/PartTimer1996/PareCode/releases/latest/download/parecode-installer.ps1 | iex
+irm https://github.com/PartTimer1996/parecode/releases/latest/download/parecode-installer.ps1 | iex
 ```
 
 No Node. No Python. No runtime. Single static binary.
@@ -62,8 +62,8 @@ No Node. No Python. No runtime. Single static binary.
 <summary>Build from source</summary>
 
 ```bash
-git clone https://github.com/PartTimer1996/PareCode
-cd PareCode
+git clone https://github.com/PartTimer1996/parecode
+cd parecode
 cargo build --release
 cp target/release/parecode ~/.local/bin/
 ```
