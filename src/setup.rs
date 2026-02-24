@@ -240,7 +240,7 @@ struct ProviderPreset {
 const PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         profile_name: "claude",
-        endpoint: "https://api.anthropic.com/v1",
+        endpoint: "https://api.anthropic.com/v1/chat/completions",
         model: "claude-sonnet-4-6",
         context_tokens: 200_000,
         env_var: "ANTHROPIC_API_KEY",
@@ -248,7 +248,7 @@ const PRESETS: &[ProviderPreset] = &[
     },
     ProviderPreset {
         profile_name: "openai",
-        endpoint: "https://api.openai.com/v1",
+        endpoint: "https://api.openai.com/v1/chat/completions",
         model: "gpt-4o",
         context_tokens: 128_000,
         env_var: "OPENAI_API_KEY",
@@ -256,7 +256,7 @@ const PRESETS: &[ProviderPreset] = &[
     },
     ProviderPreset {
         profile_name: "openrouter",
-        endpoint: "https://openrouter.ai/api/v1",
+        endpoint: "https://openrouter.ai/api/v1/chat/completions",
         model: "qwen/qwen-2.5-coder-32b-instruct",
         context_tokens: 32_768,
         env_var: "OPENROUTER_API_KEY",
@@ -377,7 +377,7 @@ async fn wizard_local_ollama() -> anyhow::Result<Option<ProfileForm>> {
             let ctx = guess_context_tokens(&model);
             Ok(Some(ProfileForm {
                 profile_name: "local".to_string(),
-                endpoint: "http://localhost:11434".to_string(),
+                endpoint: "http://localhost:11434/v1/chat/completions".to_string(),
                 model,
                 context_tokens: ctx,
                 api_key: None,
@@ -394,7 +394,7 @@ async fn wizard_local_ollama() -> anyhow::Result<Option<ProfileForm>> {
             if confirm("Write config with Ollama defaults anyway?") {
                 Ok(Some(ProfileForm {
                     profile_name: "local".to_string(),
-                    endpoint: "http://localhost:11434".to_string(),
+                    endpoint: "http://localhost:11434/v1/chat/completions".to_string(),
                     model: "qwen3:14b".to_string(),
                     context_tokens: 32_768,
                     api_key: None,
@@ -413,7 +413,7 @@ fn wizard_custom_endpoint() -> anyhow::Result<Option<ProfileForm>> {
     println!();
     println!("  Enter your OpenAI-compatible endpoint details.");
 
-    let endpoint = prompt_string_default("Endpoint URL", "http://localhost:8000/v1");
+    let endpoint = prompt_string_default("Endpoint URL", "http://localhost:8000/v1/chat/completions");
     let model = prompt_string("Model name");
     if model.is_empty() {
         println!("  Model name is required.");

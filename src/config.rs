@@ -75,7 +75,7 @@ fn default_git_context() -> bool {
 impl Default for Profile {
     fn default() -> Self {
         Self {
-            endpoint: "http://localhost:11434".to_string(),
+            endpoint: "http://localhost:11434/v1/chat/completions".to_string(),
             model: "qwen3:14b".to_string(),
             context_tokens: default_context_tokens(),
             api_key: None,
@@ -242,20 +242,20 @@ default_profile = "local"
 
 # ── Local Ollama (default) ────────────────────────────────────────────────────
 [profiles.local]
-endpoint      = "http://localhost:11434"
+endpoint      = "http://localhost:11434/v1/chat/completions"
 model         = "qwen3:14b"
 context_tokens = 32768
 # api_key is not needed for Ollama
 
 # ── Another local model example ───────────────────────────────────────────────
 # [profiles.small]
-# endpoint      = "http://localhost:11434"
+# endpoint      = "http://localhost:11434/v1/chat/completions"
 # model         = "qwen3:8b"
 # context_tokens = 32768
 
 # ── Anthropic Claude ─────────────────────────────────────────────────────────
 # [profiles.claude]
-# endpoint             = "https://api.anthropic.com/v1"
+# endpoint             = "https://api.anthropic.com/v1/chat/completions"
 # model                = "claude-sonnet-4-6"
 # context_tokens       = 200000
 # api_key              = "sk-ant-..."
@@ -265,7 +265,7 @@ context_tokens = 32768
 # Uses Opus for planning (high reasoning, low token count) and Haiku for
 # executing each step (fast, cheap). Best cost/quality ratio for large tasks.
 # [profiles.claude-split]
-# endpoint       = "https://api.anthropic.com/v1"
+# endpoint       = "https://api.anthropic.com/v1/chat/completions"
 # model          = "claude-haiku-4-5-20251001"
 # planner_model  = "claude-opus-4-6"
 # context_tokens = 200000
@@ -273,14 +273,14 @@ context_tokens = 32768
 
 # ── OpenAI ───────────────────────────────────────────────────────────────────
 # [profiles.openai]
-# endpoint       = "https://api.openai.com/v1"
+# endpoint       = "https://api.openai.com/v1/chat/completions"
 # model          = "gpt-4o"
 # context_tokens = 128000
 # api_key        = "sk-..."
 
 # ── OpenRouter ────────────────────────────────────────────────────────────────
 # [profiles.openrouter]
-# endpoint       = "https://openrouter.ai/api/v1"
+# endpoint       = "https://openrouter.ai/api/v1/chat/completions"
 # model          = "qwen/qwen-2.5-coder-32b-instruct"
 # context_tokens = 32768
 # api_key        = "sk-or-..."

@@ -83,6 +83,8 @@ struct Delta {
     /// Reasoning/thinking tokens from models that return them as a separate field
     /// (DeepSeek-R1, Qwen3 with thinking enabled, etc.)
     reasoning_content: Option<String>,
+    /// Alternative reasoning field used by OpenRouter / StepFun / other providers
+    reasoning: Option<String>,
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
@@ -167,7 +169,7 @@ impl Client {
             body["tool_choice"] = serde_json::json!("auto");
         }
 
-        let url = format!("{}/v1/chat/completions", self.endpoint.trim_end_matches('/'));
+        let url = self.endpoint.clone();
 
         let mut req = self
             .http
@@ -244,9 +246,12 @@ impl Client {
                             let _ = writeln!(f, "{json_str}");
                         }
 
-                        // reasoning_content field (DeepSeek-R1, Qwen3 thinking mode, etc.)
-                        // Wrap in <think> tags so the agent's splitter routes it correctly
-                        if let Some(rc) = delta.reasoning_content {
+                        // Reasoning tokens — models use different field names:
+                        //   reasoning_content: DeepSeek-R1, Qwen3
+                        //   reasoning: OpenRouter, StepFun, others
+                        // Wrap in <think> tags so the TUI renders them in the thinking panel.
+                        let rc = delta.reasoning_content.or(delta.reasoning);
+                        if let Some(rc) = rc {
                             if !rc.is_empty() {
                                 if !reasoning_open {
                                     on_text("<think>");
@@ -255,7 +260,7 @@ impl Client {
                                 on_text(&rc);
                             }
                         } else if reasoning_open {
-                            // reasoning_content stopped arriving — close the tag
+                            // reasoning field stopped arriving — close the tag
                             on_text("</think>");
                             reasoning_open = false;
                         }

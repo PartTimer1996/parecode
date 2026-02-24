@@ -67,7 +67,7 @@ api_key        = "sk-..."
 ### OpenRouter (any model via one endpoint)
 ```toml
 [profiles.openrouter]
-endpoint       = "https://openrouter.ai/api/v1"
+endpoint       = "https://openrouter.ai/api"
 model          = "qwen/qwen-2.5-coder-32b-instruct"
 context_tokens = 32768
 api_key        = "sk-or-..."
