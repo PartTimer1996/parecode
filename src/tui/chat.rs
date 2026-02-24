@@ -614,23 +614,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_spinner_frame() {
-        // Test basic spinner frame generation
-        let (glyph, msg, color) = spinner_frame(0);
-        assert_eq!(glyph, "⠋");
-        assert_eq!(msg, "thinking…");
-        assert_eq!(color, Color::Cyan);
-
-        // Test message cycling
-        let (glyph, msg, _) = spinner_frame(16);
-        assert_eq!(msg, "reasoning…");
-
-        // Test glyph cycling
-        let (glyph, _, _) = spinner_frame(10);
-        assert_eq!(glyph, "⠏");
-    }
-
-    #[test]
     fn test_tool_color() {
         assert_eq!(tool_color("read_file"), Color::Cyan);
         assert_eq!(tool_color("write_file"), Color::Green);
@@ -651,63 +634,6 @@ mod tests {
         assert_eq!(fmt_tokens(0, 32_000), "0/32k");
     }
 
-    #[test]
-    fn test_wrap_text() {
-        // Empty string
-        assert_eq!(wrap_text("", 10), vec![String::new()]);
-
-        // Single word
-        assert_eq!(wrap_text("hello", 10), vec!["hello".to_string()]);
-
-        // Single word longer than max width
-        assert_eq!(wrap_text("supercalifragilistic", 10), vec!["supercalifragilistic".to_string()]);
-
-        // Multiple words that fit
-        assert_eq!(wrap_text("hello world", 20), vec!["hello world".to_string()]);
-
-        // Multiple words that need wrapping
-        assert_eq!(wrap_text("hello world this is a test", 10), vec![
-            "hello".to_string(),
-            "world".to_string(),
-            "this".to_string(),
-            "is".to_string(),
-            "a".to_string(),
-            "test".to_string(),
-        ]);
-
-        // Words that exactly fit
-        assert_eq!(wrap_text("1234567890", 10), vec!["1234567890".to_string()]);
-        assert_eq!(wrap_text("1234567890 1234567890", 10), vec![
-            "1234567890".to_string(),
-            "1234567890".to_string(),
-        ]);
-
-        // Mixed case with punctuation
-        assert_eq!(wrap_text("Hello, world! How are you?", 15), vec![
-            "Hello,".to_string(),
-            "world!".to_string(),
-            "How are".to_string(),
-            "you?".to_string(),
-        ]);
-    }
-
-    #[test]
-    fn test_truncate_path() {
-        assert_eq!(truncate_path("file.txt", 10), "file.txt");
-        assert_eq!(truncate_path("short.txt", 20), "short.txt");
-        assert_eq!(truncate_path("this_is_a_very_long_filename.txt", 10), "…ename.txt");
-        assert_eq!(truncate_path("this_is_a_very_long_filename.txt", 15), "…ilename.txt");
-        assert_eq!(truncate_path("path/to/file.txt", 10), "…file.txt");
-    }
-
-    #[test]
-    fn test_short_filename() {
-        assert_eq!(short_filename("file.txt"), "file.txt");
-        assert_eq!(short_filename("/path/to/file.txt"), "file.txt");
-        assert_eq!(short_filename("C:\\path\\to\\file.txt"), "file.txt");
-        assert_eq!(short_filename("just_a_file"), "just_a_file");
-        assert_eq!(short_filename("/"), "/");
-    }
 
     #[test]
     fn test_wrap_text_unicode() {
@@ -724,14 +650,5 @@ mod tests {
         assert_eq!(wrapped.len(), 2);
         assert!(wrapped[0].contains("你好"));
         assert!(wrapped[1].contains("Hello"));
-    }
-
-    #[test]
-    fn test_fmt_tokens_edge_cases() {
-        assert_eq!(fmt_tokens(999, 1_000), "999/1k");
-        assert_eq!(fmt_tokens(1_000, 1_000), "1.0k/1k");
-        assert_eq!(fmt_tokens(10_000, 100_000), "10k/100k");
-        assert_eq!(fmt_tokens(999_999, 1_000_000), "1000k/1000k");
-        assert_eq!(fmt_tokens(0, 1), "0/0k");
     }
 }

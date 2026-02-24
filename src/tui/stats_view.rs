@@ -180,6 +180,19 @@ pub fn draw(f: &mut Frame, state: &AppState, area: Rect) {
     let s = &state.stats;
     let cost = state.cost_per_mtok_input.map(|c| c as f64);
 
+    // ── Section 0: In-Flight (shown only while agent is running) ──────────────
+    if s.inflight_input_tokens > 0 || s.inflight_output_tokens > 0 {
+        all_items.push(divider());
+        all_items.push(section_header("▶ In-Flight"));
+        all_items.push(kv_row("input",  &fmt_k(s.inflight_input_tokens as u64)));
+        all_items.push(kv_row("output", &fmt_k(s.inflight_output_tokens as u64)));
+        let total = s.inflight_input_tokens + s.inflight_output_tokens;
+        all_items.push(kv_row("total",  &fmt_k(total as u64)));
+        if let Some(cost_str) = cost_str(s.inflight_input_tokens, s.inflight_output_tokens, cost) {
+            all_items.push(kv_row("est cost", &cost_str));
+        }
+    }
+
     // ── Section 1: This Session ───────────────────────────────────────────────
     all_items.push(divider());
     all_items.push(section_header("This Session"));

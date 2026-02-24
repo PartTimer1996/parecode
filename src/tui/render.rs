@@ -340,6 +340,21 @@ fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
 fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
     let s = &state.stats;
 
+    // In-flight token indicator (shown while agent is running)
+    let inflight_str = if s.inflight_input_tokens > 0 || s.inflight_output_tokens > 0 {
+        let total_inf = s.inflight_input_tokens + s.inflight_output_tokens;
+        let tools_part = if s.inflight_tool_calls > 0 {
+            format!("  {}tools", s.inflight_tool_calls)
+        } else {
+            String::new()
+        };
+        format!("  ▶ {}tok (i:{} o:{}){}",
+            fmt_k(total_inf), fmt_k(s.inflight_input_tokens), fmt_k(s.inflight_output_tokens),
+            tools_part)
+    } else {
+        String::new()
+    };
+
     // Only show meaningful data once at least one task has run
     let (task_str, token_str, tool_str, ratio_str) = if s.tasks_completed == 0 {
         (
@@ -388,6 +403,10 @@ fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
         Span::styled("  ∑ ", Style::default().fg(Color::Rgb(60, 55, 100))),
         Span::styled(task_str, Style::default().fg(Color::Rgb(120, 110, 180))),
         Span::styled(token_str, Style::default().fg(Color::Rgb(80, 80, 120))),
+        Span::styled(
+            inflight_str,
+            Style::default().fg(Color::Cyan),
+        ),
         Span::styled(tool_str, Style::default().fg(Color::Rgb(70, 70, 110))),
         Span::styled(ratio_str, Style::default().fg(Color::Rgb(60, 100, 80))),
         Span::styled(peak_str, Style::default().fg(peak_color)),

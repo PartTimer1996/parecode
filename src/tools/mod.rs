@@ -27,6 +27,45 @@ pub fn all_definitions() -> Vec<Tool> {
     ]
 }
 
+/// Phase-adaptive tool selection — only send tools relevant to the current turn.
+///
+/// Core tools (always): read_file, edit_file, bash, search, ask_user  (~940 tok)
+/// Extended (conditional):
+///   - list_files, write_file: early turns (exploration / creation)
+///   - patch_file, recall: later turns (mutation / history retrieval)
+///
+/// Saves ~400-800 tokens/turn compared to sending all 9 tools every time.
+pub fn tools_for_turn(turn: usize, history_has_summaries: bool) -> Vec<Tool> {
+    let mut t = vec![
+        def(read::definition()),
+        def(edit::definition()),
+        def(bash::definition()),
+        def(search::definition()),
+        def(ask::definition()),
+    ];
+
+    // Exploration phase: navigation + file creation
+    if turn <= 1 {
+        t.push(def(list::definition()));
+        t.push(def(write::definition()));
+    }
+
+    // Mutation phase: multi-hunk diffs become useful after reading files
+    if turn >= 2 {
+        t.push(def(patch::definition()));
+    }
+
+    // Recall is pointless until tool outputs have been summarised in history
+    if history_has_summaries || turn >= 3 {
+        t.push(def(recall::definition()));
+    }
+
+    // write_file stays available after turn 1 if model previously used it
+    // (handled by the `extra_tools` mechanism in the agent loop)
+
+    t
+}
+
 fn def(v: Value) -> Tool {
     Tool {
         name: v["name"].as_str().unwrap_or("").to_string(),

@@ -211,16 +211,18 @@ async fn run_single_shot(
         agent::run_tui(&task, &client, &config, vec![], None, tx).await
     });
 
-    // Print events to stdout
+    // Print events to stdout, tracking accumulated token usage
+    let mut accum_input: u32 = 0;
+    let mut accum_output: u32 = 0;
     while let Some(ev) = rx.recv().await {
-        print_event_plain(&ev);
+        print_event_plain(&ev, &mut accum_input, &mut accum_output);
     }
 
     agent_handle.await??;
     Ok(())
 }
 
-fn print_event_plain(ev: &tui::UiEvent) {
+fn print_event_plain(ev: &tui::UiEvent, accum_input: &mut u32, accum_output: &mut u32) {
     use tui::UiEvent;
     match ev {
         UiEvent::Chunk(c) => {
@@ -256,10 +258,15 @@ fn print_event_plain(ev: &tui::UiEvent) {
             println!("\n\n  ✓ in {input_tokens} out {output_tokens}  tools {tool_calls}{compressed}");
         }
         UiEvent::AgentError(e) => {
-            println!("\n  ✗ {e}");
+            if *accum_input > 0 || *accum_output > 0 {
+                println!("\n  ✗ {e}  (partial: in {accum_input} out {accum_output})");
+            } else {
+                println!("\n  ✗ {e}");
+            }
         }
-        UiEvent::TokenStats { input, output, total_input, total_output } => {
-            println!("  · i:{input} o:{output} ∑i:{total_input} ∑o:{total_output}");
+        UiEvent::TokenStats { _input: _, _output: _, total_input, total_output, .. } => {
+            *accum_input = *total_input;
+            *accum_output = *total_output;
         }
         UiEvent::ContextUpdate { .. } => {} // skip in plain mode
         UiEvent::HookOutput { event, output, exit_code } => {
@@ -323,8 +330,10 @@ async fn run_single_shot_quick(
         agent::run_quick(&task, &client, &config, tx).await
     });
 
+    let mut accum_input: u32 = 0;
+    let mut accum_output: u32 = 0;
     while let Some(ev) = rx.recv().await {
-        print_event_plain(&ev);
+        print_event_plain(&ev, &mut accum_input, &mut accum_output);
     }
     agent_handle.await??;
     Ok(())

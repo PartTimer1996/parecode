@@ -5,29 +5,27 @@ use std::fs;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "edit_file",
-        "description": "Edit a file. Two modes: (1) replace old_str with new_str — old_str must be unique in the file; (2) pass append=true with new_str to add content at the end of the file. On success, returns the file content around the edit site with fresh line numbers and hashes — use these for any follow-up edits without re-reading.",
+        "description": "Edit an existing file. Replace mode: old_str→new_str (old_str must be unique). Append mode: append=true to add at end. Returns ±10 lines with fresh hashes after success.",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
-                    "type": "string",
-                    "description": "File path to edit"
+                    "type": "string"
                 },
                 "old_str": {
                     "type": "string",
-                    "description": "Exact string to find and replace. Must appear exactly once in the file — include enough surrounding context (function signature, preceding line, etc.) to make it unique. Omit when using append=true."
+                    "description": "Exact string to replace (must match once). Omit for append."
                 },
                 "new_str": {
-                    "type": "string",
-                    "description": "Replacement string (for old_str mode), or content to append (for append mode)"
+                    "type": "string"
                 },
                 "anchor": {
                     "type": "string",
-                    "description": "The 4-char hash from the read_file line prefix. From '  42 [a3f2] | fn foo', the anchor is 'a3f2' (just the 4 chars inside the brackets). Do NOT include the line number or brackets."
+                    "description": "4-char hash from read_file line prefix"
                 },
                 "append": {
                     "type": "boolean",
-                    "description": "If true, appends new_str to the end of the file. Use for adding top-level items (functions, impl blocks, test modules, etc.) that belong after the existing content. If you need to insert content inside an existing block, use old_str instead."
+                    "description": "Append new_str to end of file"
                 }
             },
             "required": ["path", "new_str"]

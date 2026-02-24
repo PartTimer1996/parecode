@@ -3,11 +3,13 @@ use serde_json::Value;
 use std::fs;
 
 /// Default max lines returned without an explicit range.
-const DEFAULT_MAX_LINES: usize = 500;
-/// How many lines of preamble (imports/use declarations) to always include.
-const PREAMBLE_LINES: usize = 80;
-/// How many tail lines to always include (must cover the closing of the last function).
-const TAIL_LINES: usize = 120;
+/// Files at or below this threshold are sent in full (one read, no follow-up needed).
+/// Above this, a preamble + symbol-index + tail excerpt is returned instead.
+const DEFAULT_MAX_LINES: usize = 300;
+/// How many lines of preamble (imports/use/mod declarations) to always include.
+const PREAMBLE_LINES: usize = 40;
+/// How many tail lines to always include (covers the last function / test module).
+const TAIL_LINES: usize = 60;
 
 // ── Line hashing ─────────────────────────────────────────────────────────────
 
@@ -40,22 +42,21 @@ pub fn format_line(line_num: usize, content: &str) -> String {
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "read_file",
-        "description": "Read a file with line numbers and content hashes. Returns up to 150 lines by default; pass line_range for a specific section; pass symbols=true to get a function/class index. Each line is prefixed `N [hash] | content` — the 4-char hash in brackets is the anchor for edit_file.",
+        "description": "Read a file with line numbers and content hashes. Small files (≤300 lines) are returned in full; larger files get a preamble + symbol index + tail — use line_range=[start,end] to read specific sections. Each line is prefixed `N [hash] | content` — the 4-char hash is the anchor for edit_file.",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
-                    "type": "string",
-                    "description": "File path to read"
+                    "type": "string"
                 },
                 "line_range": {
                     "type": "array",
                     "items": { "type": "integer" },
-                    "description": "Optional [start, end] (1-indexed, inclusive)"
+                    "description": "[start, end] 1-indexed inclusive"
                 },
                 "symbols": {
                     "type": "boolean",
-                    "description": "Return a symbol index (functions, classes, structs) instead of file content. Useful for navigating large files before requesting a specific line_range."
+                    "description": "Return symbol index instead of content (large files)"
                 }
             },
             "required": ["path"]

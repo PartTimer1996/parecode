@@ -18,17 +18,16 @@ use std::fs;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "patch_file",
-        "description": "Apply a unified diff patch to a file. More token-efficient than edit_file for multi-hunk changes — send only the changed lines. Use edit_file for single-location changes; use patch_file when modifying multiple separate locations in the same file or making large structured changes.\n\nPatch format — standard unified diff:\n```\n@@ -15,4 +15,6 @@\n fn validate_token(token: &str) -> Result<Claims> {\n-    let claims = decode(token)?;\n+    let claims = decode(token)\n+        .map_err(|e| AuthError::Invalid(e.to_string()))?;\n     Ok(claims)\n }\n```\nRules:\n- Lines starting with ' ' are context (must match file exactly, used for anchoring)\n- Lines starting with '-' are removed\n- Lines starting with '+' are added\n- `@@` line numbers are hints only — actual location found by matching context lines\n- Omit the `--- a/` and `+++ b/` file headers; start directly with `@@`",
+        "description": "Apply a unified diff patch. For multi-hunk changes (3+ locations in one file). Standard unified diff format: @@ headers, ' ' context, '-' remove, '+' add. Omit --- a/ +++ b/ headers; start with @@. Line numbers are hints — anchoring uses context lines.",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
-                    "type": "string",
-                    "description": "File path to patch"
+                    "type": "string"
                 },
                 "patch": {
                     "type": "string",
-                    "description": "Unified diff patch string. Must contain at least one @@ hunk header."
+                    "description": "Unified diff starting with @@ hunk headers"
                 }
             },
             "required": ["path", "patch"]

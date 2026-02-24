@@ -17,11 +17,11 @@ pub fn definition() -> Value {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Directory path (default: current directory)"
+                    "description": "Default: ."
                 },
                 "depth": {
                     "type": "integer",
-                    "description": "Max depth to traverse (default: 3)"
+                    "description": "Default: 3"
                 }
             },
             "required": []

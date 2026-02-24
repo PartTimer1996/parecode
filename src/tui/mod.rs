@@ -78,10 +78,11 @@ pub enum UiEvent {
     AgentError(String),
     /// Verbose token stats
     TokenStats {
-        input: u32,
-        output: u32,
+        _input: u32,
+        _output: u32,
         total_input: u32,
         total_output: u32,
+        tool_calls: usize,
     },
     /// Context bar update (called before model API call)
     ContextUpdate { used: usize, total: u32, compressed: bool },
@@ -585,6 +586,8 @@ impl AppState {
                 ));
             }
             UiEvent::AgentDone { input_tokens, output_tokens, tool_calls, compressed_count, duration_secs, cwd } => {
+                // Clear in-flight counters — final totals are in the record
+                self.stats.clear_inflight();
                 // Record telemetry
                 let session_id = self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
                 let record = self.stats.record_task(
@@ -618,6 +621,28 @@ impl AppState {
                 self.cancel_tx = None;
             }
             UiEvent::AgentError(e) => {
+                // Record partial token usage before clearing — if the agent
+                // errored mid-task we still want those tokens counted in
+                // session / daily / all-time stats.
+                let inf_in = self.stats.inflight_input_tokens;
+                let inf_out = self.stats.inflight_output_tokens;
+                if inf_in > 0 || inf_out > 0 {
+                    let session_id = self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+                    let record = self.stats.record_task(
+                        &session_id,
+                        "",
+                        &format!("[error] {}", self.current_task_preview),
+                        inf_in,
+                        inf_out,
+                        self.stats.inflight_tool_calls,
+                        0,
+                        0,
+                        &self.model.clone(),
+                        &self.profile.clone(),
+                    );
+                    telemetry::append_record(&record);
+                }
+                self.stats.clear_inflight();
                 self.push(ConversationEntry::SystemMsg(format!("✗ {e}")));
                 self.finalize_turn();
                 self.last_stream_text.clear();
@@ -629,10 +654,30 @@ impl AppState {
                 }
                 self.cancel_tx = None;
             }
-            UiEvent::TokenStats { input, output, total_input, total_output } => {
-                self.push(ConversationEntry::SystemMsg(
-                    format!("· i:{input} o:{output} ∑i:{total_input} ∑o:{total_output}"),
-                ));
+            UiEvent::TokenStats { _input: _, _output: _, total_input, total_output, tool_calls } => {
+                // Always update in-flight counters so stats tab shows live usage
+                self.stats.update_inflight(total_input, total_output, tool_calls);
+
+                // Periodically flush a partial telemetry record (every 30s)
+                // so token usage survives crashes / cancellation
+                if self.stats.should_flush(30) {
+                    let session_id = self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+                    let partial = crate::telemetry::TaskRecord {
+                        timestamp: chrono::Utc::now().timestamp(),
+                        session_id,
+                        cwd: String::new(),
+                        task_preview: format!("[in-flight] {}", self.current_task_preview.chars().take(70).collect::<String>()),
+                        input_tokens: total_input,
+                        output_tokens: total_output,
+                        tool_calls,
+                        compressed_count: 0,
+                        compression_ratio: 0.0,
+                        duration_secs: 0,
+                        model: self.model.clone(),
+                        profile: self.profile.clone(),
+                    };
+                    crate::telemetry::append_record(&partial);
+                }
             }
             UiEvent::ContextUpdate { used, total, compressed } => {
                 self.ctx_used = used;

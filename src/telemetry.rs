@@ -70,6 +70,16 @@ pub struct SessionStats {
     pub peak_context_pct: u32,
     /// Per-task records accumulated this session (for display)
     pub records: Vec<TaskRecord>,
+
+    // ── In-flight tracking (current task, before AgentDone) ────────────────
+    /// Input tokens accumulated so far in the currently-running task
+    pub inflight_input_tokens: u32,
+    /// Output tokens accumulated so far in the currently-running task
+    pub inflight_output_tokens: u32,
+    /// Tool calls executed so far in the currently-running task
+    pub inflight_tool_calls: usize,
+    /// Timestamp (epoch secs) of last periodic telemetry flush for the current task
+    pub last_flush_ts: i64,
 }
 
 impl SessionStats {
@@ -140,6 +150,41 @@ impl SessionStats {
     pub fn compression_ratio(&self) -> f32 {
         if self.total_tool_calls == 0 { return 0.0; }
         self.total_compressed as f32 / self.total_tool_calls as f32
+    }
+
+    /// Update in-flight counters from a TokenStats event.
+    /// Called on every API response so stats are always current.
+    pub fn update_inflight(&mut self, total_input: u32, total_output: u32, tool_calls: usize) {
+        self.inflight_input_tokens = total_input;
+        self.inflight_output_tokens = total_output;
+        self.inflight_tool_calls = tool_calls;
+    }
+
+    /// Reset in-flight counters (called when a task completes or errors out).
+    pub fn clear_inflight(&mut self) {
+        self.inflight_input_tokens = 0;
+        self.inflight_output_tokens = 0;
+        self.inflight_tool_calls = 0;
+        self.last_flush_ts = 0;
+    }
+
+    /// Check whether enough time has elapsed to justify a periodic flush.
+    /// Returns true (and resets the timer) if ≥ `interval_secs` since last flush.
+    pub fn should_flush(&mut self, interval_secs: i64) -> bool {
+        let now = Utc::now().timestamp();
+        if self.last_flush_ts == 0 || now - self.last_flush_ts >= interval_secs {
+            self.last_flush_ts = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Total tokens including the currently in-flight task.
+    #[allow(dead_code)]
+    pub fn live_total_tokens(&self) -> u32 {
+        self.total_input_tokens + self.total_output_tokens
+            + self.inflight_input_tokens + self.inflight_output_tokens
     }
 }
 

@@ -14,19 +14,19 @@ pub fn definition() -> Value {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern to search for"
+                    "description": "Regex pattern"
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory or file to search (default: current directory)"
+                    "description": "Dir or file (default: .)"
                 },
                 "file_pattern": {
                     "type": "string",
-                    "description": "Optional glob to filter files, e.g. '*.ts'"
+                    "description": "Glob filter, e.g. '*.ts'"
                 },
                 "context_lines": {
                     "type": "integer",
-                    "description": "Lines of context around each match (default: 2)"
+                    "description": "Default: 2"
                 }
             },
             "required": ["pattern"]

@@ -305,6 +305,7 @@ pub async fn generate_plan(
     let messages = vec![Message {
         role: "user".to_string(),
         content: MessageContent::Text(user_content),
+        tool_calls: vec![],
     }];
 
     // No tools during planning — pure text response

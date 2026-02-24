@@ -5,10 +5,12 @@ use serde_json::Value;
 
 // ── Wire types ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: MessageContent,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +18,12 @@ pub struct Message {
 pub enum MessageContent {
     Text(String),
     Parts(Vec<ContentPart>),
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        MessageContent::Text(String::new())
+    }
 }
 
 impl From<&str> for MessageContent {
@@ -362,10 +370,29 @@ fn build_messages(system: &str, messages: &[Message]) -> Vec<Value> {
     for msg in messages {
         match &msg.content {
             MessageContent::Text(text) => {
-                out.push(serde_json::json!({
-                    "role": msg.role,
-                    "content": text
-                }));
+                if !msg.tool_calls.is_empty() {
+                    // Assistant message that triggered tool calls — include tool_calls array
+                    let tc_json: Vec<Value> = msg.tool_calls.iter().map(|tc| {
+                        serde_json::json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.arguments
+                            }
+                        })
+                    }).collect();
+                    out.push(serde_json::json!({
+                        "role": msg.role,
+                        "content": text,
+                        "tool_calls": tc_json
+                    }));
+                } else {
+                    out.push(serde_json::json!({
+                        "role": msg.role,
+                        "content": text
+                    }));
+                }
             }
             MessageContent::Parts(parts) => {
                 // Flatten parts for OpenAI-compat: tool results become individual messages
@@ -448,6 +475,7 @@ mod tests {
         let msg = Message {
             role: "user".to_string(),
             content: MessageContent::Text("test message".to_string()),
+            ..Default::default()
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"role\":\"user\""));
@@ -530,6 +558,7 @@ mod tests {
         let messages = vec![Message {
             role: "user".to_string(),
             content: MessageContent::Text("hello".to_string()),
+            ..Default::default()
         }];
         let result = build_messages("", &messages);
         assert_eq!(result.len(), 1);
@@ -542,6 +571,7 @@ mod tests {
         let messages = vec![Message {
             role: "user".to_string(),
             content: MessageContent::Text("hello".to_string()),
+            ..Default::default()
         }];
         let result = build_messages("You are a helpful assistant", &messages);
         assert_eq!(result.len(), 2);
@@ -561,6 +591,7 @@ mod tests {
                     content: "result".to_string(),
                 },
             ]),
+            ..Default::default()
         }];
         let result = build_messages("", &messages);
         // Should flatten to 2 messages: assistant text + tool result
@@ -578,16 +609,19 @@ mod tests {
             Message {
                 role: "user".to_string(),
                 content: MessageContent::Text("first".to_string()),
+                ..Default::default()
             },
             Message {
                 role: "assistant".to_string(),
                 content: MessageContent::Text("second".to_string()),
+                ..Default::default()
             },
             Message {
                 role: "user".to_string(),
                 content: MessageContent::Parts(vec![ContentPart::Text {
                     text: "third".to_string(),
                 }]),
+                ..Default::default()
             },
         ];
         let result = build_messages("system prompt", &messages);

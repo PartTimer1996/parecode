@@ -6,21 +6,19 @@ use std::path::Path;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "write_file",
-        "description": "Create a NEW file that does not exist yet. NEVER use this on existing files — use edit_file instead. Passing overwrite=true on an existing file will be blocked if content is shorter than the original.",
+        "description": "Create a new file. Fails on existing files unless overwrite=true (blocked if new content is shorter than original).",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
-                    "type": "string",
-                    "description": "Path for the new file"
+                    "type": "string"
                 },
                 "content": {
-                    "type": "string",
-                    "description": "Full content to write"
+                    "type": "string"
                 },
                 "overwrite": {
                     "type": "boolean",
-                    "description": "Only set true when intentionally replacing an entire existing file with complete content"
+                    "description": "Replace existing file entirely"
                 }
             },
             "required": ["path", "content"]

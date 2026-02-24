@@ -16,25 +16,32 @@ const MAX_TOOL_CALLS: usize = 40;
 
 const SYSTEM_PROMPT_BASE: &str = r#"You are PareCode, a focused coding assistant. You help with software engineering tasks by using the available tools.
 
-Guidelines:
-- Be direct and efficient — use the minimum tool calls needed
-- Read files before editing them
-- NEVER use write_file on a file that already exists — always use edit_file to modify existing files
-- write_file is ONLY for creating brand-new files that do not exist yet
-- When adding tests, functions, or code to an existing file: use edit_file to append or insert — never rewrite the whole file
-- After editing source files, verify the change compiles before declaring done
-- For replacement tasks (e.g. "replace X with Y"), use search to confirm no instances of X remain before declaring done
-- When a task is complete, say so clearly and stop calling tools
-- edit_file returns a fresh excerpt of the file around the edit site after every successful edit — use those hashes directly for follow-up edits; do NOT call read_file again to verify an edit you just made
-- IMPORTANT: Only make ONE edit_file or patch_file call per file per response. After editing a file, wait for the result before planning the next edit — the file's line numbers and hashes change after every edit, so batching multiple edits to the same file will fail.
-- Use patch_file (unified diff) when making changes to multiple separate locations in the same file, or when the changes are large and structured. Use edit_file for single-location changes. Both tools are equally valid — choose whichever uses fewer tokens for the task.
-- For large files: use read_file with symbols=true to get a function/class index first, then read_file with line_range=[start,end] to fetch only the section you need
-- read_file output lines are prefixed `N [hash] | content` — the 4-char hash in brackets is the anchor for edit_file. Example: from `  42 [a3f2] | fn foo()`, pass anchor="a3f2" (just the 4 chars, no brackets, no line number). This prevents stale-line errors if the file changed between read and edit. Symbol index output also includes hashes — use them the same way.
-- append=true adds content after the LAST LINE of the file. Only use it when the file has no relevant closing block yet (e.g. creating the very first test module in a file that has none at all). If you can see a test block, a class, or any closing brace at the end of the file — use old_str to insert inside it, not append=true.
-- To add to an existing block: use old_str matching the closing brace of that block (e.g. the final `}` plus the line before it) and replace it with the new content plus the closing brace.
-- In plan mode, the "Completed steps" preamble describes what changed but its line numbers are STALE. Always read anchors and line positions from the pre-loaded file content shown in the attached files section — never from the completed steps summary.
-- Tool outputs are summarised in history to save context. Use the recall tool to retrieve the full output of any previous tool call when you need it.
-- For routine actions (adding a dependency, creating a file, running a command), just do it and report what you did. Use the ask_user tool ONLY when genuinely uncertain between multiple valid approaches that significantly affect the outcome — e.g. choosing an architecture, picking between incompatible strategies, or clarifying ambiguous requirements. Do not use ask_user for routine confirmations."#;
+# Core principles
+- Act decisively. When you know what to change, apply the edit immediately — do not deliberate about tool choice or re-confirm what you've already read.
+- Be direct and efficient — use the minimum tool calls needed.
+- Read files before editing them. After editing, verify the change compiles before declaring done.
+- When a task is complete, say so clearly and stop calling tools.
+- For routine actions, just do it. Use ask_user ONLY when genuinely uncertain between approaches that significantly affect the outcome.
+
+# File mutation rules
+- write_file: ONLY for creating brand-new files. Never use on existing files.
+- edit_file: for modifying existing files — single-location changes, appending, inserting.
+- patch_file: for changing 3+ non-adjacent locations in the same file in one go. Default to edit_file unless you clearly need patch_file.
+- ONE edit per file per response. Line numbers and hashes change after every edit, so wait for the result before planning the next edit to the same file.
+
+# edit_file reference
+- Output lines are prefixed `N [hash] | content`. The 4-char hash is the anchor — pass it as anchor="a3f2" (no brackets, no line number) to avoid stale-line errors.
+- edit_file returns a fresh excerpt after every successful edit. Use those hashes directly for follow-up edits — do NOT re-read the file to verify an edit you just made.
+- append=true adds after the LAST LINE. Only use it when no relevant closing block exists (e.g. creating the first test module). Otherwise, match the closing brace with old_str and insert inside it.
+- In plan mode, line numbers in the "Completed steps" preamble are STALE. Always use anchors from the pre-loaded file content.
+
+# Reading files
+- For large files: use read_file with symbols=true first, then line_range to fetch the section you need.
+- Tool outputs are summarised in history. Use the recall tool to retrieve full output of any previous tool call.
+
+# Verification
+- After editing source files, verify the change compiles before declaring done.
+- For replacement tasks (e.g. "replace X with Y"), use search to confirm no instances remain."#;
 
 /// Build a compact project file map to inject into the system prompt.
 /// Walks depth-2, ignores noise dirs, caps at 80 paths.
@@ -169,20 +176,19 @@ pub async fn run_tui(
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "unknown".to_string());
-    // Merge native tools + MCP-discovered tools into one list for the model
-    let mut tools = tools::all_definitions();
+    // MCP tools are appended alongside native tools each turn
     let mcp_tools = config.mcp.all_tools().await;
-    for mt in &mcp_tools {
-        tools.push(Tool {
-            name: mt.qualified_name.clone(),
-            description: mt.description.clone(),
-            parameters: mt.input_schema.clone(),
-        });
-    }
+    let mcp_tool_defs: Vec<Tool> = mcp_tools.iter().map(|mt| Tool {
+        name: mt.qualified_name.clone(),
+        description: mt.description.clone(),
+        parameters: mt.input_schema.clone(),
+    }).collect();
+
     let mut messages: Vec<Message> = Vec::new();
     let mut total_input_tokens = 0u32;
     let mut total_output_tokens = 0u32;
     let mut tool_call_count = 0usize;
+    let mut turn: usize = 0;
 
     let budget = Budget::new(config.context_tokens);
     let mut history = History::default();
@@ -260,10 +266,12 @@ pub async fn run_tui(
     messages.push(Message {
         role: "user".to_string(),
         content: MessageContent::from(user_content),
+        tool_calls: vec![],
     });
 
     loop {
         cache.next_turn();
+        turn += 1;
 
         // ── Hard tool-call budget ─────────────────────────────────────────────
         if tool_call_count >= MAX_TOOL_CALLS {
@@ -281,6 +289,12 @@ pub async fn run_tui(
             total: budget.total_context(),
             compressed,
         });
+
+        // ── Phase-adaptive tool selection ────────────────────────────────────
+        // Only send tools relevant to the current phase of work.
+        // Saves ~400-800 tokens/turn compared to sending all 9 tools every time.
+        let mut tools = tools::tools_for_turn(turn, history.compressed_count() > 0);
+        tools.extend(mcp_tool_defs.iter().cloned());
 
         // ── Call the model ────────────────────────────────────────────────────
         // Split <think>...</think> tokens into ThinkingChunk events so the TUI
@@ -307,7 +321,9 @@ pub async fn run_tui(
                             in_think_c.store(false, std::sync::atomic::Ordering::Relaxed);
                         } else {
                             // No close tag yet — flush all but last 8 chars (tag might be split)
-                            let keep = buf.len().saturating_sub(8);
+                            // Use floor_char_boundary so we don't slice inside a multi-byte char.
+                            let keep_bytes = buf.len().saturating_sub(8);
+                            let keep = buf.floor_char_boundary(keep_bytes);
                             if keep > 0 {
                                 let _ = tx_clone.send(UiEvent::ThinkingChunk(buf[..keep].to_string()));
                                 *think_buf_c.lock().unwrap() = buf[keep..].to_string();
@@ -354,18 +370,22 @@ pub async fn run_tui(
         total_input_tokens += response.input_tokens;
         total_output_tokens += response.output_tokens;
 
-        if config.verbose && (response.input_tokens > 0 || response.output_tokens > 0) {
+        // Always send token stats so the TUI/telemetry can track usage live.
+        // If the agent crashes or is cancelled, partial stats are already recorded.
+        if response.input_tokens > 0 || response.output_tokens > 0 {
             let _ = ui_tx.send(UiEvent::TokenStats {
-                input: response.input_tokens,
-                output: response.output_tokens,
+                _input: response.input_tokens,
+                _output: response.output_tokens,
                 total_input: total_input_tokens,
                 total_output: total_output_tokens,
+                tool_calls: tool_call_count,
             });
         }
 
         messages.push(Message {
             role: "assistant".to_string(),
             content: MessageContent::from(response.text.clone()),
+            tool_calls: response.tool_calls.clone(),
         });
 
         // No tool calls → done
@@ -491,6 +511,11 @@ pub async fn run_tui(
                 // and line numbers are now stale, wasting context budget.
                 if !result_content.contains("[Tool error") {
                     history.compress_reads_for(&path);
+                    // Evict ALL stale content for this path from the messages
+                    // array — reads, old edit echoes, search results. Without
+                    // this, stale hashes/line numbers stay in context and
+                    // actively mislead the model on subsequent edits.
+                    evict_stale_content(&mut messages, &path);
                 }
                 mutated_files.insert(path);
             }
@@ -504,6 +529,17 @@ pub async fn run_tui(
         messages.push(Message {
             role: "tool".to_string(),
             content: MessageContent::Parts(tool_results),
+            tool_calls: vec![],
+        });
+
+        // Update inflight tool count immediately after execution so the TUI
+        // shows the correct count while the next API call streams.
+        let _ = ui_tx.send(UiEvent::TokenStats {
+            _input: 0,
+            _output: 0,
+            total_input: total_input_tokens,
+            total_output: total_output_tokens,
+            tool_calls: tool_call_count,
         });
     }
 
@@ -606,6 +642,7 @@ Do not read files unless strictly necessary. Keep responses short.";
     let messages = vec![Message {
         role: "user".to_string(),
         content: MessageContent::from(task.to_string()),
+        tool_calls: vec![],
     }];
 
     let tx_clone = ui_tx.clone();
@@ -617,6 +654,15 @@ Do not read files unless strictly necessary. Keep responses short.";
 
     let total_input = response.input_tokens;
     let total_output = response.output_tokens;
+
+    // Send token stats so TUI tracks inflight usage (survives cancel/crash)
+    let _ = ui_tx.send(UiEvent::TokenStats {
+        _input: total_input,
+        _output: total_output,
+        total_input,
+        total_output,
+        tool_calls: 0,
+    }); 
 
     // Execute at most one tool call
     if let Some(tc) = response.tool_calls.first() {
@@ -638,6 +684,54 @@ Do not read files unless strictly necessary. Keep responses short.";
     });
 
     Ok(())
+}
+
+// ── Stale content eviction ────────────────────────────────────────────────────
+
+/// After a file is edited, evict ALL stale content referencing that path from
+/// the messages array. This covers:
+///   - read_file results (full file content with now-wrong hashes/line numbers)
+///   - edit_file post-edit echoes (±10 line excerpts with now-wrong hashes)
+///   - search results that include matches from this file
+///
+/// Stale content is actively harmful: wrong hashes cause anchor mismatches,
+/// wrong line numbers cause failed edits, wrong code causes incorrect old_str.
+fn evict_stale_content(messages: &mut [Message], edited_path: &str) {
+    let stub = format!("[Stale — {edited_path} was edited. Re-read for current content.]");
+    for msg in messages.iter_mut() {
+        if msg.role != "tool" {
+            continue;
+        }
+        if let MessageContent::Parts(parts) = &mut msg.content {
+            for part in parts.iter_mut() {
+                if let ContentPart::ToolResult { content, .. } = part {
+                    // Skip already-short content — nothing to save
+                    if content.len() <= 150 || !content.contains(edited_path) {
+                        continue;
+                    }
+
+                    // read_file output: "[path" header + numbered lines
+                    let is_read = content.starts_with('[')
+                        && (content.contains(" | ") || content.contains(" — "));
+
+                    // edit_file post-edit echo: "✓ Edited path" + excerpt with hashes
+                    let is_edit_echo = content.contains("✓ Edited")
+                        && content.contains(" | ");
+
+                    // search results referencing this file
+                    // (rg format: "path:line:content")
+                    let is_search = {
+                        let prefix = format!("{edited_path}:");
+                        content.lines().any(|l| l.starts_with(&prefix))
+                    };
+
+                    if is_read || is_edit_echo || is_search {
+                        *content = stub.clone();
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── Tool execution ────────────────────────────────────────────────────────────

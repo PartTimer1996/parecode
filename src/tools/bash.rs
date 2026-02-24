@@ -14,12 +14,11 @@ pub fn definition() -> Value {
             "type": "object",
             "properties": {
                 "command": {
-                    "type": "string",
-                    "description": "Shell command to run"
+                    "type": "string"
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Optional timeout in seconds (default: 30)"
+                    "description": "Default: 30"
                 }
             },
             "required": ["command"]
