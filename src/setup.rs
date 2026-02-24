@@ -551,7 +551,7 @@ pub async fn check_for_update() -> Option<(String, String)> {
     // Check cache first
     let cache_path = update_cache_path();
     if let Some(cached) = read_update_cache(&cache_path) {
-        return if cached != current && version_gt(&cached, current) {
+        return if cached != current && version_newer(&cached, current) {
             Some((current.to_string(), cached))
         } else {
             None
@@ -582,7 +582,7 @@ pub async fn check_for_update() -> Option<(String, String)> {
     // Cache the result
     write_update_cache(&cache_path, &latest);
 
-    if version_gt(&latest, current) {
+    if version_newer(&latest, current) {
         Some((current.to_string(), latest))
     } else {
         None
@@ -626,7 +626,7 @@ fn write_update_cache(path: &PathBuf, version: &str) {
 }
 
 /// Simple semver comparison: is `a` > `b`?
-fn version_gt(a: &str, b: &str) -> bool {
+pub fn version_newer(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Vec<u32> {
         s.split('.')
             .filter_map(|p| p.parse::<u32>().ok())
@@ -752,12 +752,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_version_gt() {
-        assert!(version_gt("0.2.0", "0.1.0"));
-        assert!(version_gt("1.0.0", "0.9.9"));
-        assert!(version_gt("0.1.1", "0.1.0"));
-        assert!(!version_gt("0.1.0", "0.1.0"));
-        assert!(!version_gt("0.1.0", "0.2.0"));
+    fn test_version_newer() {
+        assert!(version_newer("0.2.0", "0.1.0"));
+        assert!(version_newer("1.0.0", "0.9.9"));
+        assert!(version_newer("0.1.1", "0.1.0"));
+        assert!(!version_newer("0.1.0", "0.1.0"));
+        assert!(!version_newer("0.1.0", "0.2.0"));
     }
 
     #[test]

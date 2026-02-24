@@ -381,129 +381,140 @@ async fn self_update() -> Result<()> {
     print!("  Checking for updates... ");
     std::io::stdout().flush()?;
 
-    let update = setup::check_for_update().await;
+    // Query GitHub directly (bypass cache — user explicitly asked for update)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
 
-    match update {
-        None => {
-            println!("parecode {current} is already the latest version.");
-            return Ok(());
+    let release_url = "https://api.github.com/repos/PartTimer1996/parecode/releases/latest";
+    let resp = client
+        .get(release_url)
+        .header("User-Agent", format!("parecode/{current}"))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await;
+
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            println!("✗");
+            eprintln!("  Failed to reach GitHub: {e}");
+            eprintln!("  Check manually: https://github.com/PartTimer1996/parecode/releases/latest");
+            std::process::exit(1);
         }
-        Some((_, latest)) => {
-            println!("parecode {current} → {latest} available");
-            println!();
+    };
 
-            // Determine platform target
-            let target = detect_target();
-            let Some(target) = target else {
-                eprintln!("  ✗ Could not detect platform. Update manually from:");
-                eprintln!("    https://github.com/PartTimer1996/parecode/releases/latest");
-                std::process::exit(1);
-            };
-
-            // Fetch release assets
-            print!("  Downloading parecode {latest} for {target}... ");
-            std::io::stdout().flush()?;
-
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()?;
-
-            // Fetch release info to find the right asset
-            let release_url = "https://api.github.com/repos/PartTimer1996/parecode/releases/latest";
-            let resp = client
-                .get(release_url)
-                .header("User-Agent", "parecode")
-                .send()
-                .await?;
-
-            if !resp.status().is_success() {
-                println!("✗");
-                eprintln!("  Failed to fetch release info (HTTP {})", resp.status());
-                std::process::exit(1);
-            }
-
-            let body: serde_json::Value = resp.json().await?;
-            let assets = body["assets"].as_array().ok_or_else(|| {
-                anyhow::anyhow!("No assets in release")
-            })?;
-
-            // Find the matching archive asset
-            // cargo-dist names: parecode-{target}.tar.xz (unix) or .zip (windows)
-            let is_windows = target.contains("windows");
-            let unix_exts = [".tar.xz", ".tar.gz"];
-
-            let asset_url = if is_windows {
-                assets.iter().find_map(|a| {
-                    let name = a["name"].as_str()?;
-                    if name.contains(&target) && name.ends_with(".zip") {
-                        a["browser_download_url"].as_str().map(|s| s.to_string())
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                // Try .tar.xz first (cargo-dist default), then .tar.gz fallback
-                unix_exts.iter().find_map(|ext| {
-                    assets.iter().find_map(|a| {
-                        let name = a["name"].as_str()?;
-                        if name.contains(&target) && name.ends_with(ext) {
-                            a["browser_download_url"].as_str().map(|s| s.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                })
-            };
-
-            let Some(download_url) = asset_url else {
-                println!("✗");
-                eprintln!("  No matching asset for target {target}");
-                eprintln!("  Check: https://github.com/PartTimer1996/parecode/releases/latest");
-                std::process::exit(1);
-            };
-
-            // Download archive
-            let resp = client
-                .get(&download_url)
-                .header("User-Agent", "parecode")
-                .send()
-                .await?;
-
-            if !resp.status().is_success() {
-                println!("✗");
-                eprintln!("  Download failed (HTTP {})", resp.status());
-                std::process::exit(1);
-            }
-
-            let bytes = resp.bytes().await?;
-            println!("✓ ({:.1} MB)", bytes.len() as f64 / 1_048_576.0);
-
-            // Extract binary from archive
-            print!("  Extracting... ");
-            std::io::stdout().flush()?;
-
-            let binary_name = if is_windows { "parecode.exe" } else { "parecode" };
-            let extracted = if is_windows {
-                extract_from_zip(&bytes, binary_name)?
-            } else if download_url.ends_with(".tar.xz") {
-                extract_from_tar_xz(&bytes, binary_name)?
-            } else {
-                extract_from_tar_gz(&bytes, binary_name)?
-            };
-            println!("✓");
-
-            // Replace self
-            let current_exe = std::env::current_exe()?;
-            print!("  Replacing {}... ", current_exe.display());
-            std::io::stdout().flush()?;
-
-            replace_exe(&current_exe, &extracted)?;
-            println!("✓");
-
-            println!();
-            println!("  parecode {latest} installed.");
-        }
+    if !resp.status().is_success() {
+        println!("✗");
+        eprintln!("  GitHub API returned HTTP {}", resp.status());
+        std::process::exit(1);
     }
+
+    let body: serde_json::Value = resp.json().await?;
+    let tag = body["tag_name"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("No tag_name in release response"))?;
+    let latest = tag.trim_start_matches('v').to_string();
+
+    if !setup::version_newer(&latest, current) {
+        println!("parecode {current} is already the latest version.");
+        return Ok(());
+    }
+
+    println!("parecode {current} → {latest} available");
+    println!();
+
+    // Determine platform target
+    let target = detect_target();
+    let Some(target) = target else {
+        eprintln!("  ✗ Could not detect platform. Update manually from:");
+        eprintln!("    https://github.com/PartTimer1996/parecode/releases/latest");
+        std::process::exit(1);
+    };
+
+    // Fetch release assets — reuse the body we already have
+    let assets = body["assets"].as_array().ok_or_else(|| {
+        anyhow::anyhow!("No assets in release")
+    })?;
+
+    print!("  Downloading parecode {latest} for {target}... ");
+    std::io::stdout().flush()?;
+
+    // Find the matching archive asset
+    // cargo-dist names: parecode-{target}.tar.xz (unix) or .zip (windows)
+    let is_windows = target.contains("windows");
+    let unix_exts = [".tar.xz", ".tar.gz"];
+
+    let asset_url = if is_windows {
+        assets.iter().find_map(|a| {
+            let name = a["name"].as_str()?;
+            if name.contains(&target) && name.ends_with(".zip") {
+                a["browser_download_url"].as_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+    } else {
+        // Try .tar.xz first (cargo-dist default), then .tar.gz fallback
+        unix_exts.iter().find_map(|ext| {
+            assets.iter().find_map(|a| {
+                let name = a["name"].as_str()?;
+                if name.contains(&target) && name.ends_with(ext) {
+                    a["browser_download_url"].as_str().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+    };
+
+    let Some(download_url) = asset_url else {
+        println!("✗");
+        eprintln!("  No matching asset for target {target}");
+        eprintln!("  Check: https://github.com/PartTimer1996/parecode/releases/latest");
+        std::process::exit(1);
+    };
+
+    // Download archive
+    let resp = client
+        .get(&download_url)
+        .header("User-Agent", format!("parecode/{current}"))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        println!("✗");
+        eprintln!("  Download failed (HTTP {})", resp.status());
+        std::process::exit(1);
+    }
+
+    let bytes = resp.bytes().await?;
+    println!("✓ ({:.1} MB)", bytes.len() as f64 / 1_048_576.0);
+
+    // Extract binary from archive
+    print!("  Extracting... ");
+    std::io::stdout().flush()?;
+
+    let binary_name = if is_windows { "parecode.exe" } else { "parecode" };
+    let extracted = if is_windows {
+        extract_from_zip(&bytes, binary_name)?
+    } else if download_url.ends_with(".tar.xz") {
+        extract_from_tar_xz(&bytes, binary_name)?
+    } else {
+        extract_from_tar_gz(&bytes, binary_name)?
+    };
+    println!("✓");
+
+    // Replace self
+    let current_exe = std::env::current_exe()?;
+    print!("  Replacing {}... ", current_exe.display());
+    std::io::stdout().flush()?;
+
+    replace_exe(&current_exe, &extracted)?;
+    println!("✓");
+
+    println!();
+    println!("  parecode {latest} installed.");
     Ok(())
 }
 
