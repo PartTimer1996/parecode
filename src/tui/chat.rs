@@ -53,7 +53,7 @@ fn tool_color(tool_name: &str) -> Color {
 pub fn build_items(state: &AppState, term_width: u16) -> Vec<ListItem<'static>> {
     let mut items: Vec<ListItem<'static>> = Vec::new();
 
-    for entry in &state.entries {
+    for (idx, entry) in state.entries.iter().enumerate() {
         match entry {
             ConversationEntry::UserMessage(msg) => {
                 let msg = msg.clone();
@@ -134,20 +134,36 @@ pub fn build_items(state: &AppState, term_width: u16) -> Vec<ListItem<'static>> 
                 let label_fg = Color::Rgb(0, 210, 210);
                 let text_fg  = Color::Rgb(210, 230, 255);
 
+                // Detect continuation: if the previous entry was a ToolResult,
+                // this chunk is the model continuing after tool execution —
+                // don't show the "parecode" label again.
+                let is_continuation = idx > 0 && matches!(
+                    &state.entries[idx - 1],
+                    ConversationEntry::ToolResult(_)
+                );
+
                 let mut first = true;
                 for src_line in text.lines() {
                     let wrapped = wrap_text(src_line, wrap_width);
                     for w in wrapped {
                         if first {
                             first = false;
-                            items.push(ListItem::new(Line::from(vec![
-                                Span::raw("  "),
-                                Span::styled("parecode", Style::default()
-                                    .fg(label_fg)
-                                    .add_modifier(Modifier::BOLD)),
-                                Span::styled("  ", Style::default()),
-                                Span::styled(w, Style::default().fg(text_fg)),
-                            ])));
+                            if is_continuation {
+                                // Continuation — indent without label
+                                items.push(ListItem::new(Line::from(vec![
+                                    Span::raw("        "),
+                                    Span::styled(w, Style::default().fg(text_fg)),
+                                ])));
+                            } else {
+                                items.push(ListItem::new(Line::from(vec![
+                                    Span::raw("  "),
+                                    Span::styled("parecode", Style::default()
+                                        .fg(label_fg)
+                                        .add_modifier(Modifier::BOLD)),
+                                    Span::styled("  ", Style::default()),
+                                    Span::styled(w, Style::default().fg(text_fg)),
+                                ])));
+                            }
                         } else {
                             items.push(ListItem::new(Line::from(vec![
                                 Span::raw("        "),

@@ -121,12 +121,11 @@ fn summarise(tool_name: &str, output: &str) -> String {
             if output.contains("⚠ FILE WRITTEN BUT BUILD BROKEN") || output.contains("✗ build check failed") {
                 output.to_string()
             } else {
-                // On success: keep only the confirmation line.
-                // The post-edit ±10-line context echo was useful on the turn
-                // it was produced, but becomes stale on any subsequent edit —
-                // wrong hashes, wrong line numbers. Strip it here so it never
-                // lingers in recall/context. The model can re-read if needed.
-                first_line(output).to_string()
+                // On success: keep the confirmation line + a brief summary of
+                // what was structurally changed (new functions, structs, etc.)
+                // extracted from the post-edit echo. This lets recall answer
+                // "what was added?" without keeping stale hashes/line numbers.
+                summarise_edit(output)
             }
         }
         // Keep full tree — essential for cross-file reasoning and project navigation.
@@ -135,6 +134,65 @@ fn summarise(tool_name: &str, output: &str) -> String {
         "search" => summarise_search(output),
         "bash" => summarise_bash(output),
         _ => truncate_to_lines(output, 3),
+    }
+}
+
+/// edit_file / write_file success summary.
+/// Keeps the confirmation line (✓ Edited ...) and extracts structural
+/// information from the post-edit echo without keeping stale hashes/line numbers.
+/// This gives recall enough to answer "what was added/changed?" while staying
+/// compact and hash-free.
+fn summarise_edit(output: &str) -> String {
+    let first = first_line(output);
+    
+    // Extract meaningful code identifiers from the post-edit echo lines.
+    // Echo lines look like "  42 [a3f2] | pub fn foo_bar(..." — strip the
+    // line number and hash, keep function/struct/impl/test declarations.
+    let mut new_symbols: Vec<String> = Vec::new();
+    for line in output.lines().skip(1) {
+        // Strip "  NNN [hash] | " prefix to get the actual code
+        let code = if let Some(pos) = line.find(" | ") {
+            line[pos + 3..].trim()
+        } else {
+            continue;
+        };
+
+        // Extract declarations — these tell the next step what exists
+        let sym = if code.starts_with("pub fn ") || code.starts_with("fn ") {
+            code.split('(').next().map(|s| s.to_string())
+        } else if code.starts_with("pub struct ") || code.starts_with("struct ") {
+            code.split('{').next().or(code.split(';').next()).map(|s| s.trim().to_string())
+        } else if code.starts_with("pub enum ") || code.starts_with("enum ") {
+            code.split('{').next().map(|s| s.trim().to_string())
+        } else if code.starts_with("impl ") {
+            code.split('{').next().map(|s| s.trim().to_string())
+        } else if code.starts_with("#[cfg(test)]") {
+            Some("#[cfg(test)] mod tests".to_string())
+        } else if code.starts_with("mod ") {
+            code.split('{').next().map(|s| s.trim().to_string())
+        } else if code.starts_with("fn test_") || code.starts_with("async fn test_") {
+            code.split('(').next().map(|s| s.to_string())
+        } else if code.starts_with("export function ") || code.starts_with("function ") {
+            code.split('(').next().map(|s| s.to_string())
+        } else if code.starts_with("class ") {
+            code.split('{').next().or(code.split('(').next()).map(|s| s.trim().to_string())
+        } else if code.starts_with("def ") {
+            code.split('(').next().map(|s| s.to_string())
+        } else {
+            None
+        };
+
+        if let Some(s) = sym {
+            if !s.is_empty() && new_symbols.len() < 10 {
+                new_symbols.push(s);
+            }
+        }
+    }
+
+    if new_symbols.is_empty() {
+        first.to_string()
+    } else {
+        format!("{first}\n  added/modified: {}", new_symbols.join(", "))
     }
 }
 

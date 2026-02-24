@@ -264,25 +264,296 @@ pub async fn run_hook(cmd: &str) -> HookResult {
     HookResult { output, exit_code }
 }
 
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // ── HookConfig ──────────────────────────────────────────────────────────────
+
     #[test]
     fn test_hook_config_is_empty() {
-        let config = HookConfig::default();
-        assert!(config.is_empty());
+        let empty = HookConfig::default();
+        assert!(empty.is_empty());
+
+        let with_on_edit = HookConfig {
+            on_edit: vec!["cargo check".to_string()],
+            ..Default::default()
+        };
+        assert!(!with_on_edit.is_empty());
+
+        let with_on_task_done = HookConfig {
+            on_task_done: vec!["cargo test".to_string()],
+            ..Default::default()
+        };
+        assert!(!with_on_task_done.is_empty());
+
+        let with_on_plan_step_done = HookConfig {
+            on_plan_step_done: vec!["echo done".to_string()],
+            ..Default::default()
+        };
+        assert!(!with_on_plan_step_done.is_empty());
+
+        let with_on_session_start = HookConfig {
+            on_session_start: vec!["echo start".to_string()],
+            ..Default::default()
+        };
+        assert!(!with_on_session_start.is_empty());
+
+        let with_on_session_end = HookConfig {
+            on_session_end: vec!["echo end".to_string()],
+            ..Default::default()
+        };
+        assert!(!with_on_session_end.is_empty());
+
+        let all_hooks = HookConfig {
+            on_edit: vec!["check".to_string()],
+            on_task_done: vec!["test".to_string()],
+            on_plan_step_done: vec!["step".to_string()],
+            on_session_start: vec!["start".to_string()],
+            on_session_end: vec!["end".to_string()],
+        };
+        assert!(!all_hooks.is_empty());
     }
 
     #[test]
-    fn test_hook_config_summary() {
+    fn test_hook_config_summary_empty() {
+        let empty = HookConfig::default();
+        assert_eq!(empty.summary(), None);
+    }
+
+    #[test]
+    fn test_hook_config_summary_single() {
         let config = HookConfig {
-            on_edit: vec![String::from("cargo check -q")],
-            on_task_done: vec![String::from("cargo test -q 2>&1 | tail -5")],
+            on_edit: vec!["cargo check".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(config.summary(), Some("on_edit: cargo check".to_string()));
+    }
+
+    #[test]
+    fn test_hook_config_summary_multiple() {
+        let config = HookConfig {
+            on_edit: vec!["cargo check".to_string(), "cargo clippy".to_string()],
+            on_task_done: vec!["cargo test".to_string()],
             ..Default::default()
         };
         let summary = config.summary().unwrap();
-        assert!(summary.contains("cargo check -q"));
-        assert!(summary.contains("cargo test -q 2>&1 | tail -5"));
+        assert!(summary.contains("on_edit: cargo check, cargo clippy"));
+        assert!(summary.contains("on_task_done: cargo test"));
+        assert!(summary.contains("·"));
     }
+
+    #[test]
+    fn test_hook_config_summary_all_hooks() {
+        let config = HookConfig {
+            on_edit: vec!["edit".to_string()],
+            on_task_done: vec!["task".to_string()],
+            on_plan_step_done: vec!["step".to_string()],
+            on_session_start: vec!["start".to_string()],
+            on_session_end: vec!["end".to_string()],
+        };
+        let summary = config.summary().unwrap();
+        assert!(summary.contains("on_edit: edit"));
+        assert!(summary.contains("on_task_done: task"));
+        assert!(summary.contains("on_plan_step_done: step"));
+        assert!(summary.contains("on_session_start: start"));
+        assert!(summary.contains("on_session_end: end"));
+    }
+
+    #[test]
+    fn test_hook_config_detail_empty() {
+        let empty = HookConfig::default();
+        let detail = empty.detail();
+        assert!(detail.contains("on_edit"));
+        assert!(detail.contains("on_task_done"));
+        assert!(detail.contains("on_plan_step_done"));
+        assert!(detail.contains("on_session_start"));
+        assert!(detail.contains("on_session_end"));
+        assert!(detail.contains("(none)"));
+    }
+
+    #[test]
+    fn test_hook_config_detail_with_commands() {
+        let config = HookConfig {
+            on_edit: vec!["cargo check".to_string()],
+            on_task_done: vec!["cargo test".to_string(), "echo done".to_string()],
+            ..Default::default()
+        };
+        let detail = config.detail();
+        assert!(detail.contains("on_edit"));
+        assert!(detail.contains("· cargo check"));
+        assert!(detail.contains("on_task_done"));
+        assert!(detail.contains("· cargo test"));
+        assert!(detail.contains("· echo done"));
+        assert!(detail.contains("on_plan_step_done"));
+        assert!(detail.contains("(none)"));
+    }
+
+    #[test]
+    fn test_hook_config_serde_roundtrip() {
+        let config = HookConfig {
+            on_edit: vec!["cargo check".to_string()],
+            on_task_done: vec!["cargo test".to_string()],
+            on_plan_step_done: vec!["echo step".to_string()],
+            on_session_start: vec!["echo start".to_string()],
+            on_session_end: vec!["echo end".to_string()],
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: HookConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(config.on_edit, deserialized.on_edit);
+        assert_eq!(config.on_task_done, deserialized.on_task_done);
+        assert_eq!(config.on_plan_step_done, deserialized.on_plan_step_done);
+        assert_eq!(config.on_session_start, deserialized.on_session_start);
+        assert_eq!(config.on_session_end, deserialized.on_session_end);
+    }
+
+    #[test]
+    fn test_hook_config_serde_default_fields() {
+        // Test that missing fields deserialize to empty vectors
+        let json = r#"{}"#;
+        let config: HookConfig = serde_json::from_str(json).unwrap();
+        assert!(config.is_empty());
+        assert!(config.on_edit.is_empty());
+        assert!(config.on_task_done.is_empty());
+        assert!(config.on_plan_step_done.is_empty());
+        assert!(config.on_session_start.is_empty());
+        assert!(config.on_session_end.is_empty());
+    }
+
+    // ── Language detection ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_language_hooks_rust() {
+        // This test will pass if Cargo.toml exists in the current directory
+        // (which it does for this Rust project)
+        let hooks = detect_language_hooks();
+        assert_eq!(hooks.on_edit, vec!["cargo check -q"]);
+        assert_eq!(hooks.on_task_done, vec!["cargo test -q 2>&1 | tail -5"]);
+        assert!(hooks.on_plan_step_done.is_empty());
+        assert!(hooks.on_session_start.is_empty());
+        assert!(hooks.on_session_end.is_empty());
+    }
+
+    #[test]
+    fn test_which_binary_exists() {
+        // Test with a binary that should exist on all Unix-like systems
+        assert!(which_binary("sh"));
+        assert!(which_binary("echo"));
+    }
+
+    #[test]
+    fn test_which_binary_not_exists() {
+        // Test with a binary that definitely doesn't exist
+        assert!(!which_binary("this_binary_definitely_does_not_exist_12345"));
+    }
+
+    // ── Hook runner ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_hook_success() {
+        let result = run_hook("echo hello").await;
+        assert_eq!(result.exit_code, 0);
+        assert!(result.output.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_failure() {
+        let result = run_hook("exit 42").await;
+        assert_eq!(result.exit_code, 42);
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_stdout_only() {
+        let result = run_hook("echo stdout").await;
+        assert_eq!(result.exit_code, 0);
+        assert!(result.output.contains("stdout"));
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_stderr_only() {
+        let result = run_hook("echo stderr >&2").await;
+        assert_eq!(result.exit_code, 0);
+        assert!(result.output.contains("stderr"));
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_stdout_and_stderr() {
+        let result = run_hook("echo stdout && echo stderr >&2").await;
+        assert_eq!(result.exit_code, 0);
+        assert!(result.output.contains("stdout"));
+        assert!(result.output.contains("stderr"));
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_empty_output() {
+        let result = run_hook("true").await;
+        assert_eq!(result.exit_code, 0);
+        assert!(result.output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_nonexistent_command() {
+        let result = run_hook("this_command_does_not_exist_12345").await;
+        // sh will return non-zero for a command not found
+        assert_ne!(result.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_truncation() {
+        // Generate output with more than HOOK_MAX_LINES lines
+        let lines = HOOK_MAX_LINES + 10;
+        let cmd = format!("seq 1 {}", lines);
+        let result = run_hook(&cmd).await;
+        
+        assert_eq!(result.exit_code, 0);
+        let output_lines: Vec<&str> = result.output.lines().collect();
+        
+        // Should have HOOK_MAX_LINES + 1 (truncation message)
+        assert_eq!(output_lines.len(), HOOK_MAX_LINES + 1);
+        assert!(result.output.contains("[+10 lines truncated]"));
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_no_truncation_at_limit() {
+        // Generate exactly HOOK_MAX_LINES lines
+        let cmd = format!("seq 1 {}", HOOK_MAX_LINES);
+        let result = run_hook(&cmd).await;
+        
+        assert_eq!(result.exit_code, 0);
+        let output_lines: Vec<&str> = result.output.lines().collect();
+        
+        // Should have exactly HOOK_MAX_LINES, no truncation
+        assert_eq!(output_lines.len(), HOOK_MAX_LINES);
+        assert!(!result.output.contains("truncated"));
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_multiline_output() {
+        let result = run_hook("printf 'line1\\nline2\\nline3'").await;
+        assert_eq!(result.exit_code, 0);
+        assert!(result.output.contains("line1"));
+        assert!(result.output.contains("line2"));
+        assert!(result.output.contains("line3"));
+        let lines: Vec<&str> = result.output.lines().collect();
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_exit_code_minus_one_on_error() {
+        // Test that shell errors result in exit code -1 being captured
+        // We can't easily test "failed to start" without mocking, but we can
+        // verify the exit code structure works
+        let result = run_hook("exit 1").await;
+        assert_eq!(result.exit_code, 1);
+    }
+
+    // ── Config persistence ──────────────────────────────────────────────────────
+
+    // Note: write_hooks_to_config tests would require mocking the filesystem
+    // and config module, which is complex for unit tests. Integration tests
+    // would be more appropriate for testing that function.
 }

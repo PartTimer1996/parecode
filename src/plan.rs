@@ -188,11 +188,14 @@ const PLAN_SYSTEM_PROMPT: &str = r#"You are PareCode, a coding assistant. Your t
 The plan breaks a coding task into discrete, independently executable steps.
 
 CRITICAL rules:
-- Each step runs with ONLY the files listed in its "files" array visible — the model cannot see any other files
-- List EVERY file the step will need to read OR modify, including files that define types, interfaces, or modules it depends on
-- Do not artificially limit file counts — list what is actually needed (3-8 files per step is common)
-- The "instruction" field is the model's complete context — be precise about what to change and where
+- Each step runs in TOTAL ISOLATION with ONLY the files listed in its "files" array visible — it cannot see any other files or conversation history
+- List EVERY file the step needs to read OR modify, including files that define types, interfaces, or modules it depends on
+- Maximum 10 files per step (steps with more than 10 files will be rejected — split into smaller steps instead)
+- Minimum 1 file per step (steps with no files are useless)
+- The "instruction" field is the model's ONLY context — be precise about what to change, where, and why. Include specifics like function signatures, struct field names, or API shapes the step needs to produce. Do NOT say "look at file X" — describe what the step will find there
+- After each step completes, subsequent steps receive a summary of what changed (modified files, symbols added, structural notes) — but NOT the actual file contents from that step, so instructions should be self-contained
 - Prefer 4-8 steps; do not create micro-steps that split naturally-coupled changes
+- Each step should be independently verifiable — prefer "command:cargo test" or similar where applicable
 
 Respond with ONLY valid JSON — no markdown fences, no explanation. Format:
 
@@ -200,7 +203,7 @@ Respond with ONLY valid JSON — no markdown fences, no explanation. Format:
   "steps": [
     {
       "description": "human-readable one-liner shown to user",
-      "instruction": "precise model-facing instruction",
+      "instruction": "precise model-facing instruction — include enough detail that the step can execute without seeing other steps",
       "files": ["src/foo.rs", "src/types.rs", "src/bar.rs"],
       "verify": "none",
       "tool_budget": 15
@@ -338,14 +341,23 @@ pub async fn generate_plan(
         .into_iter()
         .map(|s| {
             // Resolve any symbol names in files[] to real paths via the index
-            let resolved_files = index.resolve_files(&s.files);
+            let mut resolved_files = index.resolve_files(&s.files);
+
+            // Enforce file count limits:
+            // - Empty file lists are useless (step can't see anything)
+            // - >10 files bloat context and degrade model attention
+            if resolved_files.len() > 10 {
+                // Truncate to 10 and log — the model should have split the step
+                resolved_files.truncate(10);
+            }
+
             PlanStep {
                 description: s.description,
                 instruction: s.instruction,
                 files: resolved_files,
                 verify: parse_verification(&s.verify),
                 status: StepStatus::Pending,
-                tool_budget: s.tool_budget,
+                tool_budget: s.tool_budget.min(25), // cap tool budget to prevent runaway steps
                 user_annotation: None,
                 completed_summary: None,
             }
@@ -458,10 +470,12 @@ pub async fn execute_step(
     .await
 }
 
-/// Build a compact summary of what a step actually did, by inspecting the files
-/// it listed. Reports which files were recently modified, their top symbols,
-/// and any structural additions (test modules, new blocks) so subsequent steps
-/// know what already exists and how to interact with it.
+/// Build a rich summary of what a step actually did, by inspecting the files
+/// it listed. Includes: which files were modified, line count changes, new
+/// symbols added, and structural notes (test modules, etc.). This summary is
+/// injected into subsequent steps as the ONLY information they have about prior
+/// work, so it must be detailed enough for the model to interact with those
+/// files correctly without re-reading them.
 pub fn summarise_completed_step(step: &PlanStep) -> String {
     if step.files.is_empty() {
         return format!("completed: {}", step.description);
@@ -477,41 +491,48 @@ pub fn summarise_completed_step(step: &PlanStep) -> String {
 
         // Only report files touched within the last 5 minutes
         if age.as_secs() > 300 {
+            parts.push(format!("{path}: unchanged"));
             continue;
         }
 
         let Ok(content) = std::fs::read_to_string(path) else { continue };
         let lines: Vec<&str> = content.lines().collect();
+        let total_lines = lines.len();
 
-        let symbols: Vec<&str> = lines
+        // Extract ALL public symbols — the next step may need to import/call them
+        let symbols: Vec<String> = lines
             .iter()
             .filter_map(|line| {
                 let t = line.trim();
-                // Rust / TS / Python / Go top-level symbols
-                if t.starts_with("pub fn ")    { return Some(t.split('(').next()?.trim_start_matches("pub fn ")); }
-                if t.starts_with("fn ")        { return Some(t.split('(').next()?.trim_start_matches("fn ")); }
-                if t.starts_with("pub struct ")    { return Some(t.split_whitespace().nth(2)?); }
-                if t.starts_with("pub enum ")      { return Some(t.split_whitespace().nth(2)?); }
-                if t.starts_with("pub trait ")     { return Some(t.split_whitespace().nth(2)?); }
-                if t.starts_with("impl ")          { return Some(t.split_whitespace().nth(1)?); }
-                if t.starts_with("export function ") { return Some(t.split('(').next()?.trim_start_matches("export function ")); }
-                if t.starts_with("function ")    { return Some(t.split('(').next()?.trim_start_matches("function ")); }
-                if t.starts_with("class ")       { return Some(t.split_whitespace().nth(1)?); }
-                if t.starts_with("def ")         { return Some(t.split('(').next()?.trim_start_matches("def ")); }
-                if t.starts_with("func ")        { return Some(t.split('(').next()?.trim_start_matches("func ")); }
+                // Rust
+                if t.starts_with("pub fn ")        { return Some(format!("fn {}", t.split('(').next()?.trim_start_matches("pub fn "))); }
+                if t.starts_with("fn ")            { return Some(format!("fn {}", t.split('(').next()?.trim_start_matches("fn "))); }
+                if t.starts_with("pub struct ")    { return Some(format!("struct {}", t.split_whitespace().nth(2)?)); }
+                if t.starts_with("pub enum ")      { return Some(format!("enum {}", t.split_whitespace().nth(2)?)); }
+                if t.starts_with("pub trait ")     { return Some(format!("trait {}", t.split_whitespace().nth(2)?)); }
+                if t.starts_with("pub type ")      { return Some(format!("type {}", t.split_whitespace().nth(2)?)); }
+                if t.starts_with("impl ")          { return Some(format!("impl {}", t.split('{').next()?.trim_start_matches("impl ").trim())); }
+                // TS/JS
+                if t.starts_with("export function ") { return Some(format!("fn {}", t.split('(').next()?.trim_start_matches("export function "))); }
+                if t.starts_with("export class ")  { return Some(format!("class {}", t.split_whitespace().nth(2)?)); }
+                if t.starts_with("export interface ") { return Some(format!("interface {}", t.split_whitespace().nth(2)?)); }
+                if t.starts_with("function ")      { return Some(format!("fn {}", t.split('(').next()?.trim_start_matches("function "))); }
+                if t.starts_with("class ")         { return Some(format!("class {}", t.split_whitespace().nth(1)?)); }
+                // Python
+                if t.starts_with("def ")           { return Some(format!("def {}", t.split('(').next()?.trim_start_matches("def "))); }
+                if t.starts_with("class ")         { return Some(format!("class {}", t.split('(').next().or(t.split(':').next())?.trim_start_matches("class "))); }
+                // Go
+                if t.starts_with("func ")          { return Some(format!("func {}", t.split('(').next()?.trim_start_matches("func "))); }
                 None
             })
-            .take(4)
             .collect();
 
-        // Detect structural blocks at the file level that affect how next steps edit
+        // Detect structural blocks
         let mut structural_notes: Vec<String> = Vec::new();
 
-        // Test module detection (Rust #[cfg(test)] / Python if __name__ == '__main__' etc.)
+        // Test module detection (Rust #[cfg(test)])
         let has_test_mod = lines.iter().any(|l| l.trim() == "#[cfg(test)]");
         if has_test_mod {
-            // Find the closing line of the test module to help with anchoring
-            // List test fn names inside the module
             let test_fns: Vec<&str> = lines.iter()
                 .filter_map(|l| {
                     let t = l.trim();
@@ -529,14 +550,13 @@ pub fn summarise_completed_step(step: &PlanStep) -> String {
                 test_fns.join(", ")
             };
             structural_notes.push(format!(
-                "already has #[cfg(test)] mod tests containing [{fns_str}] — \
-                 to add more tests use edit_file with old_str targeting content inside the module \
-                 (NOT append=true, which would place code outside it). \
-                 Get exact line content and hashes from the pre-loaded file above, not from this summary."
+                "has #[cfg(test)] mod tests [{fns_str}] — \
+                 to add more tests use edit_file with old_str inside the module \
+                 (NOT append=true). Use exact line content and hashes from pre-loaded file."
             ));
         }
 
-        // Describe class blocks for TS/Python (describe/class Test*)
+        // JS/TS describe blocks
         let has_describe = lines.iter().any(|l| {
             let t = l.trim();
             t.starts_with("describe(") || t.starts_with("describe.only(")
@@ -545,21 +565,46 @@ pub fn summarise_completed_step(step: &PlanStep) -> String {
             structural_notes.push("has describe() test block — add tests inside it".to_string());
         }
 
-        let mut desc = if symbols.is_empty() {
-            format!("modified {path}")
-        } else {
-            format!("modified {path} [{}]", symbols.join(", "))
-        };
-        if !structural_notes.is_empty() {
-            desc.push_str(&format!("; {}", structural_notes.join("; ")));
+        // Import/use statements — next step may need to know what's imported
+        let imports: Vec<&str> = lines.iter()
+            .filter_map(|l| {
+                let t = l.trim();
+                if t.starts_with("use ") || t.starts_with("import ") || t.starts_with("from ") {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .take(10)
+            .collect();
+
+        // Build file summary
+        let mut desc = format!("{path} ({total_lines} lines)");
+
+        if !symbols.is_empty() {
+            // Show up to 15 symbols — enough for next step to know exports
+            let shown: Vec<&str> = symbols.iter().map(|s| s.as_str()).take(15).collect();
+            let more = if symbols.len() > 15 { format!(", +{} more", symbols.len() - 15) } else { String::new() };
+            desc.push_str(&format!("\n    symbols: [{}{}]", shown.join(", "), more));
         }
+
+        if !imports.is_empty() {
+            desc.push_str(&format!("\n    imports: [{}]", imports.join("; ")));
+        }
+
+        if !structural_notes.is_empty() {
+            for note in &structural_notes {
+                desc.push_str(&format!("\n    note: {note}"));
+            }
+        }
+
         parts.push(desc);
     }
 
     if parts.is_empty() {
         format!("completed: {}", step.description)
     } else {
-        parts.join("; ")
+        parts.join("\n  ")
     }
 }
 
