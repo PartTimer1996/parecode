@@ -58,30 +58,10 @@ pub fn is_git_repo(path: &Path) -> bool {
 impl GitRepo {
     /// Create a checkpoint before a task runs.
     ///
-    /// - If the working tree is **clean**: returns the current HEAD hash (no commit created).
-    /// - If the working tree is **dirty**: stages all changes and creates a WIP commit,
-    ///   returning the new HEAD hash.
-    ///
-    /// The commit message prefix `"parecode: checkpoint before"` is matched by
-    /// `list_checkpoints()` — do not change it without updating that function.
-    pub fn checkpoint(&self, task_summary: &str) -> Result<String> {
-        let porcelain = self.run_git(&["status", "--porcelain"])?;
-        let dirty = !porcelain.trim().is_empty();
-
-        if !dirty {
-            // Tree is clean — HEAD is the implicit checkpoint, no commit needed.
-            return self
-                .run_git(&["rev-parse", "HEAD"])
-                .map(|s| s.trim().to_string());
-        }
-
-        // Dirty tree — stage everything and commit.
-        let summary: String = task_summary.chars().take(60).collect();
-        let msg = format!("parecode: checkpoint before \"{}\"", summary);
-
-        self.run_git(&["add", "-A"])?;
-        self.run_git(&["commit", "--no-verify", "-m", &msg])?;
-
+    /// Always returns the current HEAD hash without creating any commits.
+    /// This preserves the user's working tree state — dirty files are left as-is.
+    /// The /undo command uses these hashes to `git reset --hard` back.
+    pub fn checkpoint(&self, _task_summary: &str) -> Result<String> {
         self.run_git(&["rev-parse", "HEAD"])
             .map(|s| s.trim().to_string())
     }

@@ -206,9 +206,16 @@ pub struct LoopDetector {
 impl LoopDetector {
     /// Record a tool call. Returns true if a loop is detected.
     pub fn record(&mut self, tool_name: &str, args: &str) -> bool {
-        // Fingerprint: tool name + full args (truncated to 400 chars).
+        // Fingerprint: tool name + truncated args.
         // Use enough of args that read_file with different line_ranges doesn't false-positive.
-        let fp = format!("{tool_name}::{}", &args[..args.len().min(400)]);
+        // Truncate at a char boundary to avoid panicking on multi-byte UTF-8.
+        let trunc = args
+            .char_indices()
+            .take_while(|(i, _)| *i < 400)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        let fp = format!("{tool_name}::{}", &args[..trunc]);
 
         // Keep last 5
         self.recent.push((tool_name.to_string(), fp.clone()));
