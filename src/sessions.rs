@@ -56,8 +56,7 @@ pub fn sessions_dir() -> PathBuf {
         .ok()
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                .join(".local/share")
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share")
         })
         .join("parecode/sessions")
 }
@@ -71,20 +70,35 @@ fn cwd_basename(cwd: &str) -> &str {
 
 // ── Session lifecycle ─────────────────────────────────────────────────────────
 
-/// Create a new empty session and ensure the sessions directory exists.
+/// Open an existing session for this CWD, or create a new one if none exists.
 pub fn open_session(cwd: &str) -> Result<Session> {
     let dir = sessions_dir();
     std::fs::create_dir_all(&dir)?;
 
+    // Check for existing session to resume - reuse its path instead of creating new
+    if let Some((id, path)) = find_latest_for_cwd(cwd) {
+        let loaded = load_session_turns(&path)?;
+        let active_turn = loaded.len().saturating_sub(1);
+        return Ok(Session {
+            id,
+            _cwd: cwd.to_string(),
+            _turns: loaded,
+            active_turn,
+            path,
+        });
+    }
+
+    // No existing session - create a new one
     let ts = chrono::Utc::now().timestamp();
     let basename = cwd_basename(cwd);
     let id = format!("{ts}_{basename}");
     let path = dir.join(format!("{id}.jsonl"));
 
-    // Touch the file immediately so list_sessions() can find it right away.
-    // Without this the file only appears on disk after the first append_turn call,
-    // meaning the current session would never show as highlighted in the sidebar.
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open(&path);
+    // Touch the file so list_sessions() can find it
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path);
 
     Ok(Session {
         id,
@@ -127,9 +141,7 @@ pub fn list_sessions() -> Result<Vec<(String, PathBuf)>> {
     }
     let mut entries: Vec<_> = std::fs::read_dir(&dir)?
         .flatten()
-        .filter(|e| {
-            e.path().extension().map(|x| x == "jsonl").unwrap_or(false)
-        })
+        .filter(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
         .collect();
     // Sort by filename descending (timestamp prefix makes this newest-first)
     entries.sort_by_key(|e| Reverse(e.file_name()));
@@ -151,10 +163,14 @@ pub fn list_sessions() -> Result<Vec<(String, PathBuf)>> {
 /// list_sessions() returns newest-first, so we walk in order and keep the first
 /// `keep` non-empty ones, deleting everything else.
 pub fn prune_old_sessions(keep: usize) {
-    let Ok(sessions) = list_sessions() else { return };
+    let Ok(sessions) = list_sessions() else {
+        return;
+    };
     let mut kept = 0usize;
     for (_, path) in sessions {
-        let is_empty = std::fs::metadata(&path).map(|m| m.len() == 0).unwrap_or(true);
+        let is_empty = std::fs::metadata(&path)
+            .map(|m| m.len() == 0)
+            .unwrap_or(true);
         if is_empty {
             let _ = std::fs::remove_file(&path);
         } else {
@@ -170,7 +186,10 @@ pub fn prune_old_sessions(keep: usize) {
 /// Returns (session_id, path) if found.
 pub fn find_latest_for_cwd(cwd: &str) -> Option<(String, PathBuf)> {
     let suffix = format!("_{}", cwd_basename(cwd));
-    list_sessions().ok()?.into_iter().find(|(id, _)| id.ends_with(&suffix))
+    list_sessions()
+        .ok()?
+        .into_iter()
+        .find(|(id, _)| id.ends_with(&suffix))
 }
 
 // ── Context injection ─────────────────────────────────────────────────────────
@@ -219,7 +238,9 @@ pub fn build_prior_context(turns: &[ConversationTurn]) -> Option<String> {
             if !modified.is_empty() {
                 // Deduplicate paths to keep it concise
                 let mut seen = std::collections::HashSet::new();
-                let deduped: Vec<&str> = modified.iter().copied()
+                let deduped: Vec<&str> = modified
+                    .iter()
+                    .copied()
                     .filter(|a| seen.insert(*a))
                     .collect();
                 lines.push(format!("Files modified: {}", deduped.join(", ")));

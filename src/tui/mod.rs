@@ -980,36 +980,29 @@ async fn event_loop(
         ));
     }
 
-    // Auto-resume the most recent session for this cwd (load turns for context + display)
+    // Open session (resumes existing or creates new) — loads turns and sets active_turn
     let cwd = cwd_str();
-    if let Some((_id, path)) = sessions::find_latest_for_cwd(&cwd) {
-        if let Ok(turns) = sessions::load_session_turns(&path) {
-            if !turns.is_empty() {
-                // Replay as display entries so history is visible
-                for t in &turns {
+    match sessions::open_session(&cwd) {
+        Ok(session) => {
+            // Sync conversation_turns from the loaded session for context injection
+            state.conversation_turns = session._turns.clone();
+
+            // Replay loaded turns as display entries so history is visible
+            if !state.conversation_turns.is_empty() {
+                state.session_resumed = true;
+                for t in &state.conversation_turns {
                     state.entries.push(ConversationEntry::UserMessage(t.user_message.clone()));
                     if !t.agent_response.is_empty() {
                         state.entries.push(ConversationEntry::AssistantChunk(t.agent_response.clone()));
                     }
                 }
-                let count = turns.len();
-                state.conversation_turns = turns;
-                state.session_resumed = true;
+                let count = state.conversation_turns.len();
                 state.push(ConversationEntry::SystemMsg(
                     format!("↩ resumed session · {count} turn{} · /new for a fresh start",
                         if count == 1 { "" } else { "s" }),
                 ));
             }
-        }
-    }
 
-    // Open a new session file for this TUI invocation (non-fatal if storage unavailable)
-    match sessions::open_session(&cwd) {
-        Ok(session) => {
-            if let Some(s) = &mut state.session {
-                // Update active_turn to match loaded turns
-                s.active_turn = state.conversation_turns.len().saturating_sub(1);
-            }
             state.session = Some(session);
             // Keep only the 10 most recent non-empty sessions; delete older ones
             sessions::prune_old_sessions(10);
@@ -1021,10 +1014,6 @@ async fn event_loop(
                 format!("session: storage unavailable: {e}"),
             ));
         }
-    }
-    // Set active_turn on the freshly opened session to match loaded turns
-    if let Some(s) = &mut state.session {
-        s.active_turn = state.conversation_turns.len().saturating_sub(1);
     }
 
     // Channel: agent → TUI
