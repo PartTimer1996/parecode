@@ -1,3 +1,4 @@
+pub mod ask;
 pub mod bash;
 pub mod edit;
 pub mod list;
@@ -22,6 +23,7 @@ pub fn all_definitions() -> Vec<Tool> {
         def(search::definition()),
         def(list::definition()),
         def(recall::definition()),
+        def(ask::definition()),
     ]
 }
 
@@ -35,7 +37,7 @@ fn def(v: Value) -> Tool {
 
 /// Returns true if this is a built-in native tool (not an MCP tool).
 pub fn is_native(name: &str) -> bool {
-    matches!(name, "read_file" | "write_file" | "edit_file" | "patch_file" | "bash" | "search" | "list_files" | "recall")
+    matches!(name, "read_file" | "write_file" | "edit_file" | "patch_file" | "bash" | "search" | "list_files" | "recall" | "ask_user")
 }
 
 /// Dispatch a synchronous tool call by name.

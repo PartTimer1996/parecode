@@ -270,7 +270,9 @@ fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
     };
 
     // Animated spinner glyph in status bar when running
-    let (status_glyph, status_color) = if matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning) {
+    let (status_glyph, status_color) = if state.mode == Mode::AskingUser {
+        ("?", Color::Yellow)
+    } else if matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning) {
         let g = SPINNER_GLYPHS[(state.spinner_tick as usize) % SPINNER_GLYPHS.len()];
         (g, Color::Cyan)
     } else {
@@ -411,6 +413,7 @@ fn fmt_k(n: u32) -> String {
 fn draw_input(f: &mut Frame, state: &AppState, area: Rect) {
     let (border_color, prompt_color, prompt_char) = match state.mode {
         Mode::AgentRunning   => (Color::Rgb(40, 40, 60),  Color::DarkGray,           "·"),
+        Mode::AskingUser     => (Color::Yellow,            Color::Yellow,             "?"),
         Mode::Palette        => (Color::Cyan,              Color::Cyan,               "⌘"),
         Mode::FilePicker     => (Color::Green,             Color::Green,              "@"),
         Mode::SlashComplete  => (Color::Cyan,              Color::Cyan,               "/"),
@@ -459,6 +462,11 @@ fn draw_input(f: &mut Frame, state: &AppState, area: Rect) {
     } else if input_text.is_empty() {
         if state.mode == Mode::Palette {
             Span::styled("search commands…", Style::default().fg(Color::Rgb(70, 70, 90)))
+        } else if state.mode == Mode::AskingUser {
+            Span::styled(
+                "type your answer · Enter to send · Ctrl+C to skip",
+                Style::default().fg(Color::Rgb(180, 140, 40)),
+            )
         } else {
             Span::styled(
                 "message · @ attach · Ctrl+B sidebar · Ctrl+P commands",
@@ -483,7 +491,7 @@ fn draw_input(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(paragraph, area);
 
     // Position cursor at the actual edit cursor, not end of string
-    if matches!(state.mode, Mode::Normal | Mode::Palette | Mode::FilePicker | Mode::SlashComplete | Mode::PlanReview | Mode::ProfilePicker) {
+    if matches!(state.mode, Mode::Normal | Mode::AskingUser | Mode::Palette | Mode::FilePicker | Mode::SlashComplete | Mode::PlanReview | Mode::ProfilePicker) {
         use unicode_width::UnicodeWidthStr;
         // prompt is "  ❯ " — ❯ is 1 wide, total visible width is 4 cols
         let prompt_width: u16 = 4;

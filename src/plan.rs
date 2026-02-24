@@ -267,6 +267,7 @@ pub async fn generate_plan(
     project: &str,
     context_files: &[(String, String)], // (path, content) attached files as context
     index: &SymbolIndex,
+    on_chunk: impl Fn(&str) + Send + 'static,
 ) -> Result<Plan> {
     // Build the user message: task + any attached file context
     let mut user_content = String::new();
@@ -308,7 +309,7 @@ pub async fn generate_plan(
 
     // No tools during planning — pure text response
     let response = client
-        .chat(PLAN_SYSTEM_PROMPT, &messages, &[], |_chunk| {})
+        .chat(PLAN_SYSTEM_PROMPT, &messages, &[], on_chunk)
         .await?;
 
     // Parse the JSON response

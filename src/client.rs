@@ -46,7 +46,7 @@ pub struct Tool {
 
 // ── Completed tool call (after accumulating deltas) ───────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -192,6 +192,7 @@ impl Client {
         let mut stream = resp.bytes_stream();
 
         let mut text_buf = String::new();
+        let mut reasoning_buf = String::new();
         // Index → accumulator
         let mut pending: Vec<PendingToolCall> = Vec::new();
         let mut input_tokens = 0u32;
@@ -258,6 +259,7 @@ impl Client {
                                     reasoning_open = true;
                                 }
                                 on_text(&rc);
+                                reasoning_buf.push_str(&rc);
                             }
                         } else if reasoning_open {
                             // reasoning field stopped arriving — close the tag
@@ -327,8 +329,17 @@ impl Client {
             })
             .collect();
 
+        // If the model sent everything as reasoning tokens (content was always empty),
+        // use the reasoning buffer as the response text. This happens with
+        // OpenRouter/StepFun models that put the entire response in `reasoning`.
+        let final_text = if text_buf.is_empty() && !reasoning_buf.is_empty() {
+            reasoning_buf
+        } else {
+            text_buf
+        };
+
         Ok(ModelResponse {
-            text: text_buf,
+            text: final_text,
             tool_calls,
             input_tokens,
             output_tokens,
@@ -412,5 +423,231 @@ mod tests {
         assert!(pending.id.is_empty());
         assert!(pending.name.is_empty());
         assert!(pending.arguments.is_empty());
+    }
+
+    #[test]
+    fn test_message_content_from_str() {
+        let content: MessageContent = "hello".into();
+        match content {
+            MessageContent::Text(text) => assert_eq!(text, "hello"),
+            MessageContent::Parts(_) => panic!("Expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn test_message_content_from_string() {
+        let content: MessageContent = "world".to_string().into();
+        match content {
+            MessageContent::Text(text) => assert_eq!(text, "world"),
+            MessageContent::Parts(_) => panic!("Expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn test_message_serialize() {
+        let msg = Message {
+            role: "user".to_string(),
+            content: MessageContent::Text("test message".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"role\":\"user\""));
+        assert!(json.contains("\"content\":\"test message\""));
+    }
+
+    #[test]
+    fn test_message_deserialize() {
+        let json = r#"{"role":"assistant","content":"hello"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.role, "assistant");
+        match msg.content {
+            MessageContent::Text(text) => assert_eq!(text, "hello"),
+            MessageContent::Parts(_) => panic!("Expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn test_content_part_text_serialize() {
+        let part = ContentPart::Text { text: "hello".to_string() };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"type\":\"text\""));
+        assert!(json.contains("\"text\":\"hello\""));
+    }
+
+    #[test]
+    fn test_content_part_tool_result_serialize() {
+        let part = ContentPart::ToolResult {
+            tool_use_id: "call_123".to_string(),
+            content: "result data".to_string(),
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"type\":\"tool_result\""));
+        assert!(json.contains("\"tool_use_id\":\"call_123\""));
+        assert!(json.contains("\"content\":\"result data\""));
+    }
+
+    #[test]
+    fn test_content_part_deserialize_text() {
+        let json = r#"{"type":"text","text":"hello world"}"#;
+        let part: ContentPart = serde_json::from_str(json).unwrap();
+        match part {
+            ContentPart::Text { text } => assert_eq!(text, "hello world"),
+            ContentPart::ToolResult { .. } => panic!("Expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn test_content_part_deserialize_tool_result() {
+        let json = r#"{"type":"tool_result","tool_use_id":"call_abc","content":"42"}"#;
+        let part: ContentPart = serde_json::from_str(json).unwrap();
+        match part {
+            ContentPart::ToolResult { tool_use_id, content } => {
+                assert_eq!(tool_use_id, "call_abc");
+                assert_eq!(content, "42");
+            }
+            ContentPart::Text { .. } => panic!("Expected ToolResult variant"),
+        }
+    }
+
+    #[test]
+    fn test_tool_serialize() {
+        let tool = Tool {
+            name: "get_weather".to_string(),
+            description: "Get weather for a location".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"}
+                }
+            }),
+        };
+        let json = serde_json::to_string(&tool).unwrap();
+        assert!(json.contains("\"name\":\"get_weather\""));
+        assert!(json.contains("\"description\":\"Get weather for a location\""));
+    }
+
+    #[test]
+    fn test_build_messages_empty_system() {
+        let messages = vec![Message {
+            role: "user".to_string(),
+            content: MessageContent::Text("hello".to_string()),
+        }];
+        let result = build_messages("", &messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["role"], "user");
+        assert_eq!(result[0]["content"], "hello");
+    }
+
+    #[test]
+    fn test_build_messages_with_system() {
+        let messages = vec![Message {
+            role: "user".to_string(),
+            content: MessageContent::Text("hello".to_string()),
+        }];
+        let result = build_messages("You are a helpful assistant", &messages);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["role"], "system");
+        assert_eq!(result[0]["content"], "You are a helpful assistant");
+        assert_eq!(result[1]["role"], "user");
+    }
+
+    #[test]
+    fn test_build_messages_with_tool_result_parts() {
+        let messages = vec![Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Parts(vec![
+                ContentPart::Text { text: "Calling tool".to_string() },
+                ContentPart::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "result".to_string(),
+                },
+            ]),
+        }];
+        let result = build_messages("", &messages);
+        // Should flatten to 2 messages: assistant text + tool result
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["role"], "assistant");
+        assert_eq!(result[0]["content"], "Calling tool");
+        assert_eq!(result[1]["role"], "tool");
+        assert_eq!(result[1]["tool_call_id"], "call_1");
+        assert_eq!(result[1]["content"], "result");
+    }
+
+    #[test]
+    fn test_build_messages_multiple_messages() {
+        let messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Text("first".to_string()),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Text("second".to_string()),
+            },
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Parts(vec![ContentPart::Text {
+                    text: "third".to_string(),
+                }]),
+            },
+        ];
+        let result = build_messages("system prompt", &messages);
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0]["role"], "system");
+        assert_eq!(result[1]["role"], "user");
+        assert_eq!(result[2]["role"], "assistant");
+        assert_eq!(result[3]["role"], "user");
+    }
+
+    #[test]
+    fn test_tool_call_serialize() {
+        let tool_call = ToolCall {
+            id: "call_xyz".to_string(),
+            name: "get_weather".to_string(),
+            arguments: r#"{"city":"Paris"}"#.to_string(),
+        };
+        let json = serde_json::to_string(&tool_call).unwrap();
+        assert!(json.contains("\"id\":\"call_xyz\""));
+        assert!(json.contains("\"name\":\"get_weather\""));
+        assert!(json.contains("\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\""));
+    }
+
+    #[test]
+    fn test_model_response_equality() {
+        let response1 = ModelResponse {
+            text: "test".to_string(),
+            tool_calls: vec![],
+            input_tokens: 100,
+            output_tokens: 200,
+        };
+        let response2 = ModelResponse {
+            text: "test".to_string(),
+            tool_calls: vec![],
+            input_tokens: 100,
+            output_tokens: 200,
+        };
+        assert_eq!(response1.text, response2.text);
+        assert_eq!(response1.input_tokens, response2.input_tokens);
+    }
+
+    #[test]
+    fn test_client_new() {
+        let client = Client::new(
+            "https://api.example.com/v1/chat".to_string(),
+            "gpt-4".to_string(),
+        );
+        assert_eq!(client.endpoint, "https://api.example.com/v1/chat");
+        assert_eq!(client.model, "gpt-4");
+        assert!(client.api_key.is_none());
+    }
+
+    #[test]
+    fn test_client_set_api_key() {
+        let mut client = Client::new(
+            "https://api.example.com/v1/chat".to_string(),
+            "gpt-4".to_string(),
+        );
+        assert!(client.api_key.is_none());
+        client.set_api_key("sk-test123".to_string());
+        assert_eq!(client.api_key, Some("sk-test123".to_string()));
     }
 }

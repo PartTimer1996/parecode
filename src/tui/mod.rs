@@ -47,7 +47,7 @@ use crate::telemetry::{self, SessionStats};
 
 // ── UiEvent — typed events from agent → TUI ──────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum UiEvent {
     /// A streamed text chunk from the model (visible response)
     Chunk(String),
@@ -109,6 +109,11 @@ pub enum UiEvent {
     GitError(String),
     /// System message from background tasks (e.g. update check)
     SystemMsg(String),
+    /// Model is asking the user a clarifying question — pause agent until answered
+    AskUser {
+        question: String,
+        reply_tx: tokio::sync::oneshot::Sender<String>,
+    },
 }
 
 // ── ConversationEntry — displayable items in history ─────────────────────────
@@ -135,6 +140,10 @@ pub enum ConversationEntry {
     /// Lightweight nudge shown in chat after a task that changed files.
     /// Directs user to the Git tab (press 5) for the full diff.
     GitNotification { files_changed: usize, _checkpoint_hash: Option<String> },
+    /// The model asked the user a question (displayed as a prompt)
+    AskUser(String),
+    /// The user's reply to an ask_user question
+    AskReply(String),
 }
 
 // ── Mode — TUI modal state ────────────────────────────────────────────────────
@@ -151,6 +160,7 @@ pub enum Mode {
     PlanRunning,    // Plan step currently executing
     UndoPicker,     // Interactive checkpoint picker in Git tab (↑↓ select, Enter confirm, Esc cancel)
     ProfilePicker,  // Interactive profile picker overlay in Config tab
+    AskingUser,     // Model asked a question, waiting for user's typed answer
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -431,6 +441,8 @@ pub struct AppState {
     pub profile_picker_selected: usize,
     /// Sorted profile names for the picker (populated when picker opens)
     pub profile_picker_entries: Vec<(String, String)>,  // (name, model)
+    /// Oneshot sender to reply to an ask_user tool call (Some while Mode::AskingUser)
+    pub pending_ask_reply: Option<tokio::sync::oneshot::Sender<String>>,
 }
 
 impl AppState {
@@ -496,6 +508,7 @@ impl AppState {
             config_scroll: 0,
             profile_picker_selected: 0,
             profile_picker_entries: Vec::new(),
+            pending_ask_reply: None,
         }
     }
 
@@ -723,6 +736,14 @@ impl AppState {
             }
             UiEvent::SystemMsg(msg) => {
                 self.push(ConversationEntry::SystemMsg(msg));
+            }
+            UiEvent::AskUser { question, reply_tx } => {
+                self.push(ConversationEntry::AskUser(question));
+                self.pending_ask_reply = Some(reply_tx);
+                self.mode = Mode::AskingUser;
+                // Clear input so the user starts with a fresh prompt
+                self.input.clear();
+                self.cursor = 0;
             }
         }
     }
@@ -1761,7 +1782,16 @@ fn handle_key(
     match (key.modifiers, key.code) {
         // Ctrl+C — cancel agent/plan or quit
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-            if matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning) {
+            if state.mode == Mode::AskingUser {
+                // Cancel the ask — send a default reply so the agent unblocks
+                if let Some(tx) = state.pending_ask_reply.take() {
+                    let _ = tx.send("[user cancelled the question — proceed with your best judgement]".to_string());
+                }
+                state.push(ConversationEntry::AskReply("(cancelled)".to_string()));
+                state.input.clear();
+                state.cursor = 0;
+                state.mode = Mode::AgentRunning;
+            } else if matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning) {
                 if let Some(tx) = state.cancel_tx.take() {
                     let _ = tx.send(());
                 }
@@ -1867,7 +1897,19 @@ fn handle_key(
         }
         // Enter — submit input
         (KeyModifiers::NONE, KeyCode::Enter) => {
-            if state.mode == Mode::AgentRunning || state.mode == Mode::PlanRunning {
+            if state.mode == Mode::AskingUser {
+                // Submit reply to ask_user tool call
+                let answer = state.input.trim().to_string();
+                if !answer.is_empty() {
+                    state.push(ConversationEntry::AskReply(answer.clone()));
+                    state.input.clear();
+                    state.cursor = 0;
+                    if let Some(tx) = state.pending_ask_reply.take() {
+                        let _ = tx.send(answer);
+                    }
+                    state.mode = Mode::AgentRunning;
+                }
+            } else if state.mode == Mode::AgentRunning || state.mode == Mode::PlanRunning {
                 // ignore while agent is running
             } else {
                 let input = state.input.trim().to_string();
@@ -2017,8 +2059,8 @@ fn handle_key(
                 state.input.insert_str(state.cursor, s);
                 state.cursor += s.len();
 
-                // `@` triggers file picker
-                if c == '@' {
+                // `@` triggers file picker (not in AskingUser mode)
+                if c == '@' && state.mode != Mode::AskingUser {
                     let at_offset = state.cursor - 1; // offset of the `@`
                     state.file_picker = Some(FilePickerState {
                         all_files: gather_files(),
@@ -2029,8 +2071,8 @@ fn handle_key(
                     state.mode = Mode::FilePicker;
                 }
 
-                // `/` at start of input triggers slash autocomplete
-                if c == '/' && state.cursor == 1 {
+                // `/` at start of input triggers slash autocomplete (not in AskingUser mode)
+                if c == '/' && state.cursor == 1 && state.mode != Mode::AskingUser {
                     state.slash_complete_selected = 0;
                     state.mode = Mode::SlashComplete;
                 }
@@ -2573,7 +2615,12 @@ fn generate_and_show_plan(
     let index = crate::index::SymbolIndex::build(std::path::Path::new("."), 500);
 
     tokio::spawn(async move {
-        match plan::generate_plan(&task, &client, &project, &context_files, &index).await {
+        let tx_plan = ui_tx.clone();
+        let on_chunk = move |chunk: &str| {
+            // Forward thinking chunks so the TUI shows planning progress
+            let _ = tx_plan.send(UiEvent::ThinkingChunk(chunk.to_string()));
+        };
+        match plan::generate_plan(&task, &client, &project, &context_files, &index, on_chunk).await {
             Ok(generated_plan) => {
                 // Save plan to disk: JSON for machine use, Markdown for human reading
                 let _ = plan::save_plan(&generated_plan);

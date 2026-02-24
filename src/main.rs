@@ -268,7 +268,7 @@ fn print_event_plain(ev: &tui::UiEvent) {
                 println!("  ⚙ {event} {mark}: {}", output.lines().next().unwrap_or(""));
             }
         }
-        // Plan and Git lifecycle events only occur in TUI mode — ignore here
+        // Plan, Git, and AskUser lifecycle events only occur in TUI mode — ignore here
         UiEvent::PlanReady(_)
         | UiEvent::PlanGenerateFailed(_)
         | UiEvent::PlanStepStart { .. }
@@ -277,7 +277,8 @@ fn print_event_plain(ev: &tui::UiEvent) {
         | UiEvent::PlanFailed { .. }
         | UiEvent::GitChanges { .. }
         | UiEvent::GitAutoCommit { .. }
-        | UiEvent::GitError(_) => {}
+        | UiEvent::GitError(_)
+        | UiEvent::AskUser { .. } => {}
         UiEvent::SystemMsg(msg) => {
             println!("  {msg}");
         }

@@ -34,7 +34,7 @@ Guidelines:
 - To add to an existing block: use old_str matching the closing brace of that block (e.g. the final `}` plus the line before it) and replace it with the new content plus the closing brace.
 - In plan mode, the "Completed steps" preamble describes what changed but its line numbers are STALE. Always read anchors and line positions from the pre-loaded file content shown in the attached files section — never from the completed steps summary.
 - Tool outputs are summarised in history to save context. Use the recall tool to retrieve the full output of any previous tool call when you need it.
-- Do not ask for permission mid-task. If something is clearly required (adding a dependency, creating a file, running a command), do it and report what you did. Only stop to ask if there are genuinely multiple valid approaches that change the outcome significantly."#;
+- For routine actions (adding a dependency, creating a file, running a command), just do it and report what you did. Use the ask_user tool ONLY when genuinely uncertain between multiple valid approaches that significantly affect the outcome — e.g. choosing an architecture, picking between incompatible strategies, or clarifying ambiguous requirements. Do not use ask_user for routine confirmations."#;
 
 /// Build a compact project file map to inject into the system prompt.
 /// Walks depth-2, ignores noise dirs, caps at 80 paths.
@@ -685,6 +685,15 @@ async fn execute_tool(
                 return full.to_string();
             }
             "[recall: no matching tool result found]".to_string()
+        }
+        "ask_user" => {
+            let question = args["question"].as_str().unwrap_or("(no question provided)").to_string();
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<String>();
+            let _ = ui_tx.send(UiEvent::AskUser { question, reply_tx });
+            match reply_rx.await {
+                Ok(answer) => answer,
+                Err(_) => "[ask_user: no reply received (channel closed)]".to_string(),
+            }
         }
         "read_file" => {
             let path = args["path"].as_str().unwrap_or("");
