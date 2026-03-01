@@ -91,6 +91,18 @@ pub fn draw(f: &mut Frame, state: &AppState, area: Rect) {
     };
     items.push(kv("status", hook_status));
 
+    let preset_display = match &state.active_hook_preset {
+        Some(p) => format!("{p}  (use /hooks <preset> to switch)"),
+        None => {
+            if state.available_hook_presets.is_empty() {
+                "none  (add [hook_presets.rust] to config.toml)".to_string()
+            } else {
+                format!("none active  — available: {}", state.available_hook_presets.join(", "))
+            }
+        }
+    };
+    items.push(kv("preset", &preset_display));
+
     let hc = &state.hooks_config;
     items.push(hook_line("on_edit", &hc.on_edit));
     items.push(hook_line("on_task_done", &hc.on_task_done));

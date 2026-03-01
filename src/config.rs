@@ -101,6 +101,16 @@ pub struct ConfigFile {
 
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
+
+    /// Named hook configurations switchable at runtime via `/hooks <name>`.
+    /// Example: [hooks.rust] / [hooks.typescript]
+    #[serde(default)]
+    pub hooks: HashMap<String, crate::hooks::HookConfig>,
+
+    /// The currently active hook configuration name (persisted across restarts).
+    /// None means no hooks are active.
+    #[serde(default)]
+    pub active_hooks: Option<String>,
 }
 
 fn default_profile_name() -> String {
@@ -167,6 +177,12 @@ pub struct ResolvedConfig {
     pub auto_commit_prefix: String,
     /// Enable git integration (checkpoints, status injection, post-task diffs)
     pub git_context: bool,
+    /// Names of available hook configs from config (for `/hooks list` display)
+    pub available_hooks: Vec<String>,
+    /// The currently active hook config name (from config file, persisted)
+    pub active_hooks: Option<String>,
+    /// The resolved HookConfig for the active named hook (empty if none active)
+    pub active_hook_config: crate::hooks::HookConfig,
 }
 
 impl ResolvedConfig {
@@ -188,6 +204,9 @@ impl ResolvedConfig {
             .cloned()
             .unwrap_or_default();
 
+        let mut hook_names: Vec<String> = file.hooks.keys().cloned().collect();
+        hook_names.sort();
+
         Self {
             endpoint: endpoint_override
                 .map(str::to_string)
@@ -208,6 +227,12 @@ impl ResolvedConfig {
             auto_commit: base.auto_commit,
             auto_commit_prefix: base.auto_commit_prefix,
             git_context: base.git_context,
+            active_hook_config: file.active_hooks.as_deref()
+                .and_then(|name| file.hooks.get(name))
+                .cloned()
+                .unwrap_or_default(),
+            available_hooks: hook_names,
+            active_hooks: file.active_hooks.clone(),
         }
     }
 }

@@ -216,6 +216,93 @@ pub fn write_hooks_to_config(profile_name: &str) -> HookConfig {
     detected
 }
 
+/// Write a named `HookConfig` to the config file as `[hooks.NAME]`.
+/// Used by the wizard when the user confirms their new hook configuration.
+/// Skips writing if that section already exists. Non-fatal on write errors.
+pub fn write_config_hooks(name: &str, cfg: &HookConfig) {
+    let config_path = crate::config::config_path();
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+    // Don't double-write if this hooks section already exists
+    let hooks_header = format!("[hooks.{name}]");
+    if existing.contains(&hooks_header) {
+        return;
+    }
+
+    let fmt_cmds = |cmds: &[String]| -> String {
+        if cmds.is_empty() {
+            return String::new();
+        }
+        let inner: Vec<String> = cmds.iter().map(|c| format!("  \"{c}\"")).collect();
+        format!("[\n{}\n]", inner.join(",\n"))
+    };
+
+    let mut lines = Vec::new();
+    lines.push(format!("\n[hooks.{name}]"));
+    if !cfg.on_edit.is_empty() {
+        lines.push(format!("on_edit = {}", fmt_cmds(&cfg.on_edit)));
+    }
+    if !cfg.on_task_done.is_empty() {
+        lines.push(format!("on_task_done = {}", fmt_cmds(&cfg.on_task_done)));
+    }
+    if !cfg.on_plan_step_done.is_empty() {
+        lines.push(format!("on_plan_step_done = {}", fmt_cmds(&cfg.on_plan_step_done)));
+    }
+    if !cfg.on_session_start.is_empty() {
+        lines.push(format!("on_session_start = {}", fmt_cmds(&cfg.on_session_start)));
+    }
+    if !cfg.on_session_end.is_empty() {
+        lines.push(format!("on_session_end = {}", fmt_cmds(&cfg.on_session_end)));
+    }
+    lines.push(String::new());
+
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&config_path) {
+        let _ = f.write_all(lines.join("\n").as_bytes());
+    }
+}
+
+/// Persist `active_hooks = "name"` (or clear it) in the config file.
+/// Rewrites the line in-place if it exists, otherwise appends it.
+/// Non-fatal on errors.
+pub fn write_active_hooks(name: Option<&str>) {
+    let config_path = crate::config::config_path();
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+    let new_line = match name {
+        Some(n) => format!("active_hooks = \"{n}\""),
+        None => String::new(),
+    };
+
+    // Replace existing active_hooks line if present
+    if existing.contains("active_hooks") {
+        let updated: String = existing
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("active_hooks") {
+                    new_line.as_str()
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Preserve trailing newline
+        let updated = if existing.ends_with('\n') {
+            format!("{updated}\n")
+        } else {
+            updated
+        };
+        let _ = std::fs::write(&config_path, updated);
+    } else if let Some(n) = name {
+        // Append after the first non-comment, non-empty line (top of file)
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&config_path) {
+            let _ = f.write_all(format!("\nactive_hooks = \"{n}\"\n").as_bytes());
+        }
+    }
+}
+
 // ── Runner ────────────────────────────────────────────────────────────────────
 
 const HOOK_TIMEOUT_SECS: u64 = 30;

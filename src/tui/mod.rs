@@ -27,6 +27,9 @@ use anyhow::Result;
 use crossterm::{
     event::{
         Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
+        EnableBracketedPaste, DisableBracketedPaste,
+        EnableMouseCapture, DisableMouseCapture,
+        MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -162,6 +165,32 @@ pub enum Mode {
     UndoPicker,     // Interactive checkpoint picker in Git tab (↑↓ select, Enter confirm, Esc cancel)
     ProfilePicker,  // Interactive profile picker overlay in Config tab
     AskingUser,     // Model asked a question, waiting for user's typed answer
+    HookWizard,     // First-run hook setup wizard
+}
+
+// ── Hook wizard state ─────────────────────────────────────────────────────────
+
+/// Which field of the hook setup form is currently being edited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WizardStep {
+    EnterName,
+    EnterOnEdit,
+    EnterOnTaskDone,
+    EnterOnPlanStepDone,
+    EnterOnSessionStart,
+    EnterOnSessionEnd,
+    Confirm,
+}
+
+#[derive(Debug, Clone)]
+pub struct HookWizardState {
+    pub step: WizardStep,
+    pub name_input: String,
+    pub on_edit_input: String,
+    pub on_task_done_input: String,
+    pub on_plan_step_done_input: String,
+    pub on_session_start_input: String,
+    pub on_session_end_input: String,
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -242,8 +271,8 @@ fn walk_dir(
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
-        // Skip hidden, target dir, node_modules, __pycache__
-        if name_str.starts_with('.')
+        // Skip .git, target dir, node_modules, __pycache__ — allow .parecode and other dotfiles
+        if name_str == ".git"
             || name_str == "target"
             || name_str == "node_modules"
             || name_str == "__pycache__"
@@ -446,6 +475,12 @@ pub struct AppState {
     pub profile_picker_entries: Vec<(String, String)>,  // (name, model)
     /// Oneshot sender to reply to an ask_user tool call (Some while Mode::AskingUser)
     pub pending_ask_reply: Option<tokio::sync::oneshot::Sender<String>>,
+    /// Active hook config name (e.g. "rust" from [hooks.rust]), persisted in config
+    pub active_hook_preset: Option<String>,
+    /// Available hook config names from config (for `/hooks list`)
+    pub available_hook_presets: Vec<String>,
+    /// Hook setup wizard state (Some when Mode::HookWizard)
+    pub hook_wizard: Option<HookWizardState>,
 }
 
 impl AppState {
@@ -491,7 +526,7 @@ impl AppState {
             stats_scroll: 0,
             telemetry_history: telemetry::load_all(),
             endpoint: resolved.endpoint.clone(),
-            hooks_config: resolved.hooks.clone(),
+            hooks_config: resolved.active_hook_config.clone(),
             hooks_disabled_profile: resolved.hooks_disabled,
             mcp_server_names: resolved.mcp_servers.iter().map(|s| s.name.clone()).collect(),
             auto_commit: resolved.auto_commit,
@@ -514,6 +549,9 @@ impl AppState {
             profile_picker_selected: 0,
             profile_picker_entries: Vec::new(),
             pending_ask_reply: None,
+            active_hook_preset: resolved.active_hooks.clone(),
+            available_hook_presets: resolved.available_hooks.clone(),
+            hook_wizard: None,
         }
     }
 
@@ -864,7 +902,7 @@ fn palette_commands() -> Vec<PaletteCommand> {
         PaletteCommand { key: "/profiles",    label: "List profiles" },
         PaletteCommand { key: "/ts",          label: "Toggle timestamps" },
         PaletteCommand { key: "/stats",       label: "Open stats tab  (/stats reset to clear history)" },
-        PaletteCommand { key: "/hooks",       label: "Toggle hooks on/off (or /hooks on|off)" },
+        PaletteCommand { key: "/hooks",       label: "Toggle hooks on/off or switch preset (/hooks on|off|list|<preset>)" },
         PaletteCommand { key: "/list-hooks",  label: "Show all configured hooks and their status" },
         PaletteCommand { key: "/undo",        label: "Revert to last git checkpoint (/undo N for Nth)" },
         PaletteCommand { key: "/diff",        label: "Open full diff overlay for last task changes" },
@@ -892,14 +930,14 @@ fn slash_filtered(input: &str) -> Vec<PaletteCommand> {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     Ok(Terminal::new(backend)?)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = execute!(terminal.backend_mut(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen);
     let _ = terminal.show_cursor();
 }
 
@@ -954,12 +992,17 @@ async fn event_loop(
     // detect the project language, write a hooks section into the config file
     // (once, with commented examples for all events), and update resolved so
     // all subsequent calls read from config rather than re-detecting.
-    if !resolved.hooks_disabled && resolved.hooks.is_empty() {
+    let need_hook_wizard = if !resolved.hooks_disabled && resolved.hooks.is_empty() {
         let detected = crate::hooks::write_hooks_to_config(&resolved.profile_name);
         if !detected.is_empty() {
             resolved.hooks = detected;
+            false // auto-detected — no wizard needed
+        } else {
+            true // nothing detected — show wizard
         }
-    }
+    } else {
+        false
+    };
 
     let mut state = AppState::new(&resolved, show_timestamps, mcp);
     state.cost_per_mtok_input = resolved.cost_per_mtok_input;
@@ -970,11 +1013,16 @@ async fn event_loop(
     }
     state.sidebar_entries = load_sidebar_entries(&state.session);
 
-    // ── Hook startup summary ──────────────────────────────────────────────────
+    // ── Hook startup summary / wizard ─────────────────────────────────────────
     if resolved.hooks_disabled {
         state.push(ConversationEntry::SystemMsg("⚙ hooks disabled for this profile".to_string()));
     } else if let Some(summary) = resolved.hooks.summary() {
         state.push(ConversationEntry::SystemMsg(format!("⚙ hooks  {summary}  (/list-hooks for details)")));
+    } else if need_hook_wizard {
+        // No hooks configured — prompt user to set one up
+        state.push(ConversationEntry::SystemMsg(
+            "⚙ no hooks configured  — run /hooks setup to create one, or /hooks <name> to load an existing config".to_string(),
+        ));
     }
 
     // ── Update notification ───────────────────────────────────────────────────
@@ -1118,6 +1166,37 @@ async fn event_loop(
                         )?;
                         if !keep { break; }
                     }
+                    Event::Paste(text) => {
+                        if state.mode != Mode::AgentRunning && state.mode != Mode::PlanRunning {
+                            // Insert pasted text at cursor position
+                            state.input.insert_str(state.cursor, &text);
+                            state.cursor += text.len();
+                            // Track line count for display, but don't auto-send
+                            let line_count = text.matches('\n').count();
+                            if line_count > 0 {
+                                state.pasted_lines = Some(line_count);
+                            }
+                        }
+                    }
+                    Event::Mouse(mouse) => {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                if state.active_tab == Tab::Stats {
+                                    state.stats_scroll = state.stats_scroll.saturating_add(3);
+                                } else {
+                                    state.scroll = state.scroll.saturating_add(3);
+                                }
+                            }
+                            MouseEventKind::ScrollDown => {
+                                if state.active_tab == Tab::Stats {
+                                    state.stats_scroll = state.stats_scroll.saturating_sub(3);
+                                } else {
+                                    state.scroll = state.scroll.saturating_sub(3);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     Event::Resize(_, _) => {}
                     _ => {}
                 }
@@ -1141,7 +1220,7 @@ async fn event_loop(
 
                     // Resume TUI
                     enable_raw_mode()?;
-                    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
                     terminal.clear()?;
 
                     match status {
@@ -1610,8 +1689,10 @@ fn handle_key(
                         });
                         if all_approved {
                             let plan = pr.plan.clone();
+                            let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+                            state.cancel_tx = Some(cancel_tx);
                             state.mode = Mode::PlanRunning;
-                            launch_plan(plan, state, resolved, verbose, dry_run, ui_tx);
+                            launch_plan(plan, cancel_rx, state, resolved, verbose, dry_run, ui_tx);
                         } else {
                             // Jump cursor to first unreviewed step
                             if let Some(idx) = pr.plan.steps.iter()
@@ -1723,22 +1804,11 @@ fn handle_key(
                     if let Some(chosen) = filtered.get(fp.selected) {
                         let chosen = chosen.to_string();
                         let at = fp.at_offset;
-                        // Remove the @ and query from input (file goes to chips, not text)
+                        // Replace the #query with #chosen_path inline in the input
                         state.input.truncate(at);
+                        let insert = format!("#{} ", chosen);
+                        state.input.push_str(&insert);
                         state.cursor = state.input.len();
-                        // Attach file if not already attached
-                        if !state.attached_files.iter().any(|f| f.path == chosen) {
-                            match std::fs::read_to_string(&chosen) {
-                                Ok(content) => {
-                                    state.attached_files.push(AttachedFile { path: chosen, content });
-                                }
-                                Err(e) => {
-                                    state.push(ConversationEntry::SystemMsg(
-                                        format!("@ error reading {}: {e}", chosen),
-                                    ));
-                                }
-                            }
-                        }
                     }
                     state.mode = Mode::Normal;
                     state.file_picker = None;
@@ -1765,6 +1835,132 @@ fn handle_key(
                 _ => {}
             }
         }
+        return Ok(true);
+    }
+
+    // ── HookWizard mode ───────────────────────────────────────────────────────
+    if state.mode == Mode::HookWizard {
+        if let Some(wiz) = &mut state.hook_wizard {
+            match wiz.step.clone() {
+                WizardStep::EnterName => {
+                    match key.code {
+                        KeyCode::Esc => {
+                            state.mode = Mode::Normal;
+                            state.hook_wizard = None;
+                        }
+                        KeyCode::Enter => {
+                            let name = wiz.name_input.trim().to_string();
+                            if !name.is_empty() {
+                                wiz.step = WizardStep::EnterOnEdit;
+                            }
+                        }
+                        KeyCode::Backspace => { wiz.name_input.pop(); }
+                        KeyCode::Char(c) => { wiz.name_input.push(c); }
+                        _ => {}
+                    }
+                }
+                WizardStep::EnterOnEdit => {
+                    match key.code {
+                        KeyCode::Esc => { wiz.step = WizardStep::EnterName; }
+                        KeyCode::Enter => { wiz.step = WizardStep::EnterOnTaskDone; }
+                        KeyCode::Backspace => { wiz.on_edit_input.pop(); }
+                        KeyCode::Char(c) => { wiz.on_edit_input.push(c); }
+                        _ => {}
+                    }
+                }
+                WizardStep::EnterOnTaskDone => {
+                    match key.code {
+                        KeyCode::Esc => { wiz.step = WizardStep::EnterOnEdit; }
+                        KeyCode::Enter => { wiz.step = WizardStep::EnterOnPlanStepDone; }
+                        KeyCode::Backspace => { wiz.on_task_done_input.pop(); }
+                        KeyCode::Char(c) => { wiz.on_task_done_input.push(c); }
+                        _ => {}
+                    }
+                }
+                WizardStep::EnterOnPlanStepDone => {
+                    match key.code {
+                        KeyCode::Esc => { wiz.step = WizardStep::EnterOnTaskDone; }
+                        KeyCode::Enter => { wiz.step = WizardStep::EnterOnSessionStart; }
+                        KeyCode::Backspace => { wiz.on_plan_step_done_input.pop(); }
+                        KeyCode::Char(c) => { wiz.on_plan_step_done_input.push(c); }
+                        _ => {}
+                    }
+                }
+                WizardStep::EnterOnSessionStart => {
+                    match key.code {
+                        KeyCode::Esc => { wiz.step = WizardStep::EnterOnPlanStepDone; }
+                        KeyCode::Enter => { wiz.step = WizardStep::EnterOnSessionEnd; }
+                        KeyCode::Backspace => { wiz.on_session_start_input.pop(); }
+                        KeyCode::Char(c) => { wiz.on_session_start_input.push(c); }
+                        _ => {}
+                    }
+                }
+                WizardStep::EnterOnSessionEnd => {
+                    match key.code {
+                        KeyCode::Esc => { wiz.step = WizardStep::EnterOnSessionStart; }
+                        KeyCode::Enter => { wiz.step = WizardStep::Confirm; }
+                        KeyCode::Backspace => { wiz.on_session_end_input.pop(); }
+                        KeyCode::Char(c) => { wiz.on_session_end_input.push(c); }
+                        _ => {}
+                    }
+                }
+                WizardStep::Confirm => {
+                    match key.code {
+                        KeyCode::Esc => { wiz.step = WizardStep::EnterOnSessionEnd; }
+                        KeyCode::Char('n') | KeyCode::Char('N') => {
+                            state.mode = Mode::Normal;
+                            state.hook_wizard = None;
+                        }
+                        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            let name = wiz.name_input.trim().to_string();
+                            let parse_cmds = |s: &str| -> Vec<String> {
+                                s.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect()
+                            };
+                            let on_edit              = parse_cmds(&wiz.on_edit_input);
+                            let on_task_done         = parse_cmds(&wiz.on_task_done_input);
+                            let on_plan_step_done    = parse_cmds(&wiz.on_plan_step_done_input);
+                            let on_session_start     = parse_cmds(&wiz.on_session_start_input);
+                            let on_session_end       = parse_cmds(&wiz.on_session_end_input);
+                            let hook_cfg = crate::hooks::HookConfig {
+                                on_edit,
+                                on_task_done,
+                                on_plan_step_done,
+                                on_session_start,
+                                on_session_end,
+                            };
+                            // Write [hooks.NAME] section to config
+                            crate::hooks::write_config_hooks(&name, &hook_cfg);
+                            // Persist active_hooks = name
+                            crate::hooks::write_active_hooks(Some(&name));
+                            // Apply to live state
+                            state.hooks_config = hook_cfg.clone();
+                            state.active_hook_preset = Some(name.clone());
+                            if !state.available_hook_presets.contains(&name) {
+                                state.available_hook_presets.push(name.clone());
+                                state.available_hook_presets.sort();
+                            }
+                            state.hooks_enabled = true;
+                            state.mode = Mode::Normal;
+                            state.hook_wizard = None;
+                            state.push(ConversationEntry::SystemMsg(
+                                format!("⚙ hooks.{name} saved and active"),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        return Ok(true);
+    }
+
+    // ── PlanRunning — Esc cancels ─────────────────────────────────────────────
+    if state.mode == Mode::PlanRunning && key.code == KeyCode::Esc {
+        if let Some(tx) = state.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        state.mode = Mode::Normal;
+        state.push(ConversationEntry::SystemMsg("plan cancelled".to_string()));
         return Ok(true);
     }
 
@@ -1818,10 +2014,15 @@ fn handle_key(
 
     // ── Normal / AgentRunning mode ─────────────────────────────────────────
     match (key.modifiers, key.code) {
-        // Ctrl+C — cancel agent/plan or quit
+        // Ctrl+C — quit (only when idle)
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+            if !matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning | Mode::AskingUser) {
+                return Ok(false);
+            }
+        }
+        // Esc — cancel running agent/plan, or dismiss overlays
+        (KeyModifiers::NONE, KeyCode::Esc) if matches!(state.mode, Mode::AgentRunning | Mode::AskingUser) => {
             if state.mode == Mode::AskingUser {
-                // Cancel the ask — send a default reply so the agent unblocks
                 if let Some(tx) = state.pending_ask_reply.take() {
                     let _ = tx.send("[user cancelled the question — proceed with your best judgement]".to_string());
                 }
@@ -1829,18 +2030,13 @@ fn handle_key(
                 state.input.clear();
                 state.cursor = 0;
                 state.mode = Mode::AgentRunning;
-            } else if matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning) {
+            } else {
+                // Cancel agent
                 if let Some(tx) = state.cancel_tx.take() {
                     let _ = tx.send(());
                 }
-                // For plan running, return to normal — the spawn will see the channel closed
-                if state.mode == Mode::PlanRunning {
-                    state.mode = Mode::Normal;
-                    state.push(ConversationEntry::SystemMsg("plan cancelled".to_string()));
-                }
-            } else {
-                return Ok(false);
             }
+            return Ok(true);
         }
         // Ctrl+D — quit
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
@@ -1933,6 +2129,13 @@ fn handle_key(
                 }
             }
         }
+        // Ctrl+Enter, Shift+Enter, or Ctrl+Shift+Enter — insert newline at cursor
+        (m, KeyCode::Enter) if m.intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+            if state.mode != Mode::AgentRunning && state.mode != Mode::PlanRunning {
+                state.input.insert(state.cursor, '\n');
+                state.cursor += 1;
+            }
+        }
         // Enter — submit input
         (KeyModifiers::NONE, KeyCode::Enter) => {
             if state.mode == Mode::AskingUser {
@@ -1954,6 +2157,27 @@ fn handle_key(
                 if !input.is_empty() {
                     state.input.clear();
                     state.cursor = 0;
+
+                    // Parse #path tokens and attach referenced files
+                    {
+                        let re_tokens: Vec<&str> = input.split_whitespace()
+                            .filter(|t| t.starts_with('#') && t.len() > 1)
+                            .collect();
+                        for token in re_tokens {
+                            let path = &token[1..]; // strip leading '#'
+                            if !state.attached_files.iter().any(|f| f.path == path) {
+                                match std::fs::read_to_string(path) {
+                                    Ok(content) => {
+                                        state.attached_files.push(AttachedFile {
+                                            path: path.to_string(),
+                                            content,
+                                        });
+                                    }
+                                    Err(_) => {} // invalid path — ignore silently
+                                }
+                            }
+                        }
+                    }
 
                     if input.starts_with("/plan ") || input == "/plan" {
                         let task = input.trim_start_matches("/plan").trim().to_string();
@@ -2081,19 +2305,33 @@ fn handle_key(
             }
         }
         // Scroll up
-        (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::NONE, KeyCode::PageUp) => {
+        (KeyModifiers::NONE, KeyCode::Up) => {
             if state.active_tab == Tab::Stats {
-                state.stats_scroll = state.stats_scroll.saturating_add(3);
+                state.stats_scroll = state.stats_scroll.saturating_add(5);
             } else {
-                state.scroll = state.scroll.saturating_add(3);
+                state.scroll = state.scroll.saturating_add(5);
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::PageUp) => {
+            if state.active_tab == Tab::Stats {
+                state.stats_scroll = state.stats_scroll.saturating_add(20);
+            } else {
+                state.scroll = state.scroll.saturating_add(20);
             }
         }
         // Scroll down
-        (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::NONE, KeyCode::PageDown) => {
+        (KeyModifiers::NONE, KeyCode::Down) => {
             if state.active_tab == Tab::Stats {
-                state.stats_scroll = state.stats_scroll.saturating_sub(3);
+                state.stats_scroll = state.stats_scroll.saturating_sub(5);
             } else {
-                state.scroll = state.scroll.saturating_sub(3);
+                state.scroll = state.scroll.saturating_sub(5);
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::PageDown) => {
+            if state.active_tab == Tab::Stats {
+                state.stats_scroll = state.stats_scroll.saturating_sub(20);
+            } else {
+                state.scroll = state.scroll.saturating_sub(20);
             }
         }
         // Regular char input — insert at cursor
@@ -2105,9 +2343,9 @@ fn handle_key(
                 state.input.insert_str(state.cursor, s);
                 state.cursor += s.len();
 
-                // `@` triggers file picker (not in AskingUser mode)
-                if c == '@' && state.mode != Mode::AskingUser {
-                    let at_offset = state.cursor - 1; // offset of the `@`
+                // `#` triggers file picker (not in AskingUser mode)
+                if c == '#' && state.mode != Mode::AskingUser {
+                    let at_offset = state.cursor - 1; // offset of the `#`
                     state.file_picker = Some(FilePickerState {
                         all_files: gather_files(),
                         query: String::new(),
@@ -2149,7 +2387,7 @@ fn execute_command(
         }
         "/help" | "/h" => {
             state.push(ConversationEntry::SystemMsg(
-                "Commands: /plan \"task\"  /quick \"task\"  /init  /cd  /profile  /profiles  /ts  /hooks [on|off]  /list-hooks  /undo [n]  /diff  /clear  /sessions  /resume [n]  /rollback [n]  /new  /quit\nCtrl+H  session history  ·  Ctrl+P  command palette  ·  d  open diff overlay\nIn plan review: ↑↓ navigate  e annotate  d clear note  a approve & run  Esc cancel\nIn git repo: press 5 for Git tab · /undo to revert · /diff to review changes".to_string(),
+                "Commands: /plan \"task\"  /quick \"task\"  /init  /cd  /profile  /profiles  /ts  /hooks [on|off|list|<preset>]  /list-hooks  /undo [n]  /diff  /clear  /sessions  /resume [n]  /rollback [n]  /new  /quit\nCtrl+H  session history  ·  Ctrl+P  command palette  ·  d  open diff overlay\nIn plan review: ↑↓ navigate  e annotate  d clear note  a approve & run  Esc cancel\nIn git repo: press 5 for Git tab · /undo to revert · /diff to review changes".to_string(),
             ));
         }
         "/stats" => {
@@ -2171,19 +2409,77 @@ fn execute_command(
         "/hooks" => {
             let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
             match arg {
-                "off" => {
+                "disable" | "off" => {
                     state.hooks_enabled = false;
-                    state.push(ConversationEntry::SystemMsg("hooks off".to_string()));
+                    state.push(ConversationEntry::SystemMsg("⚙ hooks disabled".to_string()));
                 }
-                "on" => {
+                "enable" | "on" => {
                     state.hooks_enabled = true;
-                    state.push(ConversationEntry::SystemMsg("hooks on".to_string()));
+                    let label = state.active_hook_preset.as_deref().unwrap_or("on");
+                    state.push(ConversationEntry::SystemMsg(format!("⚙ hooks enabled  ({label})")));
                 }
-                _ => {
-                    let status = if state.hooks_enabled { "on" } else { "off" };
+                "list" => {
+                    if state.available_hook_presets.is_empty() {
+                        state.push(ConversationEntry::SystemMsg(
+                            "no hook configs found — add [hooks.NAME] sections to config.toml, or run /hooks setup".to_string(),
+                        ));
+                    } else {
+                        let active = state.active_hook_preset.as_deref().unwrap_or("none");
+                        let list = state.available_hook_presets.join(", ");
+                        state.push(ConversationEntry::SystemMsg(
+                            format!("hooks: {list}\nactive: {active}\n/hooks <name> to switch"),
+                        ));
+                    }
+                }
+                "setup" => {
+                    state.hook_wizard = Some(HookWizardState {
+                        step: WizardStep::EnterName,
+                        name_input: String::new(),
+                        on_edit_input: String::new(),
+                        on_task_done_input: String::new(),
+                        on_plan_step_done_input: String::new(),
+                        on_session_start_input: String::new(),
+                        on_session_end_input: String::new(),
+                    });
+                    state.mode = Mode::HookWizard;
+                }
+                "" => {
+                    let status = if state.hooks_enabled { "enabled" } else { "disabled" };
+                    let active = state.active_hook_preset.as_deref().unwrap_or("none");
                     state.push(ConversationEntry::SystemMsg(
-                        format!("hooks {status}  (usage: /hooks on | /hooks off | /list-hooks)"),
+                        format!("⚙ hooks {status}  active: {active}\nusage: /hooks <name> | enable | disable | list | setup"),
                     ));
+                }
+                hook_name => {
+                    // Switch to a named hook config from [hooks.NAME]
+                    match ConfigFile::load() {
+                        Ok(cfg) => {
+                            if let Some(hook_cfg) = cfg.hooks.get(hook_name) {
+                                state.hooks_config = hook_cfg.clone();
+                                state.active_hook_preset = Some(hook_name.to_string());
+                                state.hooks_enabled = true;
+                                // Persist the active selection
+                                crate::hooks::write_active_hooks(Some(hook_name));
+                                state.push(ConversationEntry::SystemMsg(
+                                    format!("⚙ hooks.{hook_name} active"),
+                                ));
+                            } else {
+                                let available = if state.available_hook_presets.is_empty() {
+                                    "none configured".to_string()
+                                } else {
+                                    state.available_hook_presets.join(", ")
+                                };
+                                state.push(ConversationEntry::SystemMsg(
+                                    format!("hooks.{hook_name} not found  available: {available}"),
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            state.push(ConversationEntry::SystemMsg(
+                                format!("could not load config: {e}"),
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -2475,6 +2771,17 @@ fn resolve_hooks(resolved: &ResolvedConfig, hooks_enabled: bool) -> crate::hooks
     resolved.hooks.clone()
 }
 
+fn resolve_hooks_with_state(
+    _resolved: &ResolvedConfig,
+    state: &AppState,
+) -> crate::hooks::HookConfig {
+    if !state.hooks_enabled {
+        return crate::hooks::HookConfig::default();
+    }
+    // hooks_config is kept in sync with the active [hooks.NAME] selection
+    state.hooks_config.clone()
+}
+
 // ── Agent launcher ────────────────────────────────────────────────────────────
 
 fn launch_agent(
@@ -2499,7 +2806,7 @@ fn launch_agent(
     if let Some(key) = &resolved.api_key {
         client.set_api_key(key.clone());
     }
-    let resolved_hooks = resolve_hooks(resolved, state.hooks_enabled);
+    let resolved_hooks = resolve_hooks_with_state(resolved, state);
     let agent_config = AgentConfig {
         verbose,
         dry_run,
@@ -2686,6 +2993,7 @@ fn generate_and_show_plan(
 /// All state updates are communicated back to the TUI via UiEvent.
 fn launch_plan(
     mut active_plan: Plan,
+    cancel_rx: tokio::sync::oneshot::Receiver<()>,
     state: &AppState,
     resolved: &ResolvedConfig,
     verbose: bool,
@@ -2696,7 +3004,7 @@ fn launch_plan(
     if let Some(key) = &resolved.api_key {
         client.set_api_key(key.clone());
     }
-    let resolved_hooks = resolve_hooks(resolved, state.hooks_enabled);
+    let resolved_hooks = resolve_hooks_with_state(resolved, state);
     let agent_config = AgentConfig {
         verbose,
         dry_run,
@@ -2713,6 +3021,17 @@ fn launch_plan(
     };
 
     tokio::spawn(async move {
+        // Use a shared cancellation flag so we can check it between steps
+        // without consuming the oneshot receiver more than once.
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled_clone = cancelled.clone();
+        let ui_tx_cancel = ui_tx.clone();
+        tokio::spawn(async move {
+            let _ = cancel_rx.await;
+            cancelled_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = ui_tx_cancel.send(UiEvent::AgentError("cancelled".to_string()));
+        });
+
         let total = active_plan.steps.len();
         // Accumulates (description, summary) for each completed step
         let mut prior_summaries: Vec<(String, String)> = Vec::new();
@@ -2734,6 +3053,11 @@ fn launch_plan(
         };
 
         for step_idx in 0..total {
+            // Check cancellation before starting each step
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+
             let step_snapshot = active_plan.steps[step_idx].clone();
             let desc = step_snapshot.description.clone();
 

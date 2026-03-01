@@ -1,13 +1,15 @@
 /// Overlay/popup draw functions — palette, slash-complete, file picker, session browser.
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 
-use super::{AppState, FilePickerState, SessionBrowserState, slash_filtered};
+use super::{AppState, FilePickerState, SessionBrowserState, slash_filtered,
+            HookWizardState, WizardStep};
 
 // ── Command palette ────────────────────────────────────────────────────────────
 
@@ -490,4 +492,284 @@ pub fn draw_profile_picker(f: &mut Frame, state: &AppState, area: Rect) {
         items.into_iter().skip(skip).take(visible).collect();
     let list = List::new(visible_items);
     f.render_widget(list, inner);
+}
+
+// ── Hook setup wizard ─────────────────────────────────────────────────────────
+
+pub fn draw_hook_wizard(f: &mut Frame, wiz: &HookWizardState, area: Rect) {
+    let width = 66u16.min(area.width.saturating_sub(4));
+    let height = 20u16.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup_area = Rect { x, y, width, height };
+
+    f.render_widget(Clear, popup_area);
+
+    let step_label = match wiz.step {
+        WizardStep::EnterName           => " 1/7 name ",
+        WizardStep::EnterOnEdit         => " 2/7 on_edit ",
+        WizardStep::EnterOnTaskDone     => " 3/7 on_task_done ",
+        WizardStep::EnterOnPlanStepDone => " 4/7 on_plan_step_done ",
+        WizardStep::EnterOnSessionStart => " 5/7 on_session_start ",
+        WizardStep::EnterOnSessionEnd   => " 6/7 on_session_end ",
+        WizardStep::Confirm             => " 7/7 confirm ",
+    };
+
+    let outer = Block::default()
+        .title(Span::styled(
+            format!(" ⚙  New Hook Config  ·  {step_label}"),
+            Style::default().fg(Color::Rgb(80, 200, 120)).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_set(border::ROUNDED)
+        .border_style(Style::default().fg(Color::Rgb(60, 160, 90)))
+        .style(Style::default().bg(Color::Rgb(8, 12, 10)));
+
+    let inner = outer.inner(popup_area);
+    f.render_widget(outer, popup_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // description
+            Constraint::Length(3), // input field
+            Constraint::Min(0),    // preview / info
+            Constraint::Length(1), // footer hint
+        ])
+        .split(inner);
+
+    match wiz.step {
+        WizardStep::EnterName => {
+            let desc = vec![
+                Line::from(Span::styled("  Give this hook config a name.", Style::default().fg(Color::Rgb(180, 180, 200)))),
+                Line::from(Span::styled("  It will be saved as [hooks.<name>] in config.toml.", Style::default().fg(Color::Rgb(100, 100, 120)))),
+                Line::from(Span::raw("")),
+            ];
+            f.render_widget(Paragraph::new(desc), chunks[0]);
+
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .border_style(Style::default().fg(Color::Rgb(80, 180, 110)))
+                .title(Span::styled(" name ", Style::default().fg(Color::Rgb(80, 200, 120))));
+            let input_inner = input_block.inner(chunks[1]);
+            f.render_widget(input_block, chunks[1]);
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {}_", wiz.name_input),
+                    Style::default().fg(Color::White),
+                )),
+                input_inner,
+            );
+
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    "  e.g.  rust  typescript  myproject",
+                    Style::default().fg(Color::Rgb(70, 100, 80)),
+                )),
+                chunks[2],
+            );
+            f.render_widget(
+                Paragraph::new(Span::styled("  Enter → next   Esc → cancel", Style::default().fg(Color::Rgb(60, 60, 80)))),
+                chunks[3],
+            );
+        }
+        WizardStep::EnterOnEdit => {
+            let desc = vec![
+                Line::from(Span::styled("  on_edit — run after every file edit.", Style::default().fg(Color::Rgb(180, 180, 200)))),
+                Line::from(Span::styled("  Separate multiple commands with commas.", Style::default().fg(Color::Rgb(100, 100, 120)))),
+                Line::from(Span::raw("")),
+            ];
+            f.render_widget(Paragraph::new(desc), chunks[0]);
+
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .border_style(Style::default().fg(Color::Rgb(80, 180, 110)))
+                .title(Span::styled(" on_edit (optional) ", Style::default().fg(Color::Rgb(80, 200, 120))));
+            let input_inner = input_block.inner(chunks[1]);
+            f.render_widget(input_block, chunks[1]);
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {}_", wiz.on_edit_input),
+                    Style::default().fg(Color::White),
+                )),
+                input_inner,
+            );
+
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    "  e.g.  cargo check -q",
+                    Style::default().fg(Color::Rgb(70, 100, 80)),
+                )),
+                chunks[2],
+            );
+            f.render_widget(
+                Paragraph::new(Span::styled("  Enter → next   Esc → back", Style::default().fg(Color::Rgb(60, 60, 80)))),
+                chunks[3],
+            );
+        }
+        WizardStep::EnterOnTaskDone => {
+            let desc = vec![
+                Line::from(Span::styled("  on_task_done — run after each completed task.", Style::default().fg(Color::Rgb(180, 180, 200)))),
+                Line::from(Span::styled("  Output shown in TUI (not injected into context).", Style::default().fg(Color::Rgb(100, 100, 120)))),
+                Line::from(Span::raw("")),
+            ];
+            f.render_widget(Paragraph::new(desc), chunks[0]);
+
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .border_style(Style::default().fg(Color::Rgb(80, 180, 110)))
+                .title(Span::styled(" on_task_done (optional) ", Style::default().fg(Color::Rgb(80, 200, 120))));
+            let input_inner = input_block.inner(chunks[1]);
+            f.render_widget(input_block, chunks[1]);
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {}_", wiz.on_task_done_input),
+                    Style::default().fg(Color::White),
+                )),
+                input_inner,
+            );
+
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    "  e.g.  cargo test -q 2>&1 | tail -5",
+                    Style::default().fg(Color::Rgb(70, 100, 80)),
+                )),
+                chunks[2],
+            );
+            f.render_widget(
+                Paragraph::new(Span::styled("  Enter → next   Esc → back", Style::default().fg(Color::Rgb(60, 60, 80)))),
+                chunks[3],
+            );
+        }
+        WizardStep::EnterOnPlanStepDone => {
+            let desc = vec![
+                Line::from(Span::styled("  on_plan_step_done — run after each plan step.", Style::default().fg(Color::Rgb(180, 180, 200)))),
+                Line::from(Span::styled("  Useful for incremental checks during /plan runs.", Style::default().fg(Color::Rgb(100, 100, 120)))),
+                Line::from(Span::raw("")),
+            ];
+            f.render_widget(Paragraph::new(desc), chunks[0]);
+
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .border_style(Style::default().fg(Color::Rgb(80, 180, 110)))
+                .title(Span::styled(" on_plan_step_done (optional) ", Style::default().fg(Color::Rgb(80, 200, 120))));
+            let input_inner = input_block.inner(chunks[1]);
+            f.render_widget(input_block, chunks[1]);
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {}_", wiz.on_plan_step_done_input),
+                    Style::default().fg(Color::White),
+                )),
+                input_inner,
+            );
+            f.render_widget(
+                Paragraph::new(Span::styled("  Enter → next   Esc → back", Style::default().fg(Color::Rgb(60, 60, 80)))),
+                chunks[3],
+            );
+        }
+        WizardStep::EnterOnSessionStart => {
+            let desc = vec![
+                Line::from(Span::styled("  on_session_start — run when the TUI launches.", Style::default().fg(Color::Rgb(180, 180, 200)))),
+                Line::from(Span::styled("  e.g. print a welcome banner or activate a venv.", Style::default().fg(Color::Rgb(100, 100, 120)))),
+                Line::from(Span::raw("")),
+            ];
+            f.render_widget(Paragraph::new(desc), chunks[0]);
+
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .border_style(Style::default().fg(Color::Rgb(80, 180, 110)))
+                .title(Span::styled(" on_session_start (optional) ", Style::default().fg(Color::Rgb(80, 200, 120))));
+            let input_inner = input_block.inner(chunks[1]);
+            f.render_widget(input_block, chunks[1]);
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {}_", wiz.on_session_start_input),
+                    Style::default().fg(Color::White),
+                )),
+                input_inner,
+            );
+            f.render_widget(
+                Paragraph::new(Span::styled("  Enter → next   Esc → back", Style::default().fg(Color::Rgb(60, 60, 80)))),
+                chunks[3],
+            );
+        }
+        WizardStep::EnterOnSessionEnd => {
+            let desc = vec![
+                Line::from(Span::styled("  on_session_end — run when the TUI exits.", Style::default().fg(Color::Rgb(180, 180, 200)))),
+                Line::from(Span::styled("  e.g. deactivate a venv or write a summary.", Style::default().fg(Color::Rgb(100, 100, 120)))),
+                Line::from(Span::raw("")),
+            ];
+            f.render_widget(Paragraph::new(desc), chunks[0]);
+
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .border_style(Style::default().fg(Color::Rgb(80, 180, 110)))
+                .title(Span::styled(" on_session_end (optional) ", Style::default().fg(Color::Rgb(80, 200, 120))));
+            let input_inner = input_block.inner(chunks[1]);
+            f.render_widget(input_block, chunks[1]);
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {}_", wiz.on_session_end_input),
+                    Style::default().fg(Color::White),
+                )),
+                input_inner,
+            );
+            f.render_widget(
+                Paragraph::new(Span::styled("  Enter → next   Esc → back", Style::default().fg(Color::Rgb(60, 60, 80)))),
+                chunks[3],
+            );
+        }
+        WizardStep::Confirm => {
+            f.render_widget(
+                Paragraph::new(Span::styled("  Review and save:", Style::default().fg(Color::Rgb(180, 180, 200)))),
+                chunks[0],
+            );
+
+            let field_color = Color::Rgb(100, 180, 240);
+            let mut preview = vec![
+                Line::from(Span::styled(
+                    format!("  [hooks.{}]", wiz.name_input),
+                    Style::default().fg(Color::Rgb(80, 200, 120)).add_modifier(Modifier::BOLD),
+                )),
+            ];
+            let fields = [
+                ("on_edit           ", &wiz.on_edit_input),
+                ("on_task_done      ", &wiz.on_task_done_input),
+                ("on_plan_step_done ", &wiz.on_plan_step_done_input),
+                ("on_session_start  ", &wiz.on_session_start_input),
+                ("on_session_end    ", &wiz.on_session_end_input),
+            ];
+            let mut any = false;
+            for (label, val) in &fields {
+                if !val.trim().is_empty() {
+                    preview.push(Line::from(Span::styled(
+                        format!("  {label}= \"{}\"", val.trim()),
+                        Style::default().fg(field_color),
+                    )));
+                    any = true;
+                }
+            }
+            if !any {
+                preview.push(Line::from(Span::styled(
+                    "  (no commands — empty hook config)",
+                    Style::default().fg(Color::Rgb(140, 100, 60)),
+                )));
+            }
+            f.render_widget(Paragraph::new(preview), chunks[2]);
+
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    "  y / Enter → save   n → cancel   Esc → back",
+                    Style::default().fg(Color::Rgb(60, 60, 80)),
+                )),
+                chunks[3],
+            );
+        }
+    }
 }
