@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
 use super::{AppState, Mode, Tab, cwd_str};
@@ -117,7 +117,7 @@ pub fn draw(f: &mut Frame, state: &AppState) {
             Constraint::Length(1),  // status bar
             Constraint::Length(1),  // stats bar
             Constraint::Length(1),  // attached files chips row
-            Constraint::Length(3),  // input box
+            Constraint::Length(8),  // input box
         ]
     } else {
         vec![
@@ -125,7 +125,7 @@ pub fn draw(f: &mut Frame, state: &AppState) {
             Constraint::Min(0),     // content area
             Constraint::Length(1),  // status bar
             Constraint::Length(1),  // stats bar
-            Constraint::Length(3),  // input box
+            Constraint::Length(8),  // input box
         ]
     };
 
@@ -508,6 +508,40 @@ fn draw_input(f: &mut Frame, state: &AppState, area: Rect) {
         .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);
+
+    // Show example prompts when input is empty (in Normal mode)
+    if input_text.is_empty() && state.mode == Mode::Normal {
+        let example_prompts = vec![
+            Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled("Try: ", Style::default().fg(Color::Rgb(50, 50, 70))),
+                Span::styled("explain this function", Style::default().fg(Color::Rgb(60, 60, 80))),
+            ]),
+            Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled("Try: ", Style::default().fg(Color::Rgb(50, 50, 70))),
+                Span::styled("refactor the auth module", Style::default().fg(Color::Rgb(60, 60, 80))),
+            ]),
+            Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled("Try: ", Style::default().fg(Color::Rgb(50, 50, 70))),
+                Span::styled("write tests for calculator", Style::default().fg(Color::Rgb(60, 60, 80))),
+            ]),
+        ];
+
+        // Calculate area below the input line (input is 1 line + top border)
+        let hints_area = Rect {
+            y: area.y + 2, // Skip the input line and top border
+            x: area.x,
+            width: area.width,
+            height: 3,
+        };
+
+        let hints_paragraph = Paragraph::new(example_prompts)
+            .style(Style::default().fg(Color::Rgb(60, 60, 80)));
+
+        f.render_widget(hints_paragraph, hints_area);
+    }
 
     // Position cursor at the actual edit cursor, not end of string
     if matches!(state.mode, Mode::Normal | Mode::AskingUser | Mode::Palette | Mode::FilePicker | Mode::SlashComplete | Mode::PlanReview | Mode::ProfilePicker) {

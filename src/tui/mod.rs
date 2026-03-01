@@ -332,6 +332,8 @@ pub struct AppState {
     pub entries: Vec<ConversationEntry>,
     pub input: String,
     pub cursor: usize,        // byte offset in input
+    pub pasted_lines: Option<usize>,  // track pasted line count for multi-line input
+    pub input_scroll_offset: u16,     // vertical scroll offset for multi-line input
     pub mode: Mode,
     pub scroll: usize,        // lines scrolled up in history
     pub profile: String,
@@ -452,6 +454,8 @@ impl AppState {
             entries: Vec::new(),
             input: String::new(),
             cursor: 0,
+            pasted_lines: None,
+            input_scroll_offset: 0,
             mode: Mode::Normal,
             scroll: 0,
             profile: resolved.profile_name.clone(),
@@ -1975,7 +1979,15 @@ fn handle_key(
                             return Ok(false);
                         }
                     } else {
-                        launch_agent(input, state, resolved, verbose, dry_run, ui_tx)?;
+                        // Detect pasted content (contains newlines)
+                        let line_count = input.matches('\n').count();
+                        if line_count > 0 {
+                            state.pasted_lines = Some(line_count);
+                            let input = format!("[Copied Lines +{}] {}", line_count, input);
+                            launch_agent(input, state, resolved, verbose, dry_run, ui_tx)?;
+                        } else {
+                            launch_agent(input, state, resolved, verbose, dry_run, ui_tx)?;
+                        }
                     }
                 }
             }

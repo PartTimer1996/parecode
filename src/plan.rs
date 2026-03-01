@@ -196,6 +196,7 @@ CRITICAL rules:
 - After each step completes, subsequent steps receive a summary of what changed (modified files, symbols added, structural notes) — but NOT the actual file contents from that step, so instructions should be self-contained
 - Prefer 4-8 steps; do not create micro-steps that split naturally-coupled changes
 - Each step should be independently verifiable — prefer "command:cargo test" or similar where applicable
+- DO NOT create read_file or search tool steps — they will not work in isolated execution. Instead, during planning, discover everything each step needs (file paths, function signatures, exact line numbers, struct fields, imports) and bake that information directly into the "instruction" field. Reference specific locations like "add `process_request` after the `handle_connection` function at line 45 in src/server.rs". The executor will pre-load the files listed in "files" — do not re-read them at runtime.
 
 Respond with ONLY valid JSON — no markdown fences, no explanation. Format:
 
@@ -317,21 +318,45 @@ pub async fn generate_plan(
         .await?;
 
     // Parse the JSON response
-    let json_text = response.text.trim();
+    let json_text_raw = response.text.trim();
 
     // Strip markdown fences if the model wrapped it despite instructions
-    let json_text = json_text
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
+    // Handle ```json, ```json <whitespace>, ```, etc. — strip from start then end
+    let json_text = extract_json(json_text_raw)
+        .ok_or_else(|| anyhow::anyhow!("Plan parse error: could not extract JSON from model response.\n\nModel response:\n{json_text_raw}"))?
+        .to_string();
 
-    // Sanitize unescaped control characters inside JSON string values.
+    // Defensive: reject empty/whitespace-only responses before JSON parsing
     // Small models (Qwen3 etc.) frequently emit literal \n/\t/\r inside JSON
     // strings, which is invalid JSON and causes serde_json to reject the whole plan.
     // We walk char-by-char, tracking whether we're inside a string, and replace
     // bare control chars with their JSON escape sequences.
-    let json_text = sanitize_json_strings(json_text);
+    let json_text = sanitize_json_strings(&json_text);
+
+    // Defensive: reject empty/whitespace-only responses before JSON parsing
+    // This prevents confusing "expected value at line 1 column 1" errors
+    if json_text.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Plan parse error: model returned empty response.\n\n\
+             Model response was empty or whitespace-only. Try:\n\
+             - Using a different model\n\
+             - Simplifying the task\n\
+             - Checking API connectivity"
+        ));
+    }
+
+    // If the response doesn't start with '{' or '[', it's likely not JSON
+    // (model returned an error message, plain text, or refused)
+    let first_non_whitespace = json_text.chars().find(|c| !c.is_whitespace());
+    if !matches!(first_non_whitespace, Some('{') | Some('[')) {
+        return Err(anyhow::anyhow!(
+            "Plan parse error: model did not return JSON.\n\n\
+             Model response:\n{}\n\n\
+             Expected JSON starting with {{ or [. The model may have refused, \
+             returned an error, or not understood the format.",
+            json_text
+        ));
+    }
 
     let raw: PlanResponse = serde_json::from_str(&json_text)
         .map_err(|e| anyhow::anyhow!("Plan parse error: {e}\n\nModel response:\n{json_text}"))?;
@@ -677,6 +702,123 @@ pub fn verify_step(step: &PlanStep) -> Result<()> {
     }
 }
 
+// ── JSON extraction helpers ───────────────────────────────────────────────────
+
+/// Extract valid JSON from a potentially malformed response.
+/// Handles cases where models return:
+/// - Duplicate opening braces: `{ { "key": ...` or `{ [ { "key": ...`
+/// - Extra whitespace between structural chars
+/// - Markdown fences that weren't fully stripped
+///
+/// Returns the JSON substring that starts at the first `{` or `[` and ends
+/// at the matching closing brace.
+fn extract_json(input: &str) -> Option<String> {
+    let input = input.trim();
+    
+    // More aggressive markdown stripping: handle ```json, ```json {, ```json { {
+    let mut input = input;
+    loop {
+        let was = input;
+        input = input.trim_start_matches("```json").trim_start_matches("```").trim_start();
+        if input.len() == was.len() { break; }
+    }
+    // Also strip trailing ```
+    input = input.trim_end_matches("```").trim_end();
+    
+    // Find the first opening brace or bracket
+    let start = input.find(|c| c == '{' || c == '[')?;
+    let input = input.get(start..)?;
+    
+    // Handle duplicate opening braces/brackets: `{ {`, `{ [`, `[ {`, `[ [`
+    // Some models emit `{ { "key": ...` which is invalid JSON
+    let input = collapse_duplicate_braces(input)?;
+    
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut end_idx = 0;
+    
+    for (i, ch) in input.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end_idx = i;
+                    break;
+                }
+            }
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    end_idx = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    if depth == 0 {
+        Some(input[..=end_idx].to_string())
+    } else {
+        None
+    }
+}
+
+/// Collapse duplicate opening braces/brackets at the start of JSON.
+/// Handles: `{ {`, `{ [`, `[ {`, `[ [`, with optional whitespace between.
+/// Also handles multiple duplicates: `{ { {` → `{`
+fn collapse_duplicate_braces(input: &str) -> Option<String> {
+    let mut chars = input.chars().peekable();
+    
+    // Must start with { or [
+    let first = chars.next()?;
+    if first != '{' && first != '[' {
+        return None;
+    }
+    
+    // Skip whitespace and check for duplicates
+    let mut has_duplicate = false;
+    loop {
+        match chars.peek() {
+            Some(&c) if c.is_whitespace() => {
+                chars.next();
+            }
+            Some(&'{') | Some(&'[') => {
+                has_duplicate = true;
+                chars.next(); // skip the duplicate
+            }
+            _ => break,
+        }
+    }
+    
+    if has_duplicate {
+        // Rebuild string without duplicates
+        let remaining: String = chars.collect();
+        Some(format!("{first}{remaining}"))
+    } else {
+        Some(input.to_string())
+    }
+}
+
 // ── JSON sanitizer ────────────────────────────────────────────────────────────
 
 /// Replace unescaped control characters inside JSON string values with their
@@ -721,4 +863,66 @@ fn sanitize_json_strings(input: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── JSON extraction ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_json_with_duplicate_braces() {
+        // Model returns `{ { "description": "test" }` - duplicate opening brace
+        let input = r#"{ { "description": "test step", "instruction": "do something", "files": ["foo.rs"], "verify": "none", "tool_budget": 10 }"#;
+        let result = extract_json(input);
+        assert!(result.is_some(), "Should extract JSON even with duplicate brace");
+        
+        let json = result.unwrap();
+        // Should be valid JSON that can be parsed
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should be valid JSON after fixing duplicate braces");
+        assert_eq!(parsed["description"], "test step");
+    }
+
+    #[test]
+    fn test_extract_json_with_markdown_fence() {
+        let input = r#"```json
+{ "description": "test" }
+```"#;
+        let result = extract_json(input);
+        assert!(result.is_some());
+        
+        let json = result.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse after stripping fence");
+        assert_eq!(parsed["description"], "test");
+    }
+
+    #[test]
+    fn test_extract_json_with_whitespace_after_fence() {
+        // Model returns ```json { { "description": ...
+        let input = "```json\n{ { \"description\": \"test\" }";
+        let result = extract_json(input);
+        assert!(result.is_some());
+        
+        let json = result.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
+        assert_eq!(parsed["description"], "test");
+    }
+
+    #[test]
+    fn test_extract_json_complex() {
+        // Full plan structure with duplicate brace issue
+        let input = r#"some text before
+```json
+{ { "steps": [ { "description": "First step", "instruction": "do x", "files": ["a.rs"], "verify": "none", "tool_budget": 10 } ] }
+```
+some text after"#;
+        
+        let result = extract_json(input);
+        assert!(result.is_some());
+        
+        let json = result.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should be valid JSON");
+        assert_eq!(parsed["steps"][0]["description"], "First step");
+    }
 }
