@@ -219,6 +219,14 @@ impl ProjectGraph {
         out
     }
 
+    /// Return the cluster name that contains `path`, if any.
+    pub fn cluster_for_file(&self, path: &str) -> Option<&str> {
+        self.clusters
+            .iter()
+            .find(|c| c.files.contains(&path.to_string()))
+            .map(|c| c.name.as_str())
+    }
+
     /// Compact cluster-grouped text for injection into the planning prompt.
     ///
     /// Format:

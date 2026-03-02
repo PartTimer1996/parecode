@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Client, Message, MessageContent};
+use crate::client::{Client, ContentPart, Message, MessageContent, Tool, ToolCall};
 use crate::pie::ProjectGraph;
 use crate::tui::UiEvent;
 
@@ -262,22 +262,189 @@ fn parse_verification(s: &str) -> Verification {
     Verification::None
 }
 
+// ── Planner tools ─────────────────────────────────────────────────────────────
+
+/// Tools available to the planner during plan generation.
+/// `list_symbols` is free (graph-only). `read_symbol` reads ~30 lines from disk.
+fn planner_tools() -> Vec<Tool> {
+    vec![
+        Tool {
+            name: "list_symbols".to_string(),
+            description: "List all symbols defined in a file with their line numbers. \
+                          Free — uses graph data only, no disk read. \
+                          Use this to orient yourself before calling read_symbol.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Relative file path, e.g. src/plan.rs"
+                    }
+                },
+                "required": ["file"]
+            }),
+        },
+        Tool {
+            name: "read_symbol".to_string(),
+            description: "Read ~35 lines of source code around a named symbol. \
+                          Use after list_symbols when you need the actual implementation. \
+                          When a symbol exists in multiple files, provide the 'file' hint.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Symbol name to read"
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "File hint — required when the symbol exists in multiple files"
+                    }
+                },
+                "required": ["name"]
+            }),
+        },
+    ]
+}
+
+fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
+    let args: serde_json::Value =
+        serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
+
+    match call.name.as_str() {
+        "list_symbols" => {
+            let file = args["file"].as_str().unwrap_or("");
+            let syms: Vec<String> = graph
+                .symbols
+                .iter()
+                .filter(|s| s.file == file)
+                .map(|s| format!("line {:4}: {} {}", s.line, s.kind.label(), s.name))
+                .collect();
+            if syms.is_empty() {
+                if graph.file_lines.contains_key(file) {
+                    format!("No symbols found in {file} (file exists but has no indexed symbols)")
+                } else {
+                    format!("File not found in graph: {file}\nAvailable files:\n{}",
+                        graph.file_lines.keys()
+                            .take(20)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("\n"))
+                }
+            } else {
+                format!("// {file}\n{}", syms.join("\n"))
+            }
+        }
+        "read_symbol" => {
+            let name = args["name"].as_str().unwrap_or("");
+            let file_hint = args["file"].as_str().unwrap_or("");
+            read_symbol_impl(name, file_hint, graph)
+        }
+        _ => format!("Unknown planner tool: {}", call.name),
+    }
+}
+
+fn read_symbol_impl(name: &str, file_hint: &str, graph: &ProjectGraph) -> String {
+    let files = graph.by_name.get(name);
+    let matches = match files {
+        None => return format!("Symbol '{name}' not found in graph index"),
+        Some(v) if v.is_empty() => return format!("Symbol '{name}' not found"),
+        Some(v) => v,
+    };
+
+    // Pick file: use hint if it matches, else use sole match, else ambiguous
+    let file: &str = if !file_hint.is_empty() && matches.contains(&file_hint.to_string()) {
+        file_hint
+    } else if matches.len() == 1 {
+        &matches[0]
+    } else {
+        // Ambiguous — return structural summary without a disk read
+        let locations: Vec<String> = matches
+            .iter()
+            .map(|f| {
+                let line = graph
+                    .symbols
+                    .iter()
+                    .find(|s| s.name == name && &s.file == f)
+                    .map(|s| s.line)
+                    .unwrap_or(0);
+                format!("  {f}  (line {line})")
+            })
+            .collect();
+        return format!(
+            "'{name}' is defined in multiple files — provide 'file' hint:\n{}",
+            locations.join("\n")
+        );
+    };
+
+    // Find the symbol's start line
+    let sym_line = graph
+        .symbols
+        .iter()
+        .find(|s| s.name == name && s.file == file)
+        .map(|s| s.line)
+        .unwrap_or(1);
+
+    // Read ~35 lines starting 2 lines before the symbol
+    let Ok(content) = std::fs::read_to_string(file) else {
+        return format!("Could not read {file}");
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let start = sym_line.saturating_sub(1).saturating_sub(2);
+    let end = (start + 35).min(lines.len());
+    let excerpt: String = lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("{:4}: {l}", start + i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("// {file} (lines {}–{})\n{}", start + 1, end, excerpt)
+}
+
+/// Simple keyword-to-cluster matching for Phase 2.
+/// Returns cluster names whose name appears in the task text.
+fn find_relevant_clusters(task: &str, graph: &ProjectGraph) -> Vec<String> {
+    let task_lower = task.to_lowercase();
+    graph
+        .clusters
+        .iter()
+        .filter(|c| task_lower.contains(&c.name.to_lowercase()))
+        .map(|c| c.name.clone())
+        .collect()
+}
+
+// ── Plan generation ───────────────────────────────────────────────────────────
+
 /// Call the model to generate a plan for `task`.
-/// Streams nothing — waits for the full response then parses JSON.
-/// Returns the plan steps on success, or an error string for display.
+///
+/// Phase 2: multi-turn loop with `list_symbols` and `read_symbol` tools.
+/// The planner can explore the graph surgically before committing to a JSON plan.
+/// Loop cap: 6 turns. After exhaustion, a final tool-free call forces JSON output.
 pub async fn generate_plan(
     task: &str,
     client: &Client,
     project: &str,
     context_files: &[(String, String)], // (path, content) attached files as context
     graph: &ProjectGraph,
-    on_chunk: impl Fn(&str) + Send + 'static,
+    narrative: Option<&crate::narrative::ProjectNarrative>,
+    on_chunk: impl Fn(&str) + Send + Sync + 'static,
 ) -> Result<Plan> {
-    // Build the user message: task + any attached file context
+    // Build the initial user message
     let mut user_content = String::new();
 
-    // Inject project graph — cluster-grouped file map with line counts
-    if let Some(index_section) = graph.to_prompt_section(8) {
+    // Inject narrative-enriched context if available, else fall back to graph section
+    if let Some(n) = narrative {
+        if !n.architecture_summary.is_empty() {
+            let relevant = find_relevant_clusters(task, graph);
+            let relevant_refs: Vec<&str> = relevant.iter().map(|s| s.as_str()).collect();
+            let ctx = n.to_context_package(graph, &relevant_refs, 8);
+            user_content.push_str(&ctx);
+            user_content.push('\n');
+        } else if let Some(index_section) = graph.to_prompt_section(8) {
+            user_content.push_str(&index_section);
+            user_content.push('\n');
+        }
+    } else if let Some(index_section) = graph.to_prompt_section(8) {
         user_content.push_str(&index_section);
         user_content.push('\n');
     }
@@ -286,7 +453,6 @@ pub async fn generate_plan(
         user_content.push_str("The following files are attached:\n\n");
         for (path, content) in context_files {
             let total = content.lines().count();
-            // Show up to 300 lines — enough to see structure and imports
             let preview: String = content
                 .lines()
                 .take(300)
@@ -302,23 +468,66 @@ pub async fn generate_plan(
         user_content.push_str("---\n\n");
     }
 
-    user_content.push_str(&format!(
-        "Generate a plan to accomplish this task:\n\n{task}"
-    ));
+    user_content.push_str(&format!("Generate a plan to accomplish this task:\n\n{task}"));
 
-    let messages = vec![Message {
+    let tools = planner_tools();
+    let mut messages: Vec<Message> = vec![Message {
         role: "user".to_string(),
         content: MessageContent::Text(user_content),
         tool_calls: vec![],
     }];
 
-    // No tools during planning — pure text response
-    let response = client
-        .chat(PLAN_SYSTEM_PROMPT, &messages, &[], on_chunk)
-        .await?;
+    // Multi-turn tool loop — planner can call list_symbols / read_symbol
+    const MAX_PLANNER_TURNS: usize = 6;
+    let mut final_text: Option<String> = None;
 
-    // Parse the JSON response
-    let json_text_raw = response.text.trim();
+    for _ in 0..MAX_PLANNER_TURNS {
+        let resp = client
+            .chat(PLAN_SYSTEM_PROMPT, &messages, &tools, &on_chunk)
+            .await?;
+
+        if resp.tool_calls.is_empty() {
+            // Model produced the plan JSON directly — done
+            final_text = Some(resp.text);
+            break;
+        }
+
+        // Execute tool calls in-process (graph lookups + disk reads)
+        let tool_results: Vec<ContentPart> = resp
+            .tool_calls
+            .iter()
+            .map(|c| ContentPart::ToolResult {
+                tool_use_id: c.id.clone(),
+                content: execute_planner_tool(c, graph),
+            })
+            .collect();
+
+        // Append assistant turn (with tool_calls) + tool results turn
+        messages.push(Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Text(resp.text),
+            tool_calls: resp.tool_calls,
+        });
+        messages.push(Message {
+            role: "user".to_string(),
+            content: MessageContent::Parts(tool_results),
+            tool_calls: vec![],
+        });
+    }
+
+    // If loop exhausted without a plan, force a plain response with no tools
+    let json_text_raw = match final_text {
+        Some(t) => t,
+        None => {
+            let resp = client
+                .chat(PLAN_SYSTEM_PROMPT, &messages, &[], &on_chunk)
+                .await?;
+            resp.text
+        }
+    };
+
+    // ── Parse JSON response ────────────────────────────────────────────────────
+    let json_text_raw = json_text_raw.trim();
 
     // Strip markdown fences if the model wrapped it despite instructions
     // Handle ```json, ```json <whitespace>, ```, etc. — strip from start then end

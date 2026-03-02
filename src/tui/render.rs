@@ -23,7 +23,9 @@ const LOGO: &str = r#"
   ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
 "#;
 
-pub fn draw_splash(f: &mut Frame, status: &str) {
+/// Draw the splash screen. `spinner_frame` drives the spinner animation; pass 0
+/// for a static display. `status` is shown in the hint line with the spinner prefix.
+pub fn draw_splash(f: &mut Frame, status: &str, spinner_frame: u8) {
     let area = f.area();
     f.render_widget(
         Block::default().style(Style::default().bg(Color::Black)),
@@ -84,10 +86,17 @@ pub fn draw_splash(f: &mut Frame, status: &str) {
         ])).alignment(Alignment::Center),
         subtitle_area,
     );
-    f.render_widget(
-        Paragraph::new(Line::from(
+    let hint_line = if status.is_empty() {
+        Line::from(Span::raw(""))
+    } else {
+        let spinner = SPINNER_GLYPHS[spinner_frame as usize % SPINNER_GLYPHS.len()];
+        Line::from(vec![
+            Span::styled(format!("{spinner} "), Style::default().fg(Color::Rgb(80, 70, 140))),
             Span::styled(status.to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
-        )).alignment(Alignment::Center),
+        ])
+    };
+    f.render_widget(
+        Paragraph::new(hint_line).alignment(Alignment::Center),
         hint_area,
     );
 }
@@ -429,6 +438,26 @@ fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
         String::new()
     };
 
+    // PIE graph status — shown on the right of the stats bar
+    let pie_str = if let Some(graph) = &state.project_graph {
+        let cluster_count = graph.clusters.len();
+        if cluster_count > 0 {
+            let mins_ago = (chrono::Utc::now().timestamp() - graph.last_indexed).max(0) / 60;
+            let age = if mins_ago < 1 {
+                "just now".to_string()
+            } else if mins_ago < 60 {
+                format!("{mins_ago}m ago")
+            } else {
+                format!("{}h ago", mins_ago / 60)
+            };
+            format!("  ◈ {cluster_count} clusters · indexed {age}")
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     let line = Line::from(vec![
         Span::styled("  ∑ ", Style::default().fg(Color::Rgb(60, 55, 100))),
         Span::styled(task_str, Style::default().fg(Color::Rgb(120, 110, 180))),
@@ -438,6 +467,7 @@ fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
         Span::styled(ratio_str, Style::default().fg(Color::Rgb(60, 100, 80))),
         Span::styled(peak_str, Style::default().fg(peak_color)),
         Span::styled(budget_str, Style::default().fg(Color::Rgb(80, 70, 60))),
+        Span::styled(pie_str, Style::default().fg(Color::Rgb(80, 70, 140))),
     ]);
 
     f.render_widget(

@@ -488,6 +488,9 @@ pub struct AppState {
     /// Persistent project graph — loaded/built at startup, injected into every agent call.
     /// None only before the first build completes (should not happen in normal flow).
     pub project_graph: Option<crate::pie::ProjectGraph>,
+    /// PIE Phase 2 narrative — architecture summary + cluster summaries + conventions.
+    /// Generated once on cold startup via one model call; warm runs load instantly from disk.
+    pub project_narrative: Option<crate::narrative::ProjectNarrative>,
 }
 
 impl AppState {
@@ -562,7 +565,8 @@ impl AppState {
             active_hook_preset: resolved.active_hooks.clone(),
             available_hook_presets: resolved.available_hooks.clone(),
             hook_wizard: None,
-            project_graph: None, // populated during splash in event_loop
+            project_graph: None,     // populated during splash in event_loop
+            project_narrative: None, // populated during splash in event_loop
         }
     }
 
@@ -1138,23 +1142,57 @@ async fn event_loop(
     let mut crossterm_events = EventStream::new();
     let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(120));
 
-    // ── Splash + PIE graph build ──────────────────────────────────────────────
-    // Determine warm/cold before drawing so we show the right hint immediately.
-    let graph_path = std::path::Path::new(".parecode/project.graph");
-    let splash_status = if graph_path.exists() {
-        "◈ loading project graph…"
-    } else {
-        "◈ Setting up Project Intelligence…"
-    };
-    terminal.draw(|f| render::draw_splash(f, splash_status))?;
+    // ── Splash + PIE build (animated) ────────────────────────────────────────
+    // Spinner redraws every 120ms. Minimum display: 1400ms.
+    // Cold narrative (one model call) can take 5–10s; spinner keeps it alive.
+    let graph_is_warm = std::path::Path::new(".parecode/project.graph").exists();
+    let narrative_is_warm = std::path::Path::new(".parecode/narrative.json").exists();
 
-    // Build (cold) or load+update (warm) concurrently with the splash timer.
+    // Start graph build on thread pool immediately
     let graph_task = tokio::task::spawn_blocking(|| {
         crate::pie::ProjectGraph::load_or_build(std::path::Path::new("."), 500)
     });
-    tokio::time::sleep(tokio::time::Duration::from_millis(1400)).await;
-    // Await graph — should already be done within the splash window; blocks if not.
-    if let Ok((graph, _was_warm)) = graph_task.await {
+
+    let mut splash_frame: u8 = 0;
+    let mut splash_ticker = tokio::time::interval(tokio::time::Duration::from_millis(120));
+    let splash_start = std::time::Instant::now();
+
+    // Phase 1: spin while graph builds (minimum 1400ms so the logo is legible)
+    let graph_status = if graph_is_warm { "loading project graph…" } else { "indexing project…" };
+    loop {
+        splash_ticker.tick().await;
+        splash_frame = splash_frame.wrapping_add(1);
+        terminal.draw(|f| render::draw_splash(f, graph_status, splash_frame))?;
+        let elapsed = splash_start.elapsed().as_millis();
+        if graph_task.is_finished() && elapsed >= 1400 {
+            break;
+        }
+    }
+    let graph_result = graph_task.await;
+
+    if let Ok((graph, _was_warm)) = graph_result {
+        // Phase 2: load or generate narrative — keep spinning, no time cap.
+        let mut nar_client = Client::new(resolved.endpoint.clone(), resolved.model.clone());
+        if let Some(ref key) = resolved.api_key {
+            nar_client.set_api_key(key.clone());
+        }
+        let narrative_task = tokio::spawn(crate::narrative::ProjectNarrative::load_or_generate(
+            graph.clone(),
+            nar_client,
+            std::path::Path::new(".").to_path_buf(),
+        ));
+
+        let nar_status = if narrative_is_warm { "loading project narrative…" } else { "generating project narrative…" };
+        let narrative = loop {
+            splash_ticker.tick().await;
+            splash_frame = splash_frame.wrapping_add(1);
+            terminal.draw(|f| render::draw_splash(f, nar_status, splash_frame))?;
+            if narrative_task.is_finished() {
+                break narrative_task.await.ok().flatten();
+            }
+        };
+
+        state.project_narrative = narrative;
         state.project_graph = Some(graph);
     }
 
@@ -2814,7 +2852,12 @@ fn launch_agent(
         auto_commit: resolved.auto_commit,
         auto_commit_prefix: resolved.auto_commit_prefix.clone(),
         git_context: resolved.git_context,
-        project_context: state.project_graph.as_ref().and_then(|g| g.to_prompt_section(8)),
+        project_context: match (&state.project_narrative, &state.project_graph) {
+            (Some(n), Some(g)) if !n.architecture_summary.is_empty() =>
+                Some(n.to_context_package(g, &[], 8)),
+            (_, Some(g)) => g.to_prompt_section(8),
+            _ => None,
+        },
     };
 
     let attached: Vec<(String, String)> = state.attached_files
@@ -2896,7 +2939,12 @@ fn launch_quick(
         auto_commit: false,
         auto_commit_prefix: String::new(),
         git_context: false,
-        project_context: state.project_graph.as_ref().and_then(|g| g.to_prompt_section(8)),
+        project_context: match (&state.project_narrative, &state.project_graph) {
+            (Some(n), Some(g)) if !n.architecture_summary.is_empty() =>
+                Some(n.to_context_package(g, &[], 8)),
+            (_, Some(g)) => g.to_prompt_section(8),
+            _ => None,
+        },
     };
 
     state.collecting_response.clear();
@@ -2964,6 +3012,7 @@ fn generate_and_show_plan(
     let graph = state.project_graph.clone().unwrap_or_else(|| {
         crate::pie::ProjectGraph::build_fresh(std::path::Path::new("."), 500)
     });
+    let narrative = state.project_narrative.clone();
 
     tokio::spawn(async move {
         let tx_plan = ui_tx.clone();
@@ -2971,7 +3020,7 @@ fn generate_and_show_plan(
             // Forward thinking chunks so the TUI shows planning progress
             let _ = tx_plan.send(UiEvent::ThinkingChunk(chunk.to_string()));
         };
-        match plan::generate_plan(&task, &client, &project, &context_files, &graph, on_chunk).await {
+        match plan::generate_plan(&task, &client, &project, &context_files, &graph, narrative.as_ref(), on_chunk).await {
             Ok(generated_plan) => {
                 // Save plan to disk: JSON for machine use, Markdown for human reading
                 let _ = plan::save_plan(&generated_plan);

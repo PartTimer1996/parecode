@@ -9,6 +9,7 @@ mod hooks;
 mod index;
 mod init;
 mod mcp;
+mod narrative;
 mod pie;
 mod plan;
 mod sessions;
