@@ -64,19 +64,28 @@ impl Default for TurnThresholds {
     }
 }
 
+/// Dispatch to get a tool's definition by name.
+pub fn get_tool(name: &str) -> Option<Value> {
+    match name {
+        TOOL_READ_FILE => Some(read::definition()),
+        TOOL_WRITE_FILE => Some(write::definition()),
+        TOOL_EDIT_FILE => Some(edit::definition()),
+        TOOL_PATCH_FILE => Some(patch::definition()),
+        TOOL_BASH => Some(bash::definition()),
+        TOOL_SEARCH => Some(search::definition()),
+        TOOL_LIST_FILES => Some(list::definition()),
+        TOOL_RECALL => Some(recall::definition()),
+        TOOL_ASK_USER => Some(ask::definition()),
+        _ => None,
+    }
+}
+
 /// All available tool definitions (sent to the model).
 pub fn all_definitions() -> Vec<Tool> {
-    vec![
-        def(read::definition()),
-        def(write::definition()),
-        def(edit::definition()),
-        def(patch::definition()),
-        def(bash::definition()),
-        def(search::definition()),
-        def(list::definition()),
-        def(recall::definition()),
-        def(ask::definition()),
-    ]
+    all_tool_names()
+        .iter()
+        .filter_map(|&name| get_tool(name).map(def))
+        .collect()
 }
 
 /// Phase-adaptive tool selection — only send tools relevant to the current turn.
@@ -88,27 +97,30 @@ pub fn all_definitions() -> Vec<Tool> {
 ///
 /// Saves ~400-800 tokens/turn compared to sending all 9 tools every time.
 pub fn tools_for_turn(turn: usize, history_has_summaries: bool) -> Vec<Tool> {
+    let thresholds = TurnThresholds::default();
     let mut t = vec![
         def(read::definition()),
         def(edit::definition()),
         def(bash::definition()),
         def(search::definition()),
         def(ask::definition()),
+        def(ask::definition()),
     ];
 
     // Exploration phase: navigation + file creation
-    if turn <= 1 {
+    if turn <= thresholds.exploration_end {
         t.push(def(list::definition()));
         t.push(def(write::definition()));
+        
     }
 
     // Mutation phase: multi-hunk diffs become useful after reading files
-    if turn >= 2 {
+    if turn >= thresholds.mutation_start {
         t.push(def(patch::definition()));
     }
 
     // Recall is pointless until tool outputs have been summarised in history
-    if history_has_summaries || turn >= 3 {
+    if history_has_summaries || turn >= thresholds.recall_useful {
         t.push(def(recall::definition()));
     }
 
@@ -128,19 +140,28 @@ fn def(v: Value) -> Tool {
 
 /// Returns true if this is a built-in native tool (not an MCP tool).
 pub fn is_native(name: &str) -> bool {
-    matches!(name, "read_file" | "write_file" | "edit_file" | "patch_file" | "bash" | "search" | "list_files" | "recall" | "ask_user")
+    all_tool_names().contains(&name)
 }
 
 /// Dispatch a synchronous tool call by name.
 /// Note: "bash" and "recall" are handled asynchronously in agent.rs.
 pub fn dispatch(name: &str, args: &Value) -> Result<String> {
-    match name {
-        "read_file"  => read::execute(args),
-        "write_file" => write::execute(args),
-        "edit_file"  => edit::execute(args),
-        "patch_file" => patch::execute(args),
-        "search"     => search::execute(args),
-        "list_files" => list::execute(args),
-        other        => Err(anyhow!("Unknown tool: '{other}'")),
-    }
+    // Static dispatch table built from single source of truth
+    static TOOL_DISPATCH: &[(&str, fn(&Value) -> Result<String>)] = &[
+        (TOOL_READ_FILE, read::execute),
+        (TOOL_WRITE_FILE, write::execute),
+        (TOOL_EDIT_FILE, edit::execute),
+        (TOOL_PATCH_FILE, patch::execute),
+        (TOOL_SEARCH, search::execute),
+        (TOOL_LIST_FILES, list::execute),
+        // (TOOL_BASH, bash::execute),
+        // (TOOL_ASK_USER, ask::execute),
+        // (TOOL_RECALL, recall::execute),
+    ];
+
+    TOOL_DISPATCH
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, f)| f(args))
+        .ok_or_else(|| anyhow!("Unknown tool: '{}'", name))?
 }
