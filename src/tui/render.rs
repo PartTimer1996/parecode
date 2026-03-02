@@ -4,9 +4,8 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Paragraph},
 };
 
 use super::{AppState, Mode, Tab, cwd_str};
@@ -95,7 +94,7 @@ pub fn draw_splash(f: &mut Frame) {
 
 // ── Main draw entry point ─────────────────────────────────────────────────────
 
-pub fn draw(f: &mut Frame, state: &AppState) {
+pub fn draw(f: &mut Frame, state: &mut AppState) {
     let area = f.area();
 
     // Horizontal split when sidebar is visible
@@ -111,24 +110,25 @@ pub fn draw(f: &mut Frame, state: &AppState) {
     };
 
     let has_chips = !state.attached_files.is_empty();
-    let input_line_count = state.input.lines().count().max(1);
-    let input_height = (input_line_count + 2).clamp(4, 14) as u16; // +2 for top+bottom borders, min 4, max 14
+    let input_line_count = state.input_box.line_count().max(1);
+    let input_height = (input_line_count + 2).clamp(6, 18) as u16; // +2 for borders, min 6, max 18
+    // Layout: tab bar | content | stats bar | (chips?) | input box | status bar
     let constraints = if has_chips {
         vec![
             Constraint::Length(1),            // tab bar
             Constraint::Min(0),               // content area
-            Constraint::Length(1),            // status bar
-            Constraint::Length(1),            // stats bar
+            Constraint::Length(1),            // stats bar (∑ tasks/tokens/hooks)
             Constraint::Length(1),            // attached files chips row
             Constraint::Length(input_height), // input box
+            Constraint::Length(1),            // status bar (▲ parecode profile model)
         ]
     } else {
         vec![
             Constraint::Length(1),            // tab bar
             Constraint::Min(0),               // content area
-            Constraint::Length(1),            // status bar
-            Constraint::Length(1),            // stats bar
+            Constraint::Length(1),            // stats bar (∑ tasks/tokens/hooks)
             Constraint::Length(input_height), // input box
+            Constraint::Length(1),            // status bar (▲ parecode profile model)
         ]
     };
 
@@ -148,13 +148,26 @@ pub fn draw(f: &mut Frame, state: &AppState) {
         Tab::Git    => super::git_view::draw(f, state, chunks[1]),
     }
 
-    draw_status_bar(f, state, chunks[2]);
-    draw_stats_bar(f, state, chunks[3]);
+    draw_stats_bar(f, state, chunks[2]);
+    // For FilePicker / SlashComplete, show the query string as a display override
+    let display_override: Option<String> = match state.mode {
+        Mode::FilePicker => Some(state.input.clone()),
+        Mode::SlashComplete => Some(state.input.clone()),
+        _ => None,
+    };
+    let display_ref = display_override.as_deref();
+
     if has_chips {
-        super::chat::draw_chips(f, state, chunks[4]);
-        draw_input(f, state, chunks[5]);
+        super::chat::draw_chips(f, state, chunks[3]);
+        let mode = state.mode.clone();
+        let spinner = state.spinner_tick;
+        state.input_box.draw(f, chunks[4], &mode, spinner, display_ref);
+        draw_status_bar(f, state, chunks[5]);
     } else {
-        draw_input(f, state, chunks[4]);
+        let mode = state.mode.clone();
+        let spinner = state.spinner_tick;
+        state.input_box.draw(f, chunks[3], &mode, spinner, display_ref);
+        draw_status_bar(f, state, chunks[4]);
     }
 
     if state.mode == Mode::Palette {
@@ -288,6 +301,17 @@ fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
         ("▲", Color::White)
     };
 
+    // Hook status for the status bar
+    let (hook_label, hook_color) = if !state.hooks_enabled {
+        ("  ⚙ hooks off".to_string(), Color::Rgb(80, 70, 60))
+    } else if state.hooks_config.is_empty() {
+        ("  ⚙ no hooks".to_string(), Color::Rgb(100, 85, 50))
+    } else if let Some(name) = &state.active_hook_preset {
+        (format!("  ⚙ hooks.{name}"), Color::Rgb(80, 200, 120))
+    } else {
+        ("  ⚙ hooks on".to_string(), Color::Rgb(80, 200, 120))
+    };
+
     let line = Line::from(vec![
         Span::raw(" "),
         Span::styled(status_glyph, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
@@ -322,10 +346,7 @@ fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
             if state.session_resumed { "↩" } else { "" },
             Style::default().fg(Color::Rgb(100, 90, 180)),
         ),
-        Span::styled(
-            "  Ctrl+B sidebar  Ctrl+H history",
-            Style::default().fg(Color::Rgb(55, 50, 90)),
-        ),
+        Span::styled(hook_label, Style::default().fg(hook_color).add_modifier(Modifier::BOLD)),
         Span::styled(
             plan_indicator,
             Style::default().fg(Color::Rgb(200, 160, 50)).add_modifier(Modifier::BOLD),
@@ -408,17 +429,6 @@ fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
         String::new()
     };
 
-    // Hook status indicator
-    let (hook_label, hook_color) = if !state.hooks_enabled {
-        ("  ⚙ hooks off".to_string(), Color::Rgb(80, 70, 60))
-    } else if state.hooks_config.is_empty() {
-        ("  ⚙ no hooks · /hooks setup".to_string(), Color::Rgb(180, 120, 40))
-    } else if let Some(name) = &state.active_hook_preset {
-        (format!("  ⚙ hooks.{name}"), Color::Rgb(80, 200, 120))
-    } else {
-        ("  ⚙ hooks".to_string(), Color::Rgb(80, 200, 120))
-    };
-
     let line = Line::from(vec![
         Span::styled("  ∑ ", Style::default().fg(Color::Rgb(60, 55, 100))),
         Span::styled(task_str, Style::default().fg(Color::Rgb(120, 110, 180))),
@@ -428,7 +438,6 @@ fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
         Span::styled(ratio_str, Style::default().fg(Color::Rgb(60, 100, 80))),
         Span::styled(peak_str, Style::default().fg(peak_color)),
         Span::styled(budget_str, Style::default().fg(Color::Rgb(80, 70, 60))),
-        Span::styled(hook_label, Style::default().fg(hook_color)),
     ]);
 
     f.render_widget(
@@ -445,189 +454,3 @@ fn fmt_k(n: u32) -> String {
     }
 }
 
-// ── Input box ─────────────────────────────────────────────────────────────────
-
-fn draw_input(f: &mut Frame, state: &AppState, area: Rect) {
-    let (border_color, prompt_color, prompt_char, mode_label) = match state.mode {
-        Mode::AgentRunning   => (Color::Rgb(35, 35, 55),  Color::DarkGray,           "·",  ""),
-        Mode::AskingUser     => (Color::Rgb(180, 140, 0), Color::Yellow,             "?",  " answer "),
-        Mode::Palette        => (Color::Rgb(0, 180, 200), Color::Cyan,               "⌘",  " command "),
-        Mode::FilePicker     => (Color::Rgb(0, 180, 100), Color::Green,              "#",  " pick file "),
-        Mode::SlashComplete  => (Color::Rgb(0, 180, 200), Color::Cyan,               "/",  " command "),
-        Mode::SessionBrowser => (Color::Rgb(110, 90, 200),Color::Rgb(130, 110, 220),"◈",  " sessions "),
-        Mode::PlanReview     => (Color::Rgb(200, 140, 0), Color::Rgb(220, 160, 0),  "◇",  " plan review "),
-        Mode::PlanRunning    => (Color::Rgb(35, 35, 55),  Color::DarkGray,          "▶",  ""),
-        Mode::UndoPicker     => (Color::Rgb(200, 80, 40), Color::Rgb(220, 100, 60), "⚠",  " undo "),
-        Mode::ProfilePicker  => (Color::Rgb(0, 180, 200), Color::Cyan,               "▸",  " profile "),
-        Mode::HookWizard     => (Color::Rgb(40, 100, 55), Color::Rgb(60, 140, 80),   "⚙",  " hook setup "),
-        Mode::Normal         => (Color::Rgb(55, 55, 85),  Color::Rgb(80, 160, 255),  "❯",  ""),
-    };
-
-    // Outer block — all borders, rounded, with mode label as title
-    let box_bg = Color::Rgb(10, 10, 18);
-    let title_span = if !mode_label.is_empty() {
-        Span::styled(mode_label, Style::default().fg(border_color).add_modifier(Modifier::BOLD))
-    } else {
-        Span::raw("")
-    };
-    let outer_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
-        .border_style(Style::default().fg(border_color))
-        .title(title_span)
-        .style(Style::default().bg(box_bg));
-
-    let inner_area = outer_block.inner(area);
-    f.render_widget(outer_block, area);
-
-    let prompt_span = Span::styled(
-        format!(" {prompt_char} "),
-        Style::default().fg(prompt_color).add_modifier(Modifier::BOLD),
-    );
-
-    let input_text = if state.mode == Mode::Palette {
-        state.palette_query.clone()
-    } else {
-        state.input.clone()
-    };
-
-    // Build the paragraph content as Text (multiple Lines) so \n is respected.
-    let input_paragraph: ratatui::text::Text = if matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning) {
-        let tick = state.spinner_tick as usize;
-        let cancel_hints = ["Esc to cancel", "Esc to interrupt", "Esc to stop"];
-        let hint = cancel_hints[(tick / 20) % cancel_hints.len()];
-        ratatui::text::Text::from(Line::from(vec![
-            prompt_span.clone(),
-            Span::styled(hint.to_string(), Style::default().fg(Color::Rgb(60, 60, 80))),
-        ]))
-    } else if state.mode == Mode::FilePicker {
-        ratatui::text::Text::from(Line::from(vec![prompt_span.clone(), Span::raw(input_text.clone())]))
-    } else if state.mode == Mode::PlanReview {
-        let all_approved = state.plan_review.as_ref().map(|pr| {
-            pr.plan.steps.iter().all(|s| matches!(s.status, StepStatus::Approved | StepStatus::Pass))
-        }).unwrap_or(false);
-        let hint = if all_approved {
-            Span::styled("Enter to run plan  ·  Esc cancel", Style::default().fg(Color::Rgb(0, 180, 80)))
-        } else {
-            Span::styled(
-                "↑↓ navigate  a approve step  e annotate  Enter run when all approved  Esc cancel",
-                Style::default().fg(Color::Rgb(100, 80, 30)),
-            )
-        };
-        ratatui::text::Text::from(Line::from(vec![prompt_span.clone(), hint]))
-    } else if input_text.is_empty() {
-        let hint = if state.mode == Mode::Palette {
-            Span::styled("search commands…", Style::default().fg(Color::Rgb(70, 70, 90)))
-        } else if state.mode == Mode::AskingUser {
-            Span::styled("type your answer · Enter to send · Esc to skip", Style::default().fg(Color::Rgb(180, 140, 40)))
-        } else {
-            Span::styled("message · # attach file · Ctrl+B sidebar · Ctrl+P commands", Style::default().fg(Color::Rgb(70, 70, 90)))
-        };
-        ratatui::text::Text::from(Line::from(vec![prompt_span.clone(), hint]))
-    } else {
-        // Split on \n — first line gets the prompt, continuation lines are indented to match
-        let highlight_hashes = matches!(state.mode, Mode::Normal | Mode::AskingUser | Mode::SlashComplete)
-            && input_text.contains('#');
-        let prompt_width: usize = 3; // " ❯ "
-        let continuation_pad = " ".repeat(prompt_width);
-
-        let raw_lines: Vec<&str> = input_text.split('\n').collect();
-        let mut text_lines: Vec<Line> = Vec::with_capacity(raw_lines.len());
-
-        for (i, raw_line) in raw_lines.iter().enumerate() {
-            let mut spans: Vec<Span> = if i == 0 {
-                vec![prompt_span.clone()]
-            } else {
-                vec![Span::raw(continuation_pad.clone())]
-            };
-
-            if highlight_hashes && raw_line.contains('#') {
-                let mut remaining = *raw_line;
-                while !remaining.is_empty() {
-                    if let Some(hash_pos) = remaining.find('#') {
-                        if hash_pos > 0 {
-                            spans.push(Span::styled(remaining[..hash_pos].to_string(), Style::default().fg(Color::White)));
-                        }
-                        let after_hash = &remaining[hash_pos..];
-                        let token_end = after_hash.find(|c: char| c.is_whitespace()).unwrap_or(after_hash.len());
-                        let token = &after_hash[..token_end];
-                        if token.len() > 1 {
-                            spans.push(Span::styled(token.to_string(), Style::default().fg(Color::Rgb(100, 220, 160))));
-                        } else {
-                            spans.push(Span::styled("#".to_string(), Style::default().fg(Color::White)));
-                        }
-                        remaining = &after_hash[token_end..];
-                    } else {
-                        spans.push(Span::styled(remaining.to_string(), Style::default().fg(Color::White)));
-                        break;
-                    }
-                }
-            } else {
-                spans.push(Span::styled(raw_line.to_string(), Style::default().fg(Color::White)));
-            }
-
-            text_lines.push(Line::from(spans));
-        }
-
-        ratatui::text::Text::from(text_lines)
-    };
-
-    // Render content inside the outer block (no inner block — outer provides all borders)
-    let paragraph = Paragraph::new(input_paragraph)
-        .style(Style::default().bg(box_bg))
-        .wrap(Wrap { trim: false });
-
-    f.render_widget(paragraph, inner_area);
-
-    // Show example prompts when input is empty (in Normal mode)
-    if input_text.is_empty() && state.mode == Mode::Normal && inner_area.height >= 3 {
-        let example_prompts = vec![
-            Line::from(vec![
-                Span::styled(" ", Style::default()),
-                Span::styled("Try: ", Style::default().fg(Color::Rgb(55, 55, 75))),
-                Span::styled("explain this function", Style::default().fg(Color::Rgb(65, 65, 85))),
-            ]),
-            Line::from(vec![
-                Span::styled(" ", Style::default()),
-                Span::styled("Try: ", Style::default().fg(Color::Rgb(55, 55, 75))),
-                Span::styled("refactor the auth module", Style::default().fg(Color::Rgb(65, 65, 85))),
-            ]),
-        ];
-
-        let hints_area = Rect {
-            y: inner_area.y + 1, // below the input line
-            x: inner_area.x,
-            width: inner_area.width,
-            height: inner_area.height.saturating_sub(1),
-        };
-
-        f.render_widget(
-            Paragraph::new(example_prompts).style(Style::default().bg(box_bg)),
-            hints_area,
-        );
-    }
-
-    // Position cursor inside inner_area
-    if matches!(state.mode, Mode::Normal | Mode::AskingUser | Mode::Palette | Mode::FilePicker | Mode::SlashComplete | Mode::PlanReview | Mode::ProfilePicker | Mode::UndoPicker) {
-        use unicode_width::UnicodeWidthStr;
-        // prompt is " ❯ " — 3 cols wide (space + glyph + space)
-        let prompt_width: u16 = 3;
-        let (text, cursor_byte) = if state.mode == Mode::Palette {
-            (state.palette_query.as_str(), state.palette_query.len())
-        } else {
-            (state.input.as_str(), state.cursor)
-        };
-        let text_before_cursor = &text[..cursor_byte.min(text.len())];
-        let cursor_line = text_before_cursor.matches('\n').count() as u16;
-        let current_line_text = text_before_cursor.rsplit('\n').next().unwrap_or(text_before_cursor);
-        let cursor_x = if cursor_line == 0 {
-            inner_area.x + prompt_width + current_line_text.width() as u16
-        } else {
-            inner_area.x + current_line_text.width() as u16
-        };
-        let cursor_y = inner_area.y + cursor_line;
-        if cursor_x < inner_area.x + inner_area.width {
-            f.set_cursor_position((cursor_x, cursor_y));
-        }
-    }
-}

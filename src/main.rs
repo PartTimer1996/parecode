@@ -183,9 +183,8 @@ async fn run_single_shot(
         client.set_api_key(key.clone());
     }
     let mcp = mcp::McpClient::new(&resolved.mcp_servers).await;
-    // Single-shot path: read from config (populated by prior TUI run) or detect+write now
-    let hook_config = if !resolved.hooks_disabled && resolved.hooks.is_empty() {
-        hooks::write_hooks_to_config(&resolved.profile_name)
+    let hook_config = if !resolved.active_hook_config.is_empty() {
+        resolved.active_hook_config.clone()
     } else {
         resolved.hooks.clone()
     };

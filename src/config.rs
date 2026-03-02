@@ -126,8 +126,26 @@ impl ConfigFile {
         }
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config file at {}", path.display()))?;
-        toml::from_str(&raw)
-            .with_context(|| format!("Failed to parse config file at {}", path.display()))
+        let mut cfg: ConfigFile = toml::from_str(&raw)
+            .with_context(|| format!("Failed to parse config file at {}", path.display()))?;
+
+        // `active_hooks` must be a top-level key but may have ended up inside a
+        // [section] due to append-based writing. Scan the raw text for it so it
+        // works regardless of where it appears in the file.
+        if cfg.active_hooks.is_none() {
+            for line in raw.lines() {
+                let t = line.trim();
+                if let Some(rest) = t.strip_prefix("active_hooks") {
+                    let rest = rest.trim_start_matches(|c: char| c == ' ' || c == '=').trim();
+                    if rest.starts_with('"') && rest.ends_with('"') && rest.len() > 1 {
+                        cfg.active_hooks = Some(rest[1..rest.len()-1].to_string());
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(cfg)
     }
 
     /// Write a starter config file to disk (only if it doesn't exist).

@@ -20,6 +20,9 @@ pub mod stats_view;
 pub mod plan_view;
 pub mod sidebar;
 pub mod git_view;
+pub mod input_box;
+
+use input_box::{InputBox, InputAction};
 
 use std::io;
 
@@ -228,8 +231,6 @@ pub struct FilePickerState {
     pub query: String,
     /// Index of highlighted item in filtered list
     pub selected: usize,
-    /// Byte offset of the `@` character in `AppState::input`
-    pub at_offset: usize,
 }
 
 impl FilePickerState {
@@ -359,10 +360,13 @@ pub struct AttachedFile {
 
 pub struct AppState {
     pub entries: Vec<ConversationEntry>,
+    /// tui-textarea powered input box for Normal / AskingUser input
+    pub input_box: InputBox,
+    /// Backing string for special modes (SlashComplete, FilePicker) that manipulate
+    /// the input directly (not via tui-textarea). Also used as read cache for tab-switch
+    /// guards (`input_box.is_empty()`).
     pub input: String,
-    pub cursor: usize,        // byte offset in input
-    pub pasted_lines: Option<usize>,  // track pasted line count for multi-line input
-    pub input_scroll_offset: u16,     // vertical scroll offset for multi-line input
+    pub cursor: usize,        // byte offset in input (used only by special modes)
     pub mode: Mode,
     pub scroll: usize,        // lines scrolled up in history
     pub profile: String,
@@ -487,10 +491,9 @@ impl AppState {
     pub fn new(resolved: &ResolvedConfig, show_timestamps: bool, mcp: Arc<McpClient>) -> Self {
         Self {
             entries: Vec::new(),
+            input_box: InputBox::new(),
             input: String::new(),
             cursor: 0,
-            pasted_lines: None,
-            input_scroll_offset: 0,
             mode: Mode::Normal,
             scroll: 0,
             profile: resolved.profile_name.clone(),
@@ -526,7 +529,11 @@ impl AppState {
             stats_scroll: 0,
             telemetry_history: telemetry::load_all(),
             endpoint: resolved.endpoint.clone(),
-            hooks_config: resolved.active_hook_config.clone(),
+            hooks_config: if !resolved.active_hook_config.is_empty() {
+                resolved.active_hook_config.clone()
+            } else {
+                resolved.hooks.clone()
+            },
             hooks_disabled_profile: resolved.hooks_disabled,
             mcp_server_names: resolved.mcp_servers.iter().map(|s| s.name.clone()).collect(),
             auto_commit: resolved.auto_commit,
@@ -829,8 +836,7 @@ impl AppState {
                 self.pending_ask_reply = Some(reply_tx);
                 self.mode = Mode::AskingUser;
                 // Clear input so the user starts with a fresh prompt
-                self.input.clear();
-                self.cursor = 0;
+                self.input_box.clear();
             }
         }
     }
@@ -987,23 +993,6 @@ async fn event_loop(
 ) -> Result<()> {
     let mcp = McpClient::new(&resolved.mcp_servers).await;
 
-    // ── Hook bootstrap ────────────────────────────────────────────────────────
-    // If the active profile has no hooks configured and hooks aren't disabled,
-    // detect the project language, write a hooks section into the config file
-    // (once, with commented examples for all events), and update resolved so
-    // all subsequent calls read from config rather than re-detecting.
-    let need_hook_wizard = if !resolved.hooks_disabled && resolved.hooks.is_empty() {
-        let detected = crate::hooks::write_hooks_to_config(&resolved.profile_name);
-        if !detected.is_empty() {
-            resolved.hooks = detected;
-            false // auto-detected — no wizard needed
-        } else {
-            true // nothing detected — show wizard
-        }
-    } else {
-        false
-    };
-
     let mut state = AppState::new(&resolved, show_timestamps, mcp);
     state.cost_per_mtok_input = resolved.cost_per_mtok_input;
 
@@ -1013,16 +1002,17 @@ async fn event_loop(
     }
     state.sidebar_entries = load_sidebar_entries(&state.session);
 
-    // ── Hook startup summary / wizard ─────────────────────────────────────────
+    // ── Hook startup summary ──────────────────────────────────────────────────
     if resolved.hooks_disabled {
         state.push(ConversationEntry::SystemMsg("⚙ hooks disabled for this profile".to_string()));
+    } else if let Some(name) = &resolved.active_hooks {
+        let summary = resolved.active_hook_config.summary()
+            .unwrap_or_else(|| "no commands configured".to_string());
+        state.push(ConversationEntry::SystemMsg(
+            format!("⚙ hooks.{name}  {summary}  (/list-hooks for details)"),
+        ));
     } else if let Some(summary) = resolved.hooks.summary() {
         state.push(ConversationEntry::SystemMsg(format!("⚙ hooks  {summary}  (/list-hooks for details)")));
-    } else if need_hook_wizard {
-        // No hooks configured — prompt user to set one up
-        state.push(ConversationEntry::SystemMsg(
-            "⚙ no hooks configured  — run /hooks setup to create one, or /hooks <name> to load an existing config".to_string(),
-        ));
     }
 
     // ── Update notification ───────────────────────────────────────────────────
@@ -1133,7 +1123,7 @@ async fn event_loop(
     // Splash screen
     terminal.draw(|f| render::draw_splash(f))?;
     tokio::time::sleep(tokio::time::Duration::from_millis(1400)).await;
-    terminal.draw(|f| render::draw(f, &state))?;
+    terminal.draw(|f| render::draw(f, &mut state))?;
 
     loop {
         tokio::select! {
@@ -1141,14 +1131,14 @@ async fn event_loop(
             _ = ticker.tick() => {
                 if matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning) {
                     state.spinner_tick = state.spinner_tick.wrapping_add(1);
-                    terminal.draw(|f| render::draw(f, &state))?;
+                    terminal.draw(|f| render::draw(f, &mut state))?;
                 }
             }
 
             // ── Drain UI events from agent ────────────────────────────────────
             Some(ev) = ui_rx.recv() => {
                 state.apply_event(ev);
-                terminal.draw(|f| render::draw(f, &state))?;
+                terminal.draw(|f| render::draw(f, &mut state))?;
             }
 
             // ── Keyboard/resize events ────────────────────────────────────────
@@ -1168,13 +1158,13 @@ async fn event_loop(
                     }
                     Event::Paste(text) => {
                         if state.mode != Mode::AgentRunning && state.mode != Mode::PlanRunning {
-                            // Insert pasted text at cursor position
-                            state.input.insert_str(state.cursor, &text);
-                            state.cursor += text.len();
-                            // Track line count for display, but don't auto-send
-                            let line_count = text.matches('\n').count();
-                            if line_count > 0 {
-                                state.pasted_lines = Some(line_count);
+                            if matches!(state.mode, Mode::Normal | Mode::AskingUser) {
+                                // Insert via input_box (preserves newlines)
+                                state.input_box.insert_str(&text);
+                            } else {
+                                // Special modes use state.input directly
+                                state.input.insert_str(state.cursor, &text);
+                                state.cursor += text.len();
                             }
                         }
                     }
@@ -1239,7 +1229,12 @@ async fn event_loop(
                                     state.context_tokens = resolved.context_tokens;
                                     state.endpoint = resolved.endpoint.clone();
                                     state.cost_per_mtok_input = resolved.cost_per_mtok_input;
-                                    state.hooks_config = resolved.hooks.clone();
+                                    state.hooks_config = if !resolved.active_hook_config.is_empty() {
+                                        resolved.active_hook_config.clone()
+                                    } else {
+                                        resolved.hooks.clone()
+                                    };
+                                    state.active_hook_preset = resolved.active_hooks.clone();
                                     state.hooks_disabled_profile = resolved.hooks_disabled;
                                     state.mcp_server_names = resolved.mcp_servers.iter().map(|s| s.name.clone()).collect();
                                     state.auto_commit = resolved.auto_commit;
@@ -1269,7 +1264,7 @@ async fn event_loop(
                     }
                 }
 
-                terminal.draw(|f| render::draw(f, &state))?;
+                terminal.draw(|f| render::draw(f, &mut state))?;
             }
         }
     }
@@ -1493,7 +1488,12 @@ fn handle_key(
                             state.context_tokens = resolved.context_tokens;
                             state.cost_per_mtok_input = resolved.cost_per_mtok_input;
                             state.endpoint = resolved.endpoint.clone();
-                            state.hooks_config = resolved.hooks.clone();
+                            state.hooks_config = if !resolved.active_hook_config.is_empty() {
+                                resolved.active_hook_config.clone()
+                            } else {
+                                resolved.hooks.clone()
+                            };
+                            state.active_hook_preset = resolved.active_hooks.clone();
                             state.hooks_disabled_profile = resolved.hooks_disabled;
                             state.mcp_server_names = resolved
                                 .mcp_servers
@@ -1712,9 +1712,6 @@ fn handle_key(
     // ── SlashComplete mode ────────────────────────────────────────────────────
     if state.mode == Mode::SlashComplete {
         match key.code {
-            KeyCode::Esc => {
-                state.mode = Mode::Normal;
-            }
             KeyCode::Up => {
                 let count = slash_filtered(&state.input).len();
                 if count > 0 {
@@ -1729,28 +1726,41 @@ fn handle_key(
                         (state.slash_complete_selected + 1) % count;
                 }
             }
+            KeyCode::Esc => {
+                // Esc during slash complete — clear and go back to input_box in Normal
+                state.input.clear();
+                state.cursor = 0;
+                state.mode = Mode::Normal;
+            }
             KeyCode::Enter | KeyCode::Tab => {
                 let matches = slash_filtered(&state.input);
                 if let Some(cmd) = matches.get(state.slash_complete_selected) {
-                    state.input = cmd.key.to_string();
-                    // If the command takes an argument (not /quit, /clear etc.)
-                    // add a trailing space so user can type straight away
                     let no_arg = matches!(
                         cmd.key,
                         "/quit" | "/exit" | "/q" | "/clear" | "/sessions"
                         | "/new" | "/help" | "/h" | "/ts" | "/list-hooks"
                         | "/profiles" | "/init" | "/stats"
                     );
-                    if !no_arg {
-                        state.input.push(' ');
+                    let selected_cmd = cmd.key.to_string();
+                    state.input.clear();
+                    state.cursor = 0;
+                    state.mode = Mode::Normal;
+                    if no_arg {
+                        // Execute immediately
+                        return handle_submit(selected_cmd, state, resolved, file, verbose, dry_run, ui_tx);
+                    } else {
+                        // Load into input_box so user can type the argument
+                        let with_space = format!("{} ", selected_cmd);
+                        state.input_box.set_text(&with_space);
+                        state.input_box.move_to_end();
                     }
-                    state.cursor = state.input.len();
+                } else {
+                    state.mode = Mode::Normal;
                 }
-                state.mode = Mode::Normal;
             }
             KeyCode::Backspace => {
                 if state.input.len() <= 1 {
-                    // Backspaced past `/` — cancel
+                    // Backspaced past `/` — cancel, restore Normal
                     state.input.clear();
                     state.cursor = 0;
                     state.mode = Mode::Normal;
@@ -1781,10 +1791,9 @@ fn handle_key(
         if let Some(fp) = &mut state.file_picker {
             match key.code {
                 KeyCode::Esc => {
-                    // Cancel: strip the `@` and query from input
-                    let at = fp.at_offset;
-                    state.input.truncate(at);
-                    state.cursor = state.input.len();
+                    // Cancel — clear the picker query, restore Normal
+                    state.input.clear();
+                    state.cursor = 0;
                     state.mode = Mode::Normal;
                     state.file_picker = None;
                 }
@@ -1803,33 +1812,34 @@ fn handle_key(
                     let filtered = fp.filtered();
                     if let Some(chosen) = filtered.get(fp.selected) {
                         let chosen = chosen.to_string();
-                        let at = fp.at_offset;
-                        // Replace the #query with #chosen_path inline in the input
-                        state.input.truncate(at);
-                        let insert = format!("#{} ", chosen);
-                        state.input.push_str(&insert);
-                        state.cursor = state.input.len();
+                        // Append #chosen_path into the input_box so it shows with existing text
+                        let token = format!("#{} ", chosen);
+                        state.input_box.insert_str(&token);
                     }
+                    state.input.clear();
+                    state.cursor = 0;
                     state.mode = Mode::Normal;
                     state.file_picker = None;
                 }
                 KeyCode::Backspace => {
                     if fp.query.pop().is_none() {
-                        // Backspaced past `@` — cancel picker
-                        let at = fp.at_offset;
-                        state.input.truncate(at);
-                        state.cursor = state.input.len();
+                        // Backspaced past `#` — cancel picker
+                        state.input.clear();
+                        state.cursor = 0;
                         state.mode = Mode::Normal;
                         state.file_picker = None;
                     } else {
                         fp.selected = 0;
+                        // Sync display string
+                        state.input = format!("#{}", fp.query);
+                        state.cursor = state.input.len();
                     }
                 }
                 KeyCode::Char(c) => {
                     fp.query.push(c);
                     fp.selected = 0;
-                    // Mirror into input so the user sees what they're typing
-                    state.input.push(c);
+                    // Mirror into state.input for the overlay display
+                    state.input = format!("#{}", fp.query);
                     state.cursor = state.input.len();
                 }
                 _ => {}
@@ -2027,8 +2037,7 @@ fn handle_key(
                     let _ = tx.send("[user cancelled the question — proceed with your best judgement]".to_string());
                 }
                 state.push(ConversationEntry::AskReply("(cancelled)".to_string()));
-                state.input.clear();
-                state.cursor = 0;
+                state.input_box.clear();
                 state.mode = Mode::AgentRunning;
             } else {
                 // Cancel agent
@@ -2069,44 +2078,43 @@ fn handle_key(
         // Tab — when sidebar is visible + input empty: enter sidebar focus
         (KeyModifiers::NONE, KeyCode::Tab)
             if state.sidebar_visible
-                && state.input.is_empty()
+                && state.input_box.is_empty()
                 && state.mode == Mode::Normal
                 && state.attached_files.is_empty() => {
             state.sidebar_focused = true;
         }
-        // 1-4 — switch tabs (only when input is empty and not running)
-        (KeyModifiers::NONE, KeyCode::Char('1')) if state.input.is_empty()
+        // 1-5 — switch tabs (only when input is empty and not running)
+        (KeyModifiers::NONE, KeyCode::Char('1')) if state.input_box.is_empty()
             && state.mode == Mode::Normal => {
             state.active_tab = Tab::Chat;
         }
-        (KeyModifiers::NONE, KeyCode::Char('2')) if state.input.is_empty()
+        (KeyModifiers::NONE, KeyCode::Char('2')) if state.input_box.is_empty()
             && state.mode == Mode::Normal => {
             state.active_tab = Tab::Config;
         }
-        (KeyModifiers::NONE, KeyCode::Char('3')) if state.input.is_empty()
+        (KeyModifiers::NONE, KeyCode::Char('3')) if state.input_box.is_empty()
             && state.mode == Mode::Normal => {
             state.active_tab = Tab::Stats;
         }
-        (KeyModifiers::NONE, KeyCode::Char('4')) if state.input.is_empty()
+        (KeyModifiers::NONE, KeyCode::Char('4')) if state.input_box.is_empty()
             && state.mode == Mode::Normal
             && state.plan_ever_active => {
             state.active_tab = Tab::Plan;
         }
-        (KeyModifiers::NONE, KeyCode::Char('5')) if state.input.is_empty()
+        (KeyModifiers::NONE, KeyCode::Char('5')) if state.input_box.is_empty()
             && state.mode == Mode::Normal
             && state.git_available => {
             state.active_tab = Tab::Git;
-            // Refresh git tab content on switch
             git_view::load_git_tab(state);
         }
         // 'u' in Git tab opens the checkpoint picker
-        (KeyModifiers::NONE, KeyCode::Char('u')) if state.input.is_empty()
+        (KeyModifiers::NONE, KeyCode::Char('u')) if state.input_box.is_empty()
             && state.mode == Mode::Normal
             && state.active_tab == Tab::Git => {
             let _ = execute_command("/undo", state, resolved, file)?;
         }
         // 'd' opens the full-diff overlay (only in Normal mode with git available)
-        (KeyModifiers::NONE, KeyCode::Char('d')) if state.input.is_empty()
+        (KeyModifiers::NONE, KeyCode::Char('d')) if state.input_box.is_empty()
             && state.mode == Mode::Normal
             && state.git_available => {
             if let Some(repo) = crate::git::GitRepo::open(std::path::Path::new(".")) {
@@ -2129,93 +2137,6 @@ fn handle_key(
                 }
             }
         }
-        // Ctrl+Enter, Shift+Enter, or Ctrl+Shift+Enter — insert newline at cursor
-        (m, KeyCode::Enter) if m.intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
-            if state.mode != Mode::AgentRunning && state.mode != Mode::PlanRunning {
-                state.input.insert(state.cursor, '\n');
-                state.cursor += 1;
-            }
-        }
-        // Enter — submit input
-        (KeyModifiers::NONE, KeyCode::Enter) => {
-            if state.mode == Mode::AskingUser {
-                // Submit reply to ask_user tool call
-                let answer = state.input.trim().to_string();
-                if !answer.is_empty() {
-                    state.push(ConversationEntry::AskReply(answer.clone()));
-                    state.input.clear();
-                    state.cursor = 0;
-                    if let Some(tx) = state.pending_ask_reply.take() {
-                        let _ = tx.send(answer);
-                    }
-                    state.mode = Mode::AgentRunning;
-                }
-            } else if state.mode == Mode::AgentRunning || state.mode == Mode::PlanRunning {
-                // ignore while agent is running
-            } else {
-                let input = state.input.trim().to_string();
-                if !input.is_empty() {
-                    state.input.clear();
-                    state.cursor = 0;
-
-                    // Parse #path tokens and attach referenced files
-                    {
-                        let re_tokens: Vec<&str> = input.split_whitespace()
-                            .filter(|t| t.starts_with('#') && t.len() > 1)
-                            .collect();
-                        for token in re_tokens {
-                            let path = &token[1..]; // strip leading '#'
-                            if !state.attached_files.iter().any(|f| f.path == path) {
-                                match std::fs::read_to_string(path) {
-                                    Ok(content) => {
-                                        state.attached_files.push(AttachedFile {
-                                            path: path.to_string(),
-                                            content,
-                                        });
-                                    }
-                                    Err(_) => {} // invalid path — ignore silently
-                                }
-                            }
-                        }
-                    }
-
-                    if input.starts_with("/plan ") || input == "/plan" {
-                        let task = input.trim_start_matches("/plan").trim().to_string();
-                        if task.is_empty() {
-                            state.push(ConversationEntry::SystemMsg(
-                                "usage: /plan \"describe the task\"".to_string(),
-                            ));
-                        } else {
-                            generate_and_show_plan(task, state, resolved, ui_tx.clone());
-                        }
-                    } else if input.starts_with("/quick ") || input == "/quick" {
-                        let task = input.trim_start_matches("/quick").trim().to_string();
-                        if task.is_empty() {
-                            state.push(ConversationEntry::SystemMsg(
-                                "usage: /quick \"task\"".to_string(),
-                            ));
-                        } else {
-                            launch_quick(task, state, resolved, verbose, dry_run, ui_tx)?;
-                        }
-                    } else if input.starts_with('/') {
-                        let keep = execute_command(&input, state, resolved, file)?;
-                        if !keep {
-                            return Ok(false);
-                        }
-                    } else {
-                        // Detect pasted content (contains newlines)
-                        let line_count = input.matches('\n').count();
-                        if line_count > 0 {
-                            state.pasted_lines = Some(line_count);
-                            let input = format!("[Copied Lines +{}] {}", line_count, input);
-                            launch_agent(input, state, resolved, verbose, dry_run, ui_tx)?;
-                        } else {
-                            launch_agent(input, state, resolved, verbose, dry_run, ui_tx)?;
-                        }
-                    }
-                }
-            }
-        }
         // Tab — cycle focus through attached file chips
         (KeyModifiers::NONE, KeyCode::Tab) => {
             if state.mode == Mode::Normal && !state.attached_files.is_empty() {
@@ -2226,86 +2147,8 @@ fn handle_key(
                 });
             }
         }
-        // Backspace — remove char before cursor, or remove focused chip
-        (KeyModifiers::NONE, KeyCode::Backspace) => {
-            if state.mode != Mode::AgentRunning {
-                if let Some(idx) = state.focused_chip {
-                    if idx < state.attached_files.len() {
-                        state.attached_files.remove(idx);
-                    }
-                    state.focused_chip = if state.attached_files.is_empty() {
-                        None
-                    } else {
-                        Some(idx.min(state.attached_files.len() - 1))
-                    };
-                } else {
-                    input_backspace(&mut state.input, &mut state.cursor);
-                }
-            }
-        }
-        // Delete — remove char at cursor
-        (KeyModifiers::NONE, KeyCode::Delete) => {
-            if state.mode != Mode::AgentRunning {
-                input_delete_forward(&mut state.input, &mut state.cursor);
-            }
-        }
-        // Ctrl+Backspace — delete word before cursor
-        (KeyModifiers::CONTROL, KeyCode::Backspace) | (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
-            if state.mode != Mode::AgentRunning {
-                input_delete_word(&mut state.input, &mut state.cursor);
-            }
-        }
-        // Left arrow — move cursor left
-        (KeyModifiers::NONE, KeyCode::Left) => {
-            if state.mode != Mode::AgentRunning {
-                state.cursor = prev_char_boundary(&state.input, state.cursor);
-            }
-        }
-        // Right arrow — move cursor right
-        (KeyModifiers::NONE, KeyCode::Right) => {
-            if state.mode != Mode::AgentRunning {
-                state.cursor = next_char_boundary(&state.input, state.cursor);
-            }
-        }
-        // Ctrl+Left — jump word left
-        (KeyModifiers::CONTROL, KeyCode::Left) => {
-            if state.mode != Mode::AgentRunning {
-                state.cursor = word_left(&state.input, state.cursor);
-            }
-        }
-        // Ctrl+Right — jump word right
-        (KeyModifiers::CONTROL, KeyCode::Right) => {
-            if state.mode != Mode::AgentRunning {
-                state.cursor = word_right(&state.input, state.cursor);
-            }
-        }
-        // Home / Ctrl+A — go to start of input
-        (KeyModifiers::NONE, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
-            if state.mode != Mode::AgentRunning {
-                state.cursor = 0;
-            }
-        }
-        // End / Ctrl+E — go to end of input
-        (KeyModifiers::NONE, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
-            if state.mode != Mode::AgentRunning {
-                state.cursor = state.input.len();
-            }
-        }
-        // Ctrl+U — clear line before cursor
-        (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
-            if state.mode != Mode::AgentRunning {
-                state.input.drain(..state.cursor);
-                state.cursor = 0;
-            }
-        }
-        // Ctrl+K — clear from cursor to end
-        (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
-            if state.mode != Mode::AgentRunning {
-                state.input.truncate(state.cursor);
-            }
-        }
-        // Scroll up
-        (KeyModifiers::NONE, KeyCode::Up) => {
+        // Scroll up/down — only when in Normal/AgentRunning and textarea not focused
+        (KeyModifiers::NONE, KeyCode::Up) if matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning) => {
             if state.active_tab == Tab::Stats {
                 state.stats_scroll = state.stats_scroll.saturating_add(5);
             } else {
@@ -2319,8 +2162,7 @@ fn handle_key(
                 state.scroll = state.scroll.saturating_add(20);
             }
         }
-        // Scroll down
-        (KeyModifiers::NONE, KeyCode::Down) => {
+        (KeyModifiers::NONE, KeyCode::Down) if matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning) => {
             if state.active_tab == Tab::Stats {
                 state.stats_scroll = state.stats_scroll.saturating_sub(5);
             } else {
@@ -2334,37 +2176,154 @@ fn handle_key(
                 state.scroll = state.scroll.saturating_sub(20);
             }
         }
-        // Regular char input — insert at cursor
-        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
-            if state.mode != Mode::AgentRunning {
-                state.focused_chip = None; // typing unfocuses any chip
-                let mut buf = [0u8; 4];
-                let s = c.encode_utf8(&mut buf);
-                state.input.insert_str(state.cursor, s);
-                state.cursor += s.len();
-
-                // `#` triggers file picker (not in AskingUser mode)
-                if c == '#' && state.mode != Mode::AskingUser {
-                    let at_offset = state.cursor - 1; // offset of the `#`
-                    state.file_picker = Some(FilePickerState {
-                        all_files: gather_files(),
-                        query: String::new(),
-                        selected: 0,
-                        at_offset,
-                    });
-                    state.mode = Mode::FilePicker;
+        // Backspace — remove focused chip (if any) before delegating to input_box
+        (KeyModifiers::NONE, KeyCode::Backspace) if state.mode == Mode::Normal => {
+            if let Some(idx) = state.focused_chip {
+                if idx < state.attached_files.len() {
+                    state.attached_files.remove(idx);
                 }
+                state.focused_chip = if state.attached_files.is_empty() {
+                    None
+                } else {
+                    Some(idx.min(state.attached_files.len() - 1))
+                };
+                return Ok(true);
+            }
+            // Fall through to input_box handler below
+            state.focused_chip = None;
+            let action = state.input_box.handle_key(key);
+            if action == InputAction::Submit {
+                let text = state.input_box.get_text();
+                let input = text.trim().to_string();
+                if !input.is_empty() {
+                    return handle_submit(input, state, resolved, file, verbose, dry_run, ui_tx);
+                }
+            }
+        }
+        // Shift+Enter / Ctrl+Enter / Alt+Enter — insert newline in Normal/AskingUser
+        // Note: many terminals collapse Shift/Ctrl+Enter to plain Enter; Alt+Enter is reliable.
+        (m, KeyCode::Enter)
+            if m.intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT)
+                && matches!(state.mode, Mode::Normal | Mode::AskingUser) =>
+        {
+            state.input_box.insert_newline();
+        }
+        // All other keys in Normal/AskingUser — delegate to input_box
+        _ if matches!(state.mode, Mode::Normal | Mode::AskingUser) => {
+            state.focused_chip = None;
+            let action = state.input_box.handle_key(key);
+            match action {
+                InputAction::Passthrough => {
+                    // Not handled by input_box — ignore (special keys already caught above)
+                }
+                InputAction::Submit => {
+                    let text = state.input_box.get_text();
+                    let input = text.trim().to_string();
+                    if !input.is_empty() {
+                        state.input_box.clear();
+                        return handle_submit(input, state, resolved, file, verbose, dry_run, ui_tx);
+                    }
+                }
+                InputAction::Handled => {
+                    // After each keystroke in Normal mode, check for trigger characters
+                    if state.mode == Mode::Normal {
+                        let text = state.input_box.get_text();
 
-                // `/` at start of input triggers slash autocomplete (not in AskingUser mode)
-                if c == '/' && state.cursor == 1 && state.mode != Mode::AskingUser {
-                    state.slash_complete_selected = 0;
-                    state.mode = Mode::SlashComplete;
+                        // `#` trigger: last char on current line is `#` and it's on its own word
+                        // (word boundary: start of text or preceded by whitespace)
+                        let last_line = text.split('\n').last().unwrap_or("");
+                        let trimmed = last_line.trim_start();
+                        if trimmed == "#" || (last_line.ends_with('#') && last_line[..last_line.len()-1].ends_with(|c: char| c.is_whitespace())) {
+                            // Transfer text before `#` back into input_box, open picker
+                            let prefix = text[..text.rfind('#').unwrap_or(0)].to_string();
+                            state.input_box.clear();
+                            if !prefix.trim().is_empty() {
+                                state.input_box.set_text(&prefix);
+                            }
+                            state.input = String::new();
+                            state.cursor = 0;
+                            state.file_picker = Some(FilePickerState {
+                                all_files: gather_files(),
+                                query: String::new(),
+                                selected: 0,
+                            });
+                            state.mode = Mode::FilePicker;
+                        }
+                        // `/` at start of a single-line input: switch to slash complete
+                        else if text == "/" {
+                            state.input_box.clear();
+                            state.input = "/".to_string();
+                            state.cursor = 1;
+                            state.slash_complete_selected = 0;
+                            state.mode = Mode::SlashComplete;
+                        }
+                    }
                 }
             }
         }
         _ => {}
     }
 
+    Ok(true)
+}
+
+// ── Submit helper ─────────────────────────────────────────────────────────────
+
+fn handle_submit(
+    input: String,
+    state: &mut AppState,
+    resolved: &mut ResolvedConfig,
+    file: &mut ConfigFile,
+    verbose: bool,
+    dry_run: bool,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+) -> Result<bool> {
+    if state.mode == Mode::AskingUser {
+        state.push(ConversationEntry::AskReply(input.clone()));
+        if let Some(tx) = state.pending_ask_reply.take() {
+            let _ = tx.send(input);
+        }
+        state.mode = Mode::AgentRunning;
+        return Ok(true);
+    }
+
+    // Parse #path tokens and attach referenced files
+    {
+        let re_tokens: Vec<&str> = input.split_whitespace()
+            .filter(|t| t.starts_with('#') && t.len() > 1)
+            .collect();
+        for token in re_tokens {
+            let path = &token[1..];
+            if !state.attached_files.iter().any(|f| f.path == path) {
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    state.attached_files.push(AttachedFile { path: path.to_string(), content });
+                }
+            }
+        }
+    }
+
+    if input.starts_with("/plan ") || input == "/plan" {
+        let task = input.trim_start_matches("/plan").trim().to_string();
+        if task.is_empty() {
+            state.push(ConversationEntry::SystemMsg("usage: /plan \"describe the task\"".to_string()));
+        } else {
+            generate_and_show_plan(task, state, resolved, ui_tx.clone());
+        }
+    } else if input.starts_with("/quick ") || input == "/quick" {
+        let task = input.trim_start_matches("/quick").trim().to_string();
+        if task.is_empty() {
+            state.push(ConversationEntry::SystemMsg("usage: /quick \"task\"".to_string()));
+        } else {
+            launch_quick(task, state, resolved, verbose, dry_run, ui_tx)?;
+        }
+    } else if input.starts_with('/') {
+        let keep = execute_command(&input, state, resolved, file)?;
+        if !keep {
+            return Ok(false);
+        }
+    } else {
+        launch_agent(input, state, resolved, verbose, dry_run, ui_tx)?;
+    }
     Ok(true)
 }
 
@@ -3288,86 +3247,3 @@ fn compact_tool_action(name: &str, args_summary: &str) -> String {
     }
 }
 
-// ── Input editing helpers ─────────────────────────────────────────────────────
-
-/// Remove the character immediately before the cursor (UTF-8 safe).
-fn input_backspace(input: &mut String, cursor: &mut usize) {
-    if *cursor == 0 {
-        return;
-    }
-    let prev = prev_char_boundary(input, *cursor);
-    input.drain(prev..*cursor);
-    *cursor = prev;
-}
-
-/// Delete the character at the cursor position.
-fn input_delete_forward(input: &mut String, cursor: &mut usize) {
-    if *cursor >= input.len() {
-        return;
-    }
-    let next = next_char_boundary(input, *cursor);
-    input.drain(*cursor..next);
-}
-
-/// Delete the word immediately before the cursor (stops at whitespace boundary).
-fn input_delete_word(input: &mut String, cursor: &mut usize) {
-    if *cursor == 0 {
-        return;
-    }
-    let start = word_left(input, *cursor);
-    input.drain(start..*cursor);
-    *cursor = start;
-}
-
-/// Previous UTF-8 char boundary before `pos`.
-fn prev_char_boundary(s: &str, pos: usize) -> usize {
-    if pos == 0 {
-        return 0;
-    }
-    let mut p = pos - 1;
-    while !s.is_char_boundary(p) {
-        p -= 1;
-    }
-    p
-}
-
-/// Next UTF-8 char boundary after `pos`.
-fn next_char_boundary(s: &str, pos: usize) -> usize {
-    if pos >= s.len() {
-        return s.len();
-    }
-    let mut p = pos + 1;
-    while p <= s.len() && !s.is_char_boundary(p) {
-        p += 1;
-    }
-    p.min(s.len())
-}
-
-/// Jump to the start of the previous word (skip trailing spaces, then the word).
-fn word_left(s: &str, mut pos: usize) -> usize {
-    let bytes = s.as_bytes();
-    // Skip whitespace to the left
-    while pos > 0 && bytes[pos - 1].is_ascii_whitespace() {
-        pos -= 1;
-    }
-    // Skip non-whitespace to the left
-    while pos > 0 && !bytes[pos - 1].is_ascii_whitespace() {
-        pos -= 1;
-    }
-    pos
-}
-
-/// Jump past the end of the next word to the right.
-fn word_right(s: &str, mut pos: usize) -> usize {
-    let bytes = s.as_bytes();
-    let len = s.len();
-    // Skip whitespace to the right
-    while pos < len && bytes[pos].is_ascii_whitespace() {
-        pos += 1;
-    }
-    // Skip non-whitespace to the right
-    while pos < len && !bytes[pos].is_ascii_whitespace() {
-        pos += 1;
-    }
-    pos
-}

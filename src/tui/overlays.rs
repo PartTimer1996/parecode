@@ -77,7 +77,7 @@ pub fn draw_palette(f: &mut Frame, state: &AppState, area: Rect) {
 // ── Slash autocomplete ─────────────────────────────────────────────────────────
 
 pub fn draw_slash_complete(f: &mut Frame, state: &AppState, area: Rect) {
-    let matches = slash_filtered(&state.input);
+    let matches = slash_filtered(&state.input); // state.input used in SlashComplete mode
     if matches.is_empty() {
         return;
     }

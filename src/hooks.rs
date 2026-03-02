@@ -1,9 +1,5 @@
 /// Hooks — lifecycle commands that run at key points in the agent workflow.
 ///
-/// Auto-detection: when no hooks are explicitly configured and hooks are not
-/// disabled, `detect_language_hooks()` scans the cwd for project markers and
-/// returns sensible defaults (e.g. `cargo check -q` for Rust projects).
-///
 /// `on_edit` hooks are injected directly into the model's tool result so the
 /// model sees compile/lint errors and can self-correct immediately.
 /// `on_task_done` hooks run after the agent loop and are shown in the TUI only.
@@ -92,129 +88,7 @@ pub struct HookResult {
     pub exit_code: i32,
 }
 
-// ── Language auto-detection ────────────────────────────────────────────────────
-
-/// Scan cwd for project markers and return default hooks.
-/// Returns an empty `HookConfig` when no recognisable project is found.
-pub fn detect_language_hooks() -> HookConfig {
-    use std::path::Path;
-
-    if Path::new("Cargo.toml").exists() {
-        return HookConfig {
-            on_edit: vec!["cargo check -q".to_string()],
-            on_task_done: vec!["cargo test -q 2>&1 | tail -5".to_string()],
-            ..Default::default()
-        };
-    }
-
-    if Path::new("tsconfig.json").exists() {
-        return HookConfig {
-            on_edit: vec!["tsc --noEmit".to_string()],
-            ..Default::default()
-        };
-    }
-
-    if Path::new("go.mod").exists() {
-        return HookConfig {
-            on_edit: vec!["go build ./...".to_string()],
-            ..Default::default()
-        };
-    }
-
-    // Python: only if ruff is available
-    if (Path::new("pyproject.toml").exists() || Path::new("setup.py").exists())
-        && which_binary("ruff")
-    {
-        return HookConfig {
-            on_edit: vec!["ruff check .".to_string()],
-            ..Default::default()
-        };
-    }
-
-    HookConfig::default()
-}
-
-/// Check if a binary exists in PATH.
-fn which_binary(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 // ── Config persistence ────────────────────────────────────────────────────────
-
-/// Detect the project language and write a hooks section into the config file
-/// for `profile_name`, if one doesn't already exist.
-///
-/// Uses TOML append — preserves all existing comments and structure.
-/// Returns the detected `HookConfig` (empty if nothing was detected or config
-/// couldn't be written).
-pub fn write_hooks_to_config(profile_name: &str) -> HookConfig {
-    let detected = detect_language_hooks();
-    if detected.is_empty() {
-        return HookConfig::default();
-    }
-
-    let config_path = crate::config::config_path();
-
-    // Read existing config — bail silently if unreadable
-    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
-
-    // Don't append if a hooks section for this profile already exists
-    let hooks_header = format!("[profiles.{profile_name}.hooks]");
-    if existing.contains(&hooks_header) {
-        return detected;
-    }
-
-    // Build the hooks block with active commands for the detected language
-    // and commented examples for every other event, so the user can see options.
-    let on_edit_active = if detected.on_edit.is_empty() {
-        String::new()
-    } else {
-        let cmds: Vec<String> = detected.on_edit.iter()
-            .map(|c| format!("  \"{c}\""))
-            .collect();
-        format!("on_edit = [\n{}\n]\n", cmds.join(",\n"))
-    };
-
-    let on_task_done_active = if detected.on_task_done.is_empty() {
-        String::new()
-    } else {
-        let cmds: Vec<String> = detected.on_task_done.iter()
-            .map(|c| format!("  \"{c}\""))
-            .collect();
-        format!("on_task_done = [\n{}\n]\n", cmds.join(",\n"))
-    };
-
-    let block = format!(
-        r#"
-# ── Hooks (auto-detected) ────────────────────────────────────────────────────
-# PareCode detected your project type and configured these hooks automatically.
-# Edit freely — set hooks_disabled = true to disable all hooks for this profile.
-#
-# on_edit      — runs after every edit_file/write_file; output injected into
-#                the model's context so it can self-correct compile errors.
-# on_task_done — runs after the full agent loop; shown in TUI only.
-# on_plan_step_done — runs after each plan step passes.
-# on_session_start  — runs when the TUI starts.
-# on_session_end    — runs when the TUI exits.
-[profiles.{profile_name}.hooks]
-{on_edit_active}{on_task_done_active}# on_plan_step_done = []
-# on_session_start  = []
-# on_session_end    = []
-"#
-    );
-
-    // Append to config file (non-fatal on failure)
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&config_path) {
-        let _ = f.write_all(block.as_bytes());
-    }
-
-    detected
-}
 
 /// Write a named `HookConfig` to the config file as `[hooks.NAME]`.
 /// Used by the wizard when the user confirms their new hook configuration.
@@ -263,44 +137,51 @@ pub fn write_config_hooks(name: &str, cfg: &HookConfig) {
 }
 
 /// Persist `active_hooks = "name"` (or clear it) in the config file.
-/// Rewrites the line in-place if it exists, otherwise appends it.
+/// `active_hooks` must be a top-level TOML key (before any [section] header).
+/// This function removes any existing `active_hooks` line (wherever it is)
+/// and re-inserts it before the first [section] header so it stays top-level.
 /// Non-fatal on errors.
 pub fn write_active_hooks(name: Option<&str>) {
     let config_path = crate::config::config_path();
     let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
 
-    let new_line = match name {
-        Some(n) => format!("active_hooks = \"{n}\""),
-        None => String::new(),
+    // Strip any existing active_hooks lines (they may be misplaced inside a section)
+    let stripped: Vec<&str> = existing
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("active_hooks"))
+        .collect();
+
+    let Some(n) = name else {
+        // Clearing — just write back without the line
+        let updated = stripped.join("\n");
+        let updated = if existing.ends_with('\n') { format!("{updated}\n") } else { updated };
+        let _ = std::fs::write(&config_path, updated);
+        return;
     };
 
-    // Replace existing active_hooks line if present
-    if existing.contains("active_hooks") {
-        let updated: String = existing
-            .lines()
-            .map(|line| {
-                if line.trim_start().starts_with("active_hooks") {
-                    new_line.as_str()
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        // Preserve trailing newline
-        let updated = if existing.ends_with('\n') {
-            format!("{updated}\n")
-        } else {
-            updated
-        };
-        let _ = std::fs::write(&config_path, updated);
-    } else if let Some(n) = name {
-        // Append after the first non-comment, non-empty line (top of file)
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&config_path) {
-            let _ = f.write_all(format!("\nactive_hooks = \"{n}\"\n").as_bytes());
+    let new_line = format!("active_hooks = \"{n}\"");
+
+    // Insert before the first line that starts a [section]
+    let mut inserted = false;
+    let mut result: Vec<&str> = Vec::with_capacity(stripped.len() + 1);
+    let new_line_ref: &str = &new_line;
+    for line in &stripped {
+        if !inserted && line.trim_start().starts_with('[') {
+            result.push(new_line_ref);
+            result.push("");
+            inserted = true;
         }
+        result.push(line);
     }
+    if !inserted {
+        // No [section] found — append at end
+        result.push("");
+        result.push(new_line_ref);
+    }
+
+    let updated = result.join("\n");
+    let updated = if existing.ends_with('\n') { format!("{updated}\n") } else { updated };
+    let _ = std::fs::write(&config_path, updated);
 }
 
 // ── Runner ────────────────────────────────────────────────────────────────────
@@ -509,33 +390,6 @@ mod tests {
         assert!(config.on_plan_step_done.is_empty());
         assert!(config.on_session_start.is_empty());
         assert!(config.on_session_end.is_empty());
-    }
-
-    // ── Language detection ──────────────────────────────────────────────────────
-
-    #[test]
-    fn test_detect_language_hooks_rust() {
-        // This test will pass if Cargo.toml exists in the current directory
-        // (which it does for this Rust project)
-        let hooks = detect_language_hooks();
-        assert_eq!(hooks.on_edit, vec!["cargo check -q"]);
-        assert_eq!(hooks.on_task_done, vec!["cargo test -q 2>&1 | tail -5"]);
-        assert!(hooks.on_plan_step_done.is_empty());
-        assert!(hooks.on_session_start.is_empty());
-        assert!(hooks.on_session_end.is_empty());
-    }
-
-    #[test]
-    fn test_which_binary_exists() {
-        // Test with a binary that should exist on all Unix-like systems
-        assert!(which_binary("sh"));
-        assert!(which_binary("echo"));
-    }
-
-    #[test]
-    fn test_which_binary_not_exists() {
-        // Test with a binary that definitely doesn't exist
-        assert!(!which_binary("this_binary_definitely_does_not_exist_12345"));
     }
 
     // ── Hook runner ─────────────────────────────────────────────────────────────
