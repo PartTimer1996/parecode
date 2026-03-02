@@ -18,7 +18,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Client, Message, MessageContent};
-use crate::index::SymbolIndex;
+use crate::pie::ProjectGraph;
 use crate::tui::UiEvent;
 
 // ── Core data structures ───────────────────────────────────────────────────────
@@ -270,14 +270,14 @@ pub async fn generate_plan(
     client: &Client,
     project: &str,
     context_files: &[(String, String)], // (path, content) attached files as context
-    index: &SymbolIndex,
+    graph: &ProjectGraph,
     on_chunk: impl Fn(&str) + Send + 'static,
 ) -> Result<Plan> {
     // Build the user message: task + any attached file context
     let mut user_content = String::new();
 
-    // Inject symbol index — gives the model an accurate file map to reference
-    if let Some(index_section) = index.to_prompt_section(60) {
+    // Inject project graph — cluster-grouped file map with line counts
+    if let Some(index_section) = graph.to_prompt_section(8) {
         user_content.push_str(&index_section);
         user_content.push('\n');
     }
@@ -365,8 +365,8 @@ pub async fn generate_plan(
         .steps
         .into_iter()
         .map(|s| {
-            // Resolve any symbol names in files[] to real paths via the index
-            let mut resolved_files = index.resolve_files(&s.files);
+            // Resolve any symbol names in files[] to real paths via the graph
+            let mut resolved_files = graph.resolve_files(&s.files);
 
             // Enforce file count limits:
             // - Empty file lists are useless (step can't see anything)

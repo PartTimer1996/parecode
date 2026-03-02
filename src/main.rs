@@ -9,6 +9,7 @@ mod hooks;
 mod index;
 mod init;
 mod mcp;
+mod pie;
 mod plan;
 mod sessions;
 mod setup;
@@ -188,6 +189,18 @@ async fn run_single_shot(
     } else {
         resolved.hooks.clone()
     };
+
+    // Build or load PIE graph — always, warm or cold. 150ms is invisible against
+    // the first model roundtrip. Prints one status line so the user knows it's working.
+    let project_context = {
+        let graph_path = std::path::Path::new(".parecode/project.graph");
+        if !graph_path.exists() {
+            println!("  ◈ indexing project…");
+        }
+        let (graph, _) = pie::ProjectGraph::load_or_build(std::path::Path::new("."), 500);
+        graph.to_prompt_section(8)
+    };
+
     let config = agent::AgentConfig {
         verbose,
         dry_run,
@@ -201,6 +214,7 @@ async fn run_single_shot(
         auto_commit: false,
         auto_commit_prefix: String::new(),
         git_context: false,
+        project_context,
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<tui::UiEvent>();
@@ -309,6 +323,16 @@ async fn run_single_shot_quick(
         client.set_api_key(key.clone());
     }
     let mcp = mcp::McpClient::new(&resolved.mcp_servers).await;
+
+    let project_context = {
+        let graph_path = std::path::Path::new(".parecode/project.graph");
+        if !graph_path.exists() {
+            println!("  ◈ indexing project…");
+        }
+        let (graph, _) = pie::ProjectGraph::load_or_build(std::path::Path::new("."), 500);
+        graph.to_prompt_section(8)
+    };
+
     let config = agent::AgentConfig {
         verbose,
         dry_run: false,
@@ -322,6 +346,7 @@ async fn run_single_shot_quick(
         auto_commit: false,
         auto_commit_prefix: String::new(),
         git_context: false,
+        project_context,
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<tui::UiEvent>();

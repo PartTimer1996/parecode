@@ -23,7 +23,7 @@ const LOGO: &str = r#"
   ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
 "#;
 
-pub fn draw_splash(f: &mut Frame) {
+pub fn draw_splash(f: &mut Frame, status: &str) {
     let area = f.area();
     f.render_widget(
         Block::default().style(Style::default().bg(Color::Black)),
@@ -86,7 +86,7 @@ pub fn draw_splash(f: &mut Frame) {
     );
     f.render_widget(
         Paragraph::new(Line::from(
-            Span::styled("loading…", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+            Span::styled(status.to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
         )).alignment(Alignment::Center),
         hint_area,
     );

@@ -485,6 +485,9 @@ pub struct AppState {
     pub available_hook_presets: Vec<String>,
     /// Hook setup wizard state (Some when Mode::HookWizard)
     pub hook_wizard: Option<HookWizardState>,
+    /// Persistent project graph — loaded/built at startup, injected into every agent call.
+    /// None only before the first build completes (should not happen in normal flow).
+    pub project_graph: Option<crate::pie::ProjectGraph>,
 }
 
 impl AppState {
@@ -559,6 +562,7 @@ impl AppState {
             active_hook_preset: resolved.active_hooks.clone(),
             available_hook_presets: resolved.available_hooks.clone(),
             hook_wizard: None,
+            project_graph: None, // populated during splash in event_loop
         }
     }
 
@@ -1022,6 +1026,20 @@ async fn event_loop(
         ));
     }
 
+    // ── PIE warm status ───────────────────────────────────────────────────────
+    let graph_path = std::path::Path::new(".parecode/project.graph");
+    if graph_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(graph_path) {
+            if let Ok(g) = serde_json::from_str::<crate::pie::ProjectGraph>(&content) {
+                let cluster_count = g.clusters.len();
+                let file_count: usize = g.clusters.iter().map(|c| c.files.len()).sum();
+                state.push(ConversationEntry::SystemMsg(
+                    format!("◈ PIE  {cluster_count} clusters · {file_count} files · warm"),
+                ));
+            }
+        }
+    }
+
     // Open session (resumes existing or creates new) — loads turns and sets active_turn
     let cwd = cwd_str();
     match sessions::open_session(&cwd) {
@@ -1120,9 +1138,26 @@ async fn event_loop(
     let mut crossterm_events = EventStream::new();
     let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(120));
 
-    // Splash screen
-    terminal.draw(|f| render::draw_splash(f))?;
+    // ── Splash + PIE graph build ──────────────────────────────────────────────
+    // Determine warm/cold before drawing so we show the right hint immediately.
+    let graph_path = std::path::Path::new(".parecode/project.graph");
+    let splash_status = if graph_path.exists() {
+        "◈ loading project graph…"
+    } else {
+        "◈ Setting up Project Intelligence…"
+    };
+    terminal.draw(|f| render::draw_splash(f, splash_status))?;
+
+    // Build (cold) or load+update (warm) concurrently with the splash timer.
+    let graph_task = tokio::task::spawn_blocking(|| {
+        crate::pie::ProjectGraph::load_or_build(std::path::Path::new("."), 500)
+    });
     tokio::time::sleep(tokio::time::Duration::from_millis(1400)).await;
+    // Await graph — should already be done within the splash window; blocks if not.
+    if let Ok((graph, _was_warm)) = graph_task.await {
+        state.project_graph = Some(graph);
+    }
+
     terminal.draw(|f| render::draw(f, &mut state))?;
 
     loop {
@@ -2779,6 +2814,7 @@ fn launch_agent(
         auto_commit: resolved.auto_commit,
         auto_commit_prefix: resolved.auto_commit_prefix.clone(),
         git_context: resolved.git_context,
+        project_context: state.project_graph.as_ref().and_then(|g| g.to_prompt_section(8)),
     };
 
     let attached: Vec<(String, String)> = state.attached_files
@@ -2860,6 +2896,7 @@ fn launch_quick(
         auto_commit: false,
         auto_commit_prefix: String::new(),
         git_context: false,
+        project_context: state.project_graph.as_ref().and_then(|g| g.to_prompt_section(8)),
     };
 
     state.collecting_response.clear();
@@ -2923,8 +2960,10 @@ fn generate_and_show_plan(
         .unwrap_or("project")
         .to_string();
 
-    // Build symbol index from the project — zero model calls, pure file scan
-    let index = crate::index::SymbolIndex::build(std::path::Path::new("."), 500);
+    // Use the graph already loaded at startup; fall back to a fresh build if missing.
+    let graph = state.project_graph.clone().unwrap_or_else(|| {
+        crate::pie::ProjectGraph::build_fresh(std::path::Path::new("."), 500)
+    });
 
     tokio::spawn(async move {
         let tx_plan = ui_tx.clone();
@@ -2932,7 +2971,7 @@ fn generate_and_show_plan(
             // Forward thinking chunks so the TUI shows planning progress
             let _ = tx_plan.send(UiEvent::ThinkingChunk(chunk.to_string()));
         };
-        match plan::generate_plan(&task, &client, &project, &context_files, &index, on_chunk).await {
+        match plan::generate_plan(&task, &client, &project, &context_files, &graph, on_chunk).await {
             Ok(generated_plan) => {
                 // Save plan to disk: JSON for machine use, Markdown for human reading
                 let _ = plan::save_plan(&generated_plan);
@@ -2977,6 +3016,7 @@ fn launch_plan(
         auto_commit: resolved.auto_commit,
         auto_commit_prefix: resolved.auto_commit_prefix.clone(),
         git_context: resolved.git_context,
+        project_context: None, // executor steps have explicit file context — no project map needed
     };
 
     tokio::spawn(async move {

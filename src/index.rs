@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// A single indexed symbol.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub file: String,
@@ -21,7 +21,7 @@ pub struct Symbol {
     pub kind: SymbolKind,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SymbolKind {
     Function,
     Struct,
@@ -35,7 +35,7 @@ pub enum SymbolKind {
 }
 
 impl SymbolKind {
-    fn label(&self) -> &'static str {
+    pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::Function => "fn",
             Self::Struct   => "struct",
@@ -237,7 +237,7 @@ fn collect_files(
 
 // ── Symbol extraction ──────────────────────────────────────────────────────────
 
-fn extract_symbols(content: &str, file: &str, out: &mut Vec<Symbol>) {
+pub(crate) fn extract_symbols(content: &str, file: &str, out: &mut Vec<Symbol>) {
     let ext = Path::new(file)
         .extension()
         .map(|e| e.to_string_lossy().to_string())

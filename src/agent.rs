@@ -159,6 +159,10 @@ pub struct AgentConfig {
     pub auto_commit_prefix: String,
     /// Enable git integration: checkpoint before task, git status in system prompt, diff after.
     pub git_context: bool,
+    /// Pre-rendered project graph section for injection into the system prompt.
+    /// When Some, replaces the generic `build_project_map()` depth-2 file walk.
+    /// When None, falls back to the generic map.
+    pub project_context: Option<String>,
 }
 
 /// Run agent, emitting UiEvents to a ratatui TUI over `ui_tx`.
@@ -196,9 +200,14 @@ pub async fn run_tui(
     let mut cache = FileCache::default();
     let mut loop_detector = LoopDetector::default();
 
-    // Build system prompt: base + optional project map + optional conventions
+    // Build system prompt: base + project context (PIE graph or generic map) + conventions
     let mut system_prompt = SYSTEM_PROMPT_BASE.to_string();
-    if let Some(map) = build_project_map() {
+    if let Some(ref ctx) = config.project_context {
+        // PIE graph section — cluster-grouped with line counts, richer than the generic map
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(ctx);
+    } else if let Some(map) = build_project_map() {
+        // Fallback: generic depth-2 file walk (no graph on disk yet)
         system_prompt.push_str(&map);
     }
     if let Some(conventions) = load_conventions() {
