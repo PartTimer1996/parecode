@@ -363,7 +363,7 @@ All other `.parecode/` files are derived/learnable. If corrupt: delete and rebui
 
 ---
 
-### Phase 1.5 — Universal Graph Injection
+### ✅ Phase 1.5 — Universal Graph Injection (complete)
 
 **Goal:** Make the project graph the foundation for *all* agent interactions, not just planning. One-shot tasks and interactive sessions get the same structural orientation that planning already has. Every user gets a fully-indexed project from their very first interaction.
 
@@ -410,7 +410,7 @@ All other `.parecode/` files are derived/learnable. If corrupt: delete and rebui
 
 ---
 
-### Phase 2 — Cluster Narrative (first user-visible planning win)
+### ✅ Phase 2 — Cluster Narrative (complete)
 
 **Goal:** Planning context changes from flat symbol list to structured cluster summary. The model understands the project's architecture, not just its file tree.
 
@@ -429,68 +429,39 @@ All other `.parecode/` files are derived/learnable. If corrupt: delete and rebui
 
 ---
 
-### Phase 3 — Task Memory + Learning
+### ✅ Phase 3 — Task Memory + Learning (complete)
 
 **Goal:** Token usage measurably decreases across sessions on the same project.
 
 **Depends on:** Phase 2 (narrative + `to_context_package()` exist to inject task memory into)
 
-**What to build:**
+**What shipped:**
 
-**1. `src/task_memory.rs` (new file)**
+**1. `src/task_memory.rs` (new)**
 
-`TaskRecord` struct as defined in the data structures section above. Append to `.parecode/task_memory.jsonl` after each `AgentDone` event — both interactive and plan-mode. `summary` is extracted from the final assistant message (already in memory at `AgentDone` time; truncate/clean to ~150 chars, no model call).
+`TaskRecord` struct: `id`, `timestamp`, `task` (200 chars), `outcome`, `files_modified`, `summary` (150 chars, extracted from final assistant message at zero model cost), `tokens_used`, `files_in_context`. `append_record()` writes to `.parecode/task_memory.jsonl`. `find_relevant()` scores by `intersection × recency_weight` where `recency_weight = 1.0 / (days_ago + 1)`. `extract_summary()` strips markdown structure (headers, bullets, code fences), finds sentence boundary at 150 chars. 8 unit tests.
 
-**2. `src/context_weights.rs` (new file)**
+**2. `src/context_weights.rs` (new)**
 
-```rust
-struct ContextWeights {
-    file_weights: HashMap<String, f32>,  // default 1.0, clamped [0.2, 3.0]
-}
-```
+`ContextWeights { file_weights: HashMap<String, f32> }`, clamped `[0.2, 3.0]`. `adjust()` bumps modified files `+0.1`, reduces context-only files `-0.05`. Persisted to `.parecode/context_weights.json`. Loaded at startup in `AppState::new()`. 5 unit tests.
 
-Adjust after each task: `files_modified += 0.1`, `files_in_context but not modified -= 0.05`. Persist to `.parecode/context_weights.json`. Load at startup alongside the narrative.
+**3. `AgentDone` hook in `tui/mod.rs`**
 
-**3. Hook into `AgentDone` in `tui/mod.rs`**
+After existing telemetry: `extract_modified_files()` parses write-class tool actions (`edit_file`, `write_file`, `patch_file`, `create_file`) from `collecting_tools`. Builds `TaskRecord` with summary from `collecting_response`. Calls `append_record()` and `context_weights.adjust()` + `.save()`.
 
-```rust
-AgentDone { .. } => {
-    // existing telemetry logic unchanged
+**4. Recent tasks injected into `to_context_package()`**
 
-    // Narrative patch note
-    if let Some(ref mut narrative) = state.project_narrative {
-        narrative.patch(format!("task: {}", &state.current_task_preview));
-        narrative.save(std::path::Path::new("."));
-    }
-
-    // Append task record
-    task_memory::append_record(TaskRecord { .. });
-
-    // Adjust weights
-    context_weights::adjust(&files_modified, &files_in_context);
-}
-```
-
-**4. Inject recent tasks into `to_context_package()`**
-
-Add a `recent_tasks: &[TaskRecord]` parameter. After the Conventions section, before cluster detail:
-
+New `recent_tasks: &[TaskRecord]` parameter. After Conventions, before cluster detail:
 ```
 ## Recent relevant tasks
-- [3d ago] Updated plan.rs multi-turn loop — added narrative param, on_chunk bound changed (plan.rs, narrative.rs)
-- [12d ago] Fixed TUI splash animation — replaced static sleep with 120ms ticker (tui/mod.rs, tui/render.rs)
+- [3d ago] Updated plan.rs multi-turn loop — added narrative param (plan.rs, narrative.rs)
+- [12d ago] Fixed TUI splash animation — replaced static sleep with ticker (tui/mod.rs)
 ```
+Max 3 entries. Called from `launch_agent`, `launch_quick` (using attached files as candidates), and `generate_plan()` (using relevant cluster entry files as candidates).
 
-Max 3 entries. Ranking: `intersection_size × recency_weight` where `recency_weight = 1.0 / (days_ago + 1)`. Intersection = files in common between the current task's candidate files and each record's `files_modified`. ~60 tokens total; every token load-bearing.
+**5. `/pie status` command (Phase 4 start)**
 
-**5. Weight-informed cluster sorting**
-
-In `to_context_package()`, when no `relevant_clusters` are passed, sort clusters by the mean context weight of their `entry_files` (descending) before applying the `max_clusters` cap. A cluster whose entry files have been repeatedly touched surfaces at full detail ahead of untouched ones.
-
-**What to defer to Phase 4:**
-- Narrative re-synthesis when `patches.len() > 10` (requires per-cluster patch tracking, more complexity than it's worth now)
-- Task memory compaction (tasks >6 months old → per-cluster summary lines) — not needed until the file is large
-- Post-task incremental graph refresh across sessions — Phase 1.5 already handles in-session; cross-session persistence is just calling `graph.save()` after `AgentDone`, which is already happening
+Shows: graph health (clusters, files, age), narrative status (summary preview, cluster count, synthesis age), task memory (record count + last 3 summaries with age), context weight file count. Added to command palette and `/help`.
 
 **Validation:**
 1. Run 3 tasks touching `plan.rs`. On a 4th task mentioning "plan", the context package shows the 3 prior tasks in "Recent relevant tasks".
@@ -498,18 +469,26 @@ In `to_context_package()`, when no `relevant_clusters` are passed, sort clusters
 3. `task_memory.jsonl` is human-readable; each line has a non-empty `summary` field.
 4. Token count for planning a repeat task measurably lower by session 5+ due to pre-oriented context.
 
+**Deferred to Phase 4:**
+- Weight-informed cluster sorting (sort by `mean_weight(entry_files)` when no relevant clusters specified)
+- Narrative re-synthesis when `patches.len() > 10` per cluster
+
 ---
 
 ### Phase 4 — Polish and Observability
 
 **Goal:** Make PIE legible and controllable.
 
-**What to build:**
-- `/pie status` — show graph health, cluster count, task memory size, narrative age, last indexed time
+**What shipped (from Phase 3):**
+- ✅ `/pie status` — shows graph health, cluster count, task memory (record count + last 3 summaries), narrative age, context weight stats
+
+**Remaining:**
+- Weight-informed cluster sorting: in `to_context_package()`, when `relevant_clusters` is empty, sort by `mean_weight(entry_files)` descending before `max_clusters` cap
 - `/pie reset` — delete `.parecode/project.graph` and `narrative.json`, trigger rebuild (keep task memory)
 - `/pie explain` — show why the current context package was assembled the way it was
 - Narrative re-synthesis trigger (patches > 10 per cluster); warn in stats bar when narrative > 30 days old or > 20 patches accumulated
 - Task memory compaction: tasks >6 months old folded into per-cluster summary lines
+- Stats bar narrative staleness indicator
 
 ---
 

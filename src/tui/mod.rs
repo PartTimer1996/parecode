@@ -491,6 +491,8 @@ pub struct AppState {
     /// PIE Phase 2 narrative — architecture summary + cluster summaries + conventions.
     /// Generated once on cold startup via one model call; warm runs load instantly from disk.
     pub project_narrative: Option<crate::narrative::ProjectNarrative>,
+    /// PIE Phase 3 context weights — tracks which files are useful vs wasted per task.
+    pub context_weights: crate::context_weights::ContextWeights,
 }
 
 impl AppState {
@@ -567,6 +569,7 @@ impl AppState {
             hook_wizard: None,
             project_graph: None,     // populated during splash in event_loop
             project_narrative: None, // populated during splash in event_loop
+            context_weights: crate::context_weights::ContextWeights::load(),
         }
     }
 
@@ -660,6 +663,27 @@ impl AppState {
                     &self.profile.clone(),
                 );
                 telemetry::append_record(&record);
+
+                // PIE Phase 3: extract summary, record task, adjust context weights
+                {
+                    let summary = crate::task_memory::extract_summary(&self.collecting_response);
+                    let files_modified = extract_modified_files(&self.collecting_tools);
+                    let files_in_context: Vec<String> = self.attached_files
+                        .iter()
+                        .map(|f| f.path.clone())
+                        .collect();
+                    let task_record = crate::task_memory::TaskRecord::new(
+                        &self.current_task_preview,
+                        "solved",
+                        files_modified.clone(),
+                        &summary,
+                        input_tokens + output_tokens,
+                        files_in_context.clone(),
+                    );
+                    crate::task_memory::append_record(&task_record);
+                    self.context_weights.adjust(&files_modified, &files_in_context);
+                    self.context_weights.save();
+                }
 
                 self.push(ConversationEntry::TaskComplete {
                     input_tokens,
@@ -918,6 +942,7 @@ fn palette_commands() -> Vec<PaletteCommand> {
         PaletteCommand { key: "/stats",       label: "Open stats tab  (/stats reset to clear history)" },
         PaletteCommand { key: "/hooks",       label: "Toggle hooks on/off or switch preset (/hooks on|off|list|<preset>)" },
         PaletteCommand { key: "/list-hooks",  label: "Show all configured hooks and their status" },
+        PaletteCommand { key: "/pie",         label: "Show PIE status: graph health, narrative, task memory, context weights" },
         PaletteCommand { key: "/undo",        label: "Revert to last git checkpoint (/undo N for Nth)" },
         PaletteCommand { key: "/diff",        label: "Open full diff overlay for last task changes" },
         PaletteCommand { key: "/clear",       label: "Clear conversation" },
@@ -2340,6 +2365,38 @@ fn handle_key(
     Ok(true)
 }
 
+// ── Command registry ───────────────────────────────────────────────────────────
+
+/// Represents a parsed command with its argument (if any).
+#[derive(Debug, Clone, PartialEq)]
+enum Command {
+    Plan(String),
+    Quick(String),
+    Unknown(String),
+}
+
+impl Command {
+    /// Parse input into a command. Returns None if input doesn't start with `/`.
+    fn parse(input: &str) -> Option<Self> {
+        let input = input.trim();
+        if !input.starts_with('/') {
+            return None;
+        }
+
+        // Split on first whitespace to separate command from argument
+        let (cmd, arg) = input[1..].split_once(' ').unwrap_or((&input[1..], ""));
+        let arg = arg.trim();
+
+        match cmd {
+            "plan" if !arg.is_empty() => Some(Command::Plan(arg.to_string())),
+            "plan" => Some(Command::Plan(String::new())), // for usage error
+            "quick" if !arg.is_empty() => Some(Command::Quick(arg.to_string())),
+            "quick" => Some(Command::Quick(String::new())),
+            _ => Some(Command::Unknown(cmd.to_string())),
+        }
+    }
+}
+
 // ── Submit helper ─────────────────────────────────────────────────────────────
 
 fn handle_submit(
@@ -2375,21 +2432,29 @@ fn handle_submit(
         }
     }
 
-    if input.starts_with("/plan ") || input == "/plan" {
-        let task = input.trim_start_matches("/plan").trim().to_string();
+    // Route input through command parser
+    let cmd = Command::parse(&input);
+
+    // Handle /plan and /quick specially (they need ui_tx and other params)
+    if let Some(Command::Plan(task)) = cmd {
         if task.is_empty() {
             state.push(ConversationEntry::SystemMsg("usage: /plan \"describe the task\"".to_string()));
         } else {
             generate_and_show_plan(task, state, resolved, ui_tx.clone());
         }
-    } else if input.starts_with("/quick ") || input == "/quick" {
-        let task = input.trim_start_matches("/quick").trim().to_string();
+        return Ok(true);
+    }
+    if let Some(Command::Quick(task)) = cmd {
         if task.is_empty() {
             state.push(ConversationEntry::SystemMsg("usage: /quick \"task\"".to_string()));
         } else {
             launch_quick(task, state, resolved, verbose, dry_run, ui_tx)?;
         }
-    } else if input.starts_with('/') {
+        return Ok(true);
+    }
+
+    // All other slash commands (including unknown ones)
+    if input.starts_with('/') {
         let keep = execute_command(&input, state, resolved, file)?;
         if !keep {
             return Ok(false);
@@ -2419,7 +2484,7 @@ fn execute_command(
         }
         "/help" | "/h" => {
             state.push(ConversationEntry::SystemMsg(
-                "Commands: /plan \"task\"  /quick \"task\"  /init  /cd  /profile  /profiles  /ts  /hooks [on|off|list|<preset>]  /list-hooks  /undo [n]  /diff  /clear  /sessions  /resume [n]  /rollback [n]  /new  /quit\nCtrl+H  session history  ·  Ctrl+P  command palette  ·  d  open diff overlay\nIn plan review: ↑↓ navigate  e annotate  d clear note  a approve & run  Esc cancel\nIn git repo: press 5 for Git tab · /undo to revert · /diff to review changes".to_string(),
+                "Commands: /plan \"task\"  /quick \"task\"  /init  /cd  /profile  /profiles  /ts  /hooks [on|off|list|<preset>]  /list-hooks  /pie  /undo [n]  /diff  /clear  /sessions  /resume [n]  /rollback [n]  /new  /quit\nCtrl+H  session history  ·  Ctrl+P  command palette  ·  d  open diff overlay\nIn plan review: ↑↓ navigate  e annotate  d clear note  a approve & run  Esc cancel\nIn git repo: press 5 for Git tab · /undo to revert · /diff to review changes".to_string(),
             ));
         }
         "/stats" => {
@@ -2527,6 +2592,69 @@ fn execute_command(
             state.push(ConversationEntry::SystemMsg(
                 format!("Hooks — {status}\n{detail}\nEdit ~/.config/parecode/config.toml to change. /hooks on|off to toggle."),
             ));
+        }
+        "/pie" => {
+            let mut lines: Vec<String> = Vec::new();
+
+            // Graph health
+            match &state.project_graph {
+                Some(g) => {
+                    let mins_ago = (chrono::Utc::now().timestamp() - g.last_indexed).max(0) / 60;
+                    let age = if mins_ago < 1 { "just now".to_string() }
+                              else if mins_ago < 60 { format!("{mins_ago}m ago") }
+                              else { format!("{}h ago", mins_ago / 60) };
+                    lines.push(format!(
+                        "◈ Project graph  {} clusters · {} files · indexed {}",
+                        g.clusters.len(),
+                        g.file_lines.len(),
+                        age,
+                    ));
+                }
+                None => lines.push("◈ Project graph  not loaded".to_string()),
+            }
+
+            // Narrative
+            match &state.project_narrative {
+                Some(n) if !n.architecture_summary.is_empty() => {
+                    let age = if n.last_synthesized == 0 {
+                        "unknown".to_string()
+                    } else {
+                        let secs = (chrono::Utc::now().timestamp() - n.last_synthesized).max(0);
+                        if secs < 120 { "just now".to_string() }
+                        else if secs < 3600 { format!("{}m ago", secs / 60) }
+                        else if secs < 86_400 { format!("{}h ago", secs / 3600) }
+                        else { format!("{}d ago", secs / 86_400) }
+                    };
+                    lines.push(format!(
+                        "◈ Narrative  {} cluster summaries · synthesized {}",
+                        n.cluster_summaries.len(),
+                        age,
+                    ));
+                    lines.push(format!("  Architecture: {}", &n.architecture_summary.chars().take(80).collect::<String>()));
+                }
+                _ => lines.push("◈ Narrative  not generated (cold startup didn't complete)".to_string()),
+            }
+
+            // Task memory
+            let recent = crate::task_memory::load_recent(200);
+            if recent.is_empty() {
+                lines.push("◈ Task memory  0 records (complete a task to build history)".to_string());
+            } else {
+                lines.push(format!("◈ Task memory  {} records", recent.len()));
+                for rec in recent.iter().take(3) {
+                    lines.push(format!("  [{}] {}", rec.age_str(), &rec.summary.chars().take(70).collect::<String>()));
+                }
+            }
+
+            // Context weights
+            let weight_count = state.context_weights.file_weights.len();
+            if weight_count > 0 {
+                lines.push(format!("◈ Context weights  {} files tracked", weight_count));
+            } else {
+                lines.push("◈ Context weights  no data yet".to_string());
+            }
+
+            state.push(ConversationEntry::SystemMsg(lines.join("\n")));
         }
         "/undo" => {
             match crate::git::GitRepo::open(std::path::Path::new(".")) {
@@ -2853,8 +2981,11 @@ fn launch_agent(
         auto_commit_prefix: resolved.auto_commit_prefix.clone(),
         git_context: resolved.git_context,
         project_context: match (&state.project_narrative, &state.project_graph) {
-            (Some(n), Some(g)) if !n.architecture_summary.is_empty() =>
-                Some(n.to_context_package(g, &[], 8)),
+            (Some(n), Some(g)) if !n.architecture_summary.is_empty() => {
+                let candidate_files: Vec<String> = state.attached_files.iter().map(|f| f.path.clone()).collect();
+                let recent = crate::task_memory::find_relevant(&candidate_files, 3);
+                Some(n.to_context_package(g, &[], 8, &recent))
+            }
             (_, Some(g)) => g.to_prompt_section(8),
             _ => None,
         },
@@ -2940,8 +3071,11 @@ fn launch_quick(
         auto_commit_prefix: String::new(),
         git_context: false,
         project_context: match (&state.project_narrative, &state.project_graph) {
-            (Some(n), Some(g)) if !n.architecture_summary.is_empty() =>
-                Some(n.to_context_package(g, &[], 8)),
+            (Some(n), Some(g)) if !n.architecture_summary.is_empty() => {
+                let candidate_files: Vec<String> = state.attached_files.iter().map(|f| f.path.clone()).collect();
+                let recent = crate::task_memory::find_relevant(&candidate_files, 3);
+                Some(n.to_context_package(g, &[], 8, &recent))
+            }
             (_, Some(g)) => g.to_prompt_section(8),
             _ => None,
         },
@@ -3316,6 +3450,26 @@ fn expand_tilde(path: &str) -> String {
 
 /// Build a compact action label for session history, e.g. `edit_file(src/foo.rs)`.
 /// Extracts the path from args_summary (format: `path="src/foo.rs", ...`).
+/// Extract file paths from tool actions that write/modify files.
+/// `collecting_tools` entries look like "edit_file(src/foo.rs)" or "read_file(src/bar.rs)".
+/// Only write-class tools count as modified.
+fn extract_modified_files(tool_actions: &[String]) -> Vec<String> {
+    const WRITE_TOOLS: &[&str] = &["edit_file", "write_file", "patch_file", "create_file"];
+    let mut files = Vec::new();
+    for action in tool_actions {
+        if let Some(paren) = action.find('(') {
+            let tool_name = &action[..paren];
+            if WRITE_TOOLS.contains(&tool_name) {
+                let path = action[paren + 1..].trim_end_matches(')');
+                if !path.is_empty() && !files.contains(&path.to_string()) {
+                    files.push(path.to_string());
+                }
+            }
+        }
+    }
+    files
+}
+
 fn compact_tool_action(name: &str, args_summary: &str) -> String {
     // Try to extract path="..." from the args_summary string
     let path = args_summary

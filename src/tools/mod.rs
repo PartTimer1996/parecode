@@ -12,6 +12,58 @@ use anyhow::{anyhow, Result};
 use crate::client::Tool;
 use serde_json::Value;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Tool name constants — single source of truth
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub const TOOL_READ_FILE: &str = "read_file";
+pub const TOOL_WRITE_FILE: &str = "write_file";
+pub const TOOL_EDIT_FILE: &str = "edit_file";
+pub const TOOL_PATCH_FILE: &str = "patch_file";
+pub const TOOL_BASH: &str = "bash";
+pub const TOOL_SEARCH: &str = "search";
+pub const TOOL_LIST_FILES: &str = "list_files";
+pub const TOOL_RECALL: &str = "recall";
+pub const TOOL_ASK_USER: &str = "ask_user";
+
+// Turn thresholds for phase-adaptive tool selection
+const TURN_EXPLORATION_END: usize = 1;
+const TURN_MUTATION_START: usize = 2;
+const TURN_RECALL_USEFUL: usize = 3;
+
+/// All tool names as a slice, useful for bulk operations.
+pub fn all_tool_names() -> &'static [&'static str] {
+    &[
+        TOOL_READ_FILE,
+        TOOL_WRITE_FILE,
+        TOOL_EDIT_FILE,
+        TOOL_PATCH_FILE,
+        TOOL_BASH,
+        TOOL_SEARCH,
+        TOOL_LIST_FILES,
+        TOOL_RECALL,
+        TOOL_ASK_USER,
+    ]
+}
+
+/// Phase thresholds for adaptive tool selection.
+#[derive(Debug, Clone, Copy)]
+pub struct TurnThresholds {
+    pub exploration_end: usize,
+    pub mutation_start: usize,
+    pub recall_useful: usize,
+}
+
+impl Default for TurnThresholds {
+    fn default() -> Self {
+        Self {
+            exploration_end: TURN_EXPLORATION_END,
+            mutation_start: TURN_MUTATION_START,
+            recall_useful: TURN_RECALL_USEFUL,
+        }
+    }
+}
+
 /// All available tool definitions (sent to the model).
 pub fn all_definitions() -> Vec<Tool> {
     vec![

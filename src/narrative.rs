@@ -119,6 +119,7 @@ impl ProjectNarrative {
         graph: &ProjectGraph,
         relevant_clusters: &[&str],
         max_clusters: usize,
+        recent_tasks: &[crate::task_memory::TaskRecord],
     ) -> String {
         if self.architecture_summary.is_empty() {
             // Fallback: graph-only section (Phase 1.5 format)
@@ -139,6 +140,20 @@ impl ProjectNarrative {
             out.push_str("\n## Conventions\n");
             for conv in &self.conventions {
                 out.push_str(&format!("- {conv}\n"));
+            }
+        }
+
+        // Recent relevant tasks (Phase 3)
+        if !recent_tasks.is_empty() {
+            out.push_str("\n## Recent relevant tasks\n");
+            for task in recent_tasks.iter().take(3) {
+                let age = task.age_str();
+                let files = if task.files_modified.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", task.files_modified.join(", "))
+                };
+                out.push_str(&format!("- [{age}] {}{}\n", task.summary, files));
             }
         }
 
@@ -503,7 +518,7 @@ mod tests {
             patches: vec![],
         };
 
-        let ctx = narrative.to_context_package(&graph, &[], 8);
+        let ctx = narrative.to_context_package(&graph, &[], 8, &[]);
 
         assert!(ctx.contains("# Project architecture"), "should contain header: {ctx}");
         assert!(ctx.contains("A web service"), "should contain summary: {ctx}");
@@ -521,7 +536,7 @@ mod tests {
 
         // Empty architecture_summary → should fall back to graph.to_prompt_section()
         let narrative = ProjectNarrative::default();
-        let ctx = narrative.to_context_package(&graph, &[], 8);
+        let ctx = narrative.to_context_package(&graph, &[], 8, &[]);
         let graph_section = graph.to_prompt_section(8).unwrap_or_default();
 
         // Both should contain the same cluster structure header

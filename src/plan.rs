@@ -437,7 +437,13 @@ pub async fn generate_plan(
         if !n.architecture_summary.is_empty() {
             let relevant = find_relevant_clusters(task, graph);
             let relevant_refs: Vec<&str> = relevant.iter().map(|s| s.as_str()).collect();
-            let ctx = n.to_context_package(graph, &relevant_refs, 8);
+            // Find relevant past tasks by file overlap with relevant clusters' entry files
+            let candidate_files: Vec<String> = graph.clusters.iter()
+                .filter(|c| relevant_refs.contains(&c.name.as_str()))
+                .flat_map(|c| c.entry_files.iter().cloned())
+                .collect();
+            let recent_tasks = crate::task_memory::find_relevant(&candidate_files, 3);
+            let ctx = n.to_context_package(graph, &relevant_refs, 8, &recent_tasks);
             user_content.push_str(&ctx);
             user_content.push('\n');
         } else if let Some(index_section) = graph.to_prompt_section(8) {
