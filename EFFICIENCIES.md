@@ -68,7 +68,7 @@ Where we already win, where the gaps are, and when to close them.
 
 These don't require PIE. They close obvious leaks in the current architecture.
 
-### QW1: Strip assistant reasoning from history
+### DONE QW1: Strip assistant reasoning from history
 
 **The problem:** The model thinks out loud. Every assistant turn contains reasoning like "I need to check auth.rs to understand the token flow, then look at the interceptor..." — CoT is essential for quality but the reasoning about step 3 is irrelevant once step 3 is done.
 
@@ -82,7 +82,7 @@ These don't require PIE. They close obvious leaks in the current architecture.
 
 ---
 
-### QW2: File sizes in symbol index
+### DONE QW2: File sizes in symbol index
 
 **The problem:** `to_prompt_section()` in `index.rs` shows `src/auth.rs: fn validate_token, struct AuthError`. The model doesn't know if that file is 30 lines or 3,000 lines, so it reads defensively.
 

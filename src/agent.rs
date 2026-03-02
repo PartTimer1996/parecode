@@ -533,6 +533,19 @@ pub async fn run_tui(
             tool_calls: vec![],
         });
 
+        // ── Strip assistant reasoning from history ────────────────────────────
+        // The assistant turn that triggered these tool calls contains CoT reasoning
+        // text ("I need to check auth.rs to understand..."). Once we have the tool
+        // results, that reasoning is irrelevant and only wastes context budget.
+        // Keep: tool_calls (required by API), strip: the text content.
+        // Final assistant turns (no tool calls) are never touched — they're the
+        // visible response the user sees and may reference in follow-up turns.
+        if let Some(asst_msg) = messages.iter_mut().rev().nth(1) {
+            if asst_msg.role == "assistant" && !asst_msg.tool_calls.is_empty() {
+                asst_msg.content = MessageContent::from(String::new());
+            }
+        }
+
         // Update inflight tool count immediately after execution so the TUI
         // shows the correct count while the next API call streams.
         let _ = ui_tx.send(UiEvent::TokenStats {

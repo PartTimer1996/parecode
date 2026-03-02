@@ -57,6 +57,8 @@ pub struct SymbolIndex {
     pub symbols: Vec<Symbol>,
     /// name → list of files (a name may be defined in multiple files)
     pub by_name: HashMap<String, Vec<String>>,
+    /// file path → line count
+    pub file_lines: HashMap<String, usize>,
 }
 
 impl SymbolIndex {
@@ -83,6 +85,8 @@ impl SymbolIndex {
                 .unwrap_or(path)
                 .to_string_lossy()
                 .to_string();
+            let line_count = content.lines().count();
+            index.file_lines.insert(rel.clone(), line_count);
             extract_symbols(&content, &rel, &mut index.symbols);
         }
 
@@ -168,7 +172,10 @@ impl SymbolIndex {
             } else {
                 syms.join(", ")
             };
-            lines.push(format!("  {file}: {sym_list}"));
+            let line_info = self.file_lines.get(file.as_str())
+                .map(|n| format!(" ({n} lines)"))
+                .unwrap_or_default();
+            lines.push(format!("  {file}{line_info}: {sym_list}"));
         }
 
         if lines.is_empty() {
