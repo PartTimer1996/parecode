@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::process::Command;
+use tokio::process::Command;
 
 /// Max matches to return inline.
 const MAX_MATCHES: usize = 50;
@@ -34,7 +34,7 @@ pub fn definition() -> Value {
     })
 }
 
-pub fn execute(args: &Value) -> Result<String> {
+pub async fn execute(args: &Value) -> Result<String> {
     let pattern = args["pattern"]
         .as_str()
         .context("search: missing 'pattern'")?;
@@ -53,18 +53,19 @@ pub fn execute(args: &Value) -> Result<String> {
         cmd.arg("--glob").arg(glob);
     }
 
-    let output = cmd.output();
+    let output = cmd.output().await;
 
     // rg may not be installed — fall back to grep
     let output = match output {
         Ok(o) => o,
         Err(_) => {
-            let mut grep = Command::new("grep");
-            grep.arg("-rn")
+            Command::new("grep")
+                .arg("-rn")
                 .arg(format!("-{context_lines}"))
                 .arg(pattern)
                 .arg(path)
                 .output()
+                .await
                 .context("search: neither 'rg' nor 'grep' available")?
         }
     };

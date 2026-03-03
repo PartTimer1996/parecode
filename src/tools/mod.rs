@@ -143,7 +143,7 @@ pub fn is_native(name: &str) -> bool {
 }
 
 /// Dispatch a synchronous tool call by name.
-/// Note: "bash" and "recall" are handled asynchronously in agent.rs.
+/// Note: "bash", "search", and "recall" are handled asynchronously in agent.rs.
 pub fn dispatch(name: &str, args: &Value) -> Result<String> {
     // Static dispatch table built from single source of truth
     static TOOL_DISPATCH: &[(&str, fn(&Value) -> Result<String>)] = &[
@@ -151,11 +151,11 @@ pub fn dispatch(name: &str, args: &Value) -> Result<String> {
         (TOOL_WRITE_FILE, write::execute),
         (TOOL_EDIT_FILE, edit::execute),
         (TOOL_PATCH_FILE, patch::execute),
-        (TOOL_SEARCH, search::execute),
         (TOOL_LIST_FILES, list::execute),
-        // (TOOL_BASH, bash::execute),
-        // (TOOL_ASK_USER, ask::execute),
-        // (TOOL_RECALL, recall::execute),
+        // (TOOL_BASH, bash::execute),    // async
+        // (TOOL_SEARCH, search::execute), // async
+        // (TOOL_ASK_USER, ask::execute), // async
+        // (TOOL_RECALL, recall::execute), // async
     ];
 
     TOOL_DISPATCH

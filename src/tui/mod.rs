@@ -979,14 +979,14 @@ fn slash_filtered(input: &str) -> Vec<PaletteCommand> {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     Ok(Terminal::new(backend)?)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen);
+    let _ = execute!(terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen);
     let _ = terminal.show_cursor();
 }
 
@@ -1318,7 +1318,7 @@ async fn event_loop(
 
                     // Resume TUI
                     enable_raw_mode()?;
-                    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
+                    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableBracketedPaste)?;
                     terminal.clear()?;
 
                     match status {

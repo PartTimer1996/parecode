@@ -23,11 +23,15 @@ const SYSTEM_PROMPT_BASE: &str = r#"You are PareCode, a focused coding assistant
 - **When done, stop.** Do not summarise what you did unless asked.
 
 # Project graph
-If a project graph appears below, it contains every cluster, file, and symbol with exact line numbers — a full index of the codebase.
-- **Use it as ground truth.** It tells you which file a symbol lives in and exactly which line.
-- **Do not search for symbols in the graph.** Do not read a file to discover its contents. The graph already tells you.
-- **Read only to obtain edit hashes** for the specific lines you are about to change.
-- If no project graph appears, use `list_files` once to orient yourself, then proceed.
+When a project graph appears below, **it is the authoritative index of this codebase** — every cluster, file, and symbol with exact line numbers, pre-computed and injected for you.
+
+**You must use it.** Do not replicate its work with `search` or `bash` — that wastes tokens and produces no new information.
+- Symbol location → graph has the exact file and line. Go straight to `read_file(path, line_range=[N, M])`.
+- File structure → graph has every function/struct name. Do not read the file first to "see what's there".
+- **`search` is for call-site discovery and cross-file pattern matching — not for locating things already in the graph.**
+- Read only to obtain edit hashes for the lines you are about to change.
+
+If no project graph appears, use `list_files` once to orient yourself, then proceed.
 
 # Reading files
 **Small files (≤300 lines):** `read_file(path)` returns the full file with line numbers and hashes. One call is enough — edit immediately.
@@ -862,6 +866,7 @@ async fn dispatch_tool(
 ) -> String {
     match name {
         "bash"     => tools::bash::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]")),
+        "search"   => tools::search::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]")),
         "recall"   => tools::recall::execute(args, history).unwrap_or_else(|e| e),
         "ask_user" => tools::ask::execute(args, ui_tx.clone()).await.unwrap_or_else(|e| e),
         "edit_file" | "write_file" | "patch_file" => {
