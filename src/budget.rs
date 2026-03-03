@@ -229,4 +229,174 @@ impl LoopDetector {
     }
 }
 
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── BudgetConfig ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_budget_config_from_tokens() {
+        let config = BudgetConfig::from_context_tokens(1000);
+        assert_eq!(config.total_context, 1000);
+        assert_eq!(config.response_headroom, 150); // 15% of 1000
+        assert_eq!(config.usable(), 850);
+    }
+
+    #[test]
+    fn test_compression_threshold() {
+        let config = BudgetConfig::from_context_tokens(1000);
+        // usable = 850, threshold = 80% of 850 = 680
+        assert_eq!(config.compression_threshold(), 680);
+    }
+
+    #[test]
+    fn test_budget_config_zero_tokens() {
+        let config = BudgetConfig::from_context_tokens(0);
+        assert_eq!(config.usable(), 0);
+        assert_eq!(config.compression_threshold(), 0);
+    }
+
+    // ── Token estimation ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_estimate_tokens_empty() {
+        assert_eq!(estimate_tokens(""), 10); // overhead only
+    }
+
+    #[test]
+    fn test_estimate_tokens_short() {
+        // "hello" = 5 chars / 4 = 1 token + 10 overhead = 11
+        assert_eq!(estimate_tokens("hello"), 11);
+    }
+
+    #[test]
+    fn test_estimate_tokens_multibyte() {
+        // "café" = 4 chars (é is 2 bytes but 1 char) / 4 = 1 + 10 = 11
+        assert_eq!(estimate_tokens("café"), 11);
+    }
+
+    #[test]
+    fn test_estimate_tokens_long_string() {
+        let s = "a".repeat(1000);
+        // 1000 chars / 4 = 250 + 10 = 260
+        assert_eq!(estimate_tokens(&s), 260);
+    }
+
+    // ── compress_tool_content ────────────────────────────────────────────
+
+    #[test]
+    fn test_compress_read_file_header_with_lines() {
+        let content = "[src/main.rs — 500 lines total, showing 1-50]\n  1 [hash] | fn main() {\n  2 [hash] |     println!(\"hello\");\n  3 [hash] | }";
+        let result = compress_tool_content(content);
+        assert!(result.contains("src/main.rs"));
+        assert!(result.contains("3 lines"));
+        assert!(result.contains("compressed"));
+    }
+
+    #[test]
+    fn test_compress_read_file_header_no_lines() {
+        let content = "[src/main.rs — 50 lines total]\n  1 [hash] | fn main() {}";
+        let result = compress_tool_content(content);
+        assert!(result.contains("src/main.rs"));
+        assert!(result.contains("compressed"));
+    }
+
+    #[test]
+    fn test_compress_plain_text() {
+        let content = "This is just a plain text result.\nSecond line here.";
+        let result = compress_tool_content(content);
+        assert_eq!(result, "This is just a plain text result.");
+    }
+
+    #[test]
+    fn test_compress_short_content_unchanged() {
+        // Content <= 200 chars should be left unchanged
+        let content = "Short result";
+        let result = compress_tool_content(content);
+        // This depends on the caller to check length; function itself returns first line
+        assert_eq!(result, "Short result");
+    }
+
+    // ── LoopDetector ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_loop_detector_no_loop() {
+        let mut detector = LoopDetector::default();
+        assert!(!detector.record("read_file", r#"{"path": "a.rs"}"#));
+        assert!(!detector.record("read_file", r#"{"path": "b.rs"}"#));
+    }
+
+    #[test]
+    fn test_loop_detector_detects_repeat() {
+        let mut detector = LoopDetector::default();
+        let args = r#"{"path": "a.rs"}"#;
+        assert!(!detector.record("read_file", args));
+        // Same exact call should trigger loop detection
+        assert!(detector.record("read_file", args));
+    }
+
+    #[test]
+    fn test_loop_detector_different_args_no_loop() {
+        let mut detector = LoopDetector::default();
+        assert!(!detector.record("read_file", r#"{"path": "a.rs"}"#));
+        assert!(!detector.record("read_file", r#"{"path": "b.rs"}"#));
+        // Third different call shouldn't trigger
+        assert!(!detector.record("read_file", r#"{"path": "c.rs"}"#));
+    }
+
+    #[test]
+    fn test_loop_detector_different_tools() {
+        let mut detector = LoopDetector::default();
+        assert!(!detector.record("read_file", r#"{"path": "a.rs"}"#));
+        assert!(!detector.record("edit_file", r#"{"path": "a.rs"}"#));
+    }
+
+    #[test]
+    fn test_loop_detector_eviction() {
+        let mut detector = LoopDetector::default();
+        // Record 6 unique calls, first should be evicted
+        for i in 0..6 {
+            let args = format!(r#"{{"path": "{}.rs"}}"#, i);
+            detector.record("read_file", &args);
+        }
+        // All are unique, so no loop
+        let args = r#"{"path": "0.rs"}"#;
+        assert!(!detector.record("read_file", args));
+    }
+
+    // ── Budget enforcement (integration) ─────────────────────────────────
+
+    #[test]
+    fn test_budget_under_threshold_no_compression() {
+        let budget = Budget::new(1000); // threshold = 680
+        let messages = vec![];
+        let (tokens, compressed) = budget.enforce(&mut messages.clone(), 0);
+        assert_eq!(compressed, false);
+        assert!(tokens <= 680);
+    }
+
+    #[test]
+    fn test_budget_preserves_first_message() {
+        let budget = Budget::new(1000);
+        let mut messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Text("My task".to_string()),
+                tool_calls: vec![],
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Text("I'll help".to_string()),
+                tool_calls: vec![],
+            },
+        ];
+        budget.enforce(&mut messages, 0);
+        // First message must always remain
+        assert_eq!(messages[0].role, "user");
+    }
+}
+
 

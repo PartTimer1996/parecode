@@ -668,10 +668,16 @@ impl AppState {
                 {
                     let summary = crate::task_memory::extract_summary(&self.collecting_response);
                     let files_modified = extract_modified_files(&self.collecting_tools);
-                    let files_in_context: Vec<String> = self.attached_files
+                    // files_in_context = attached files + any files the agent read via tools
+                    let mut files_in_context: Vec<String> = self.attached_files
                         .iter()
                         .map(|f| f.path.clone())
                         .collect();
+                    for f in extract_read_files(&self.collecting_tools) {
+                        if !files_in_context.contains(&f) {
+                            files_in_context.push(f);
+                        }
+                    }
                     let task_record = crate::task_memory::TaskRecord::new(
                         &self.current_task_preview,
                         "solved",
@@ -2982,9 +2988,11 @@ fn launch_agent(
         git_context: resolved.git_context,
         project_context: match (&state.project_narrative, &state.project_graph) {
             (Some(n), Some(g)) if !n.architecture_summary.is_empty() => {
-                let candidate_files: Vec<String> = state.attached_files.iter().map(|f| f.path.clone()).collect();
+                let attached_paths: Vec<String> = state.attached_files.iter().map(|f| f.path.clone()).collect();
+                let candidate_files = g.resolve_candidate_files(&task, &attached_paths);
+                let relevant_clusters = g.clusters_for_files(&candidate_files);
                 let recent = crate::task_memory::find_relevant(&candidate_files, 3);
-                Some(n.to_context_package(g, &[], 8, &recent))
+                Some(n.to_context_package(g, &relevant_clusters, 8, &recent))
             }
             (_, Some(g)) => g.to_prompt_section(8),
             _ => None,
@@ -3072,9 +3080,11 @@ fn launch_quick(
         git_context: false,
         project_context: match (&state.project_narrative, &state.project_graph) {
             (Some(n), Some(g)) if !n.architecture_summary.is_empty() => {
-                let candidate_files: Vec<String> = state.attached_files.iter().map(|f| f.path.clone()).collect();
+                let attached_paths: Vec<String> = state.attached_files.iter().map(|f| f.path.clone()).collect();
+                let candidate_files = g.resolve_candidate_files(&task, &attached_paths);
+                let relevant_clusters = g.clusters_for_files(&candidate_files);
                 let recent = crate::task_memory::find_relevant(&candidate_files, 3);
-                Some(n.to_context_package(g, &[], 8, &recent))
+                Some(n.to_context_package(g, &relevant_clusters, 8, &recent))
             }
             (_, Some(g)) => g.to_prompt_section(8),
             _ => None,
@@ -3460,6 +3470,25 @@ fn extract_modified_files(tool_actions: &[String]) -> Vec<String> {
         if let Some(paren) = action.find('(') {
             let tool_name = &action[..paren];
             if WRITE_TOOLS.contains(&tool_name) {
+                let path = action[paren + 1..].trim_end_matches(')');
+                if !path.is_empty() && !files.contains(&path.to_string()) {
+                    files.push(path.to_string());
+                }
+            }
+        }
+    }
+    files
+}
+
+/// Extract all file paths the agent read (but did not necessarily modify).
+/// Includes both read_file actions and write-class actions.
+fn extract_read_files(tool_actions: &[String]) -> Vec<String> {
+    const READ_TOOLS: &[&str] = &["read_file", "view_file", "edit_file", "write_file", "patch_file", "create_file"];
+    let mut files = Vec::new();
+    for action in tool_actions {
+        if let Some(paren) = action.find('(') {
+            let tool_name = &action[..paren];
+            if READ_TOOLS.contains(&tool_name) {
                 let path = action[paren + 1..].trim_end_matches(')');
                 if !path.is_empty() && !files.contains(&path.to_string()) {
                     files.push(path.to_string());

@@ -176,6 +176,61 @@ impl GitRepo {
     }
 }
 
+// ── Post-task summary ──────────────────────────────────────────────────────────
+
+/// Result of `GitRepo::post_task()` — data the caller maps to UI events.
+#[derive(Debug, Default)]
+pub struct PostTaskResult {
+    /// `git diff <checkpoint> --stat` output (trimmed), if there were changes.
+    pub diff_stat: Option<String>,
+    /// Number of files mentioned in the stat (lines containing '|').
+    pub files_changed: usize,
+    /// Commit message if auto-commit succeeded.
+    pub auto_committed: Option<String>,
+    /// Error message from auto-commit if it failed.
+    pub commit_error: Option<String>,
+}
+
+impl GitRepo {
+    /// Compute a diff stat since `checkpoint_hash` and optionally auto-commit.
+    ///
+    /// `commit_prefix` + first 72 chars of `task_summary` becomes the commit message.
+    /// Returns a `PostTaskResult` describing what happened; never returns `Err`.
+    pub fn post_task(
+        &self,
+        checkpoint_hash: &str,
+        task_summary: &str,
+        auto_commit: bool,
+        commit_prefix: &str,
+    ) -> PostTaskResult {
+        let mut result = PostTaskResult::default();
+
+        if let Ok(stat) = self.diff_stat_from(checkpoint_hash) {
+            if !stat.trim().is_empty() {
+                result.files_changed = stat.lines().filter(|l| l.contains('|')).count();
+                result.diff_stat = Some(stat.trim().to_string());
+            }
+        }
+
+        if auto_commit {
+            let summary: String = task_summary
+                .lines()
+                .next()
+                .unwrap_or(task_summary)
+                .chars()
+                .take(72)
+                .collect();
+            let msg = format!("{commit_prefix}{summary}");
+            match self.auto_commit(&msg) {
+                Ok(()) => result.auto_committed = Some(msg),
+                Err(e) => result.commit_error = Some(format!("auto-commit: {e}")),
+            }
+        }
+
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,5 +557,64 @@ mod tests {
         assert!(checkpoints[19].message.contains("5"));
     }
 
+    // ── post_task ───────────────────────────────────────────────────────────────
 
+    #[test]
+    fn test_post_task_no_changes() {
+        let (_dir, repo) = setup_git_repo();
+        let hash = repo.checkpoint("test").unwrap();
+        let result = repo.post_task(&hash, "some task", false, "parecode: ");
+        assert!(result.diff_stat.is_none(), "no changes → no diff_stat");
+        assert_eq!(result.files_changed, 0);
+        assert!(result.auto_committed.is_none());
+        assert!(result.commit_error.is_none());
+    }
+
+    #[test]
+    fn test_post_task_with_changes_no_commit() {
+        let (_dir, repo) = setup_git_repo();
+        let hash = repo.checkpoint("test").unwrap();
+        fs::write(repo.root.join("file1.txt"), "modified content").unwrap();
+        let result = repo.post_task(&hash, "edit file1", false, "parecode: ");
+        assert!(result.diff_stat.is_some(), "changes → diff_stat present");
+        assert!(result.diff_stat.as_ref().unwrap().contains("file1.txt"));
+        assert!(result.files_changed >= 1);
+        assert!(result.auto_committed.is_none(), "auto_commit=false → no commit");
+    }
+
+    #[test]
+    fn test_post_task_auto_commit() {
+        let (_dir, repo) = setup_git_repo();
+        let hash = repo.checkpoint("test").unwrap();
+        fs::write(repo.root.join("new.txt"), "hello").unwrap();
+        let result = repo.post_task(&hash, "add new file\nextra line", true, "parecode: ");
+        assert!(result.auto_committed.is_some());
+        let msg = result.auto_committed.unwrap();
+        // Message should use first line of task only, with prefix
+        assert!(msg.starts_with("parecode: "));
+        assert!(msg.contains("add new file"));
+        assert!(!msg.contains("extra line"), "only first line used");
+        assert!(result.commit_error.is_none());
+    }
+
+    #[test]
+    fn test_post_task_commit_message_truncated_at_72() {
+        let (_dir, repo) = setup_git_repo();
+        let hash = repo.checkpoint("test").unwrap();
+        fs::write(repo.root.join("x.txt"), "y").unwrap();
+        let long_task = "a".repeat(100);
+        let result = repo.post_task(&hash, &long_task, true, "p: ");
+        let msg = result.auto_committed.unwrap();
+        // prefix (3) + 72 chars from task = 75 chars max
+        assert!(msg.len() <= 75, "message len {} exceeds 75", msg.len());
+    }
+
+    #[test]
+    fn test_post_task_invalid_hash_no_panic() {
+        let (_dir, repo) = setup_git_repo();
+        // Bad hash → diff_stat_from returns Err → graceful empty result
+        let result = repo.post_task("badhash", "task", false, "p: ");
+        assert!(result.diff_stat.is_none());
+        assert_eq!(result.files_changed, 0);
+    }
 }

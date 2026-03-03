@@ -18,163 +18,127 @@ const SYSTEM_PROMPT_BASE: &str = r#"You are PareCode, a focused coding assistant
 
 # Core principles
 - Act decisively. When you know what to change, apply the edit immediately.
-- Use the minimum tool calls needed. Every unnecessary read or search costs tokens and time.
-- When a task is complete, say so clearly and stop calling tools.
-- For routine actions, just do it. Use ask_user ONLY when genuinely uncertain between approaches that significantly affect the outcome.
+- Minimum tool calls. Every unnecessary read or search wastes tokens and slows the task.
+- When done, say so and stop.
+- Ask early. If the task is vague or could go multiple ways, ask_user BEFORE reading files. One question saves more tokens than ten reads.
 
-# Project context — trust it, use it
-The system prompt includes a project graph with cluster summaries, key files, and symbol lists.
-- **Do not search or read just to locate something** — the graph tells you which file contains it.
-- **Do not read a file to understand its structure** — the symbol list already shows every function/struct with line numbers.
-- The graph is current. Treat it as ground truth for navigation.
+# The project graph — use it, trust it
+The system prompt contains a pre-built project graph: cluster summaries, key files, and a symbol list with every function and struct already located.
+- **The graph tells you which file a symbol lives in.** Do not search for it.
+- **The graph shows every function name and its approximate line number.** Do not read a file just to understand what it contains.
+- Read only to get edit hashes for a specific section you are about to change.
 
-# Reading files efficiently
-- **Large files (>300 lines):** read_file returns preamble + symbol index + tail automatically. Use the symbol line numbers to read only the section you need: `line_range=[start, end]`.
-- **Small files (≤300 lines):** returned in full on the first read. No follow-up needed.
-- **Never read a file you've already read this session** — use the `recall` tool to retrieve the previous output instead.
-- **Never read a file just to find a function name** — it's in the symbol index. Read only to get the editable content (hashes) for a specific section you're about to change.
+# Read workflow
+**Small files (≤300 lines):** `read_file(path)` returns the full file with hashes. One call — edit immediately from those hashes.
 
-# Edit workflow — minimal reads
-1. If you need to edit a known function: `read_file(path, line_range=[N-5, N+30])` — targeted, not the whole file.
-2. Use the hash from that read as the anchor. Edit immediately.
-3. `edit_file` returns a fresh excerpt after every successful edit — those hashes are valid for follow-up edits. Do NOT re-read.
-4. After editing source files: run `bash` to verify it compiles. That's the only post-edit check needed.
+**Large files (>300 lines):** `read_file(path)` returns preamble + symbol index (function names + line numbers) + tail.
+- The symbol index tells you exactly where each function starts.
+- Follow up with `read_file(path, line_range=[N-2, N+40])` to get only that section with hashes.
+- Do not read the whole file. Do not search for the function name. The index already told you where it is.
 
-# File mutation rules
-- write_file: ONLY for creating brand-new files. Never use on existing files.
-- edit_file: for modifying existing files — single-location changes, appending, inserting.
-- patch_file: for changing 3+ non-adjacent locations in the same file in one go.
-- ONE edit per file per response. Hashes change after every edit — wait for the result before the next edit to the same file.
-- In plan mode, line numbers in the "Completed steps" preamble are STALE. Always use anchors from the pre-loaded file content.
+**Never re-read a file already read this session.** Use `recall` to retrieve any previous tool output instead.
 
-# search — when NOT to use it
-- Do NOT use search to locate a function or type you're about to edit — use the symbol index from read_file instead.
-- Do NOT use search after an edit to "verify" the change — the edit_file result shows the updated lines.
-- DO use search when: finding all call sites before a rename, checking if a pattern exists across multiple files, or confirming a string was fully removed after a replacement task.
+# Edit workflow — the hash lifecycle
+1. Read the section → get hashes.
+2. `edit_file` with `old_str` taken verbatim from that read → succeeds.
+3. **The edit result contains a fresh ±15 line window with updated hashes for that region of the file.**
+4. Next edit to the same region: use the hashes from step 3. The hashes from step 1 are now stale.
+5. Next edit to a different region of the same file: `read_file(path, line_range=[...])` for that new location.
+6. **Never use hashes from before an edit to the same file — they are stale the moment the file changes.**
 
-# recall
-- Tool outputs are summarised in history after a few turns. Use recall to retrieve the full output of any previous tool call — it's always cheaper than re-reading."#;
+ONE edit per response. Every write invalidates all previously seen hashes for that file.
 
-/// Build a compact project file map to inject into the system prompt.
-/// Walks depth-2, ignores noise dirs, caps at 80 paths.
-/// Returns None if cwd doesn't look like a code project.
-fn build_project_map() -> Option<String> {
-    use std::path::Path;
+# File mutation
+- `write_file`: new files only. Never on existing files.
+- `edit_file`: single-location changes, inserts, appends.
+- `patch_file`: 3+ non-adjacent locations in one file — do them all in one call instead of multiple edits.
+- Plan mode: line numbers in "Completed steps" preamble are stale. Use anchors from pre-loaded content only.
 
-    // Only inject if there's a recognisable project root marker
-    let markers = [
-        "Cargo.toml", "package.json", "pyproject.toml", "go.mod",
-        "Makefile", "CMakeLists.txt", ".parecode", "src",
-    ];
-    if !markers.iter().any(|m| Path::new(m).exists()) {
-        return None;
+# When not to use search
+- NOT to locate a function → the symbol index has the line number
+- NOT to verify an edit was applied → the edit result already shows the updated lines with new hashes
+- YES for: finding all call sites before rename, cross-file pattern existence check, confirming a string is fully removed
+
+# Verification
+After editing source: run `bash` to compile. That is the only verification needed — the edit result already confirmed the change was written."#;
+
+/// Quick mode — single API call, no multi-turn loop, minimal context.
+/// Targets < 2k tokens total. No file loading, no session history.
+/// Allows at most 1 tool call before returning (edit_file, search, bash read-only).
+pub async fn run_quick(
+    task: &str,
+    client: &Client,
+    config: &AgentConfig,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+) -> Result<()> {
+    let task_start = std::time::Instant::now();
+    let task_cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "unknown".to_string());
+    const QUICK_SYSTEM: &str = "You are PareCode in quick mode. Answer concisely in one response. \
+If a tool call is needed, make exactly one — prefer edit_file or search. \
+Do not read files unless strictly necessary. Keep responses short.";
+
+    // Lean tool list — only the tools that make sense for quick tasks
+    let quick_tools: Vec<crate::client::Tool> = tools::all_definitions()
+        .into_iter()
+        .filter(|t| matches!(t.name.as_str(), "edit_file" | "search" | "read_file" | "bash"))
+        .collect();
+
+    let messages = vec![Message {
+        role: "user".to_string(),
+        content: MessageContent::from(task.to_string()),
+        tool_calls: vec![],
+    }];
+
+    let tx_clone = ui_tx.clone();
+    let response = client
+        .chat(QUICK_SYSTEM, &messages, &quick_tools, move |chunk| {
+            let _ = tx_clone.send(UiEvent::Chunk(chunk.to_string()));
+        })
+        .await?;
+
+    let total_input = response.input_tokens;
+    let total_output = response.output_tokens;
+
+    // Send token stats so TUI tracks inflight usage (survives cancel/crash)
+    let _ = ui_tx.send(UiEvent::TokenStats {
+        _input: total_input,
+        _output: total_output,
+        total_input,
+        total_output,
+        tool_calls: 0,
+    }); 
+
+    // Execute at most one tool call
+    if let Some(tc) = response.tool_calls.first() {
+        let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+        let kind = ToolKind::classify(&tc.name, &args);
+        let mut cache = FileCache::default();
+        let history = History::default();
+        let _ = ui_tx.send(UiEvent::ToolCall {
+            name: tc.name.clone(),
+            args_summary: format_args_summary(&args),
+        });
+        let raw = dispatch_tool(&tc.name, &args, &kind, &mut cache, &history, &ui_tx, &config.mcp).await;
+        let _ = ui_tx.send(UiEvent::ToolResult {
+            summary: raw.lines().take(30).collect::<Vec<_>>().join("\n"),
+        });
     }
 
-    const MAX_ENTRIES: usize = 80;
-    const IGNORED: &[&str] = &[
-        "node_modules", ".git", "target", ".next", "dist", "build",
-        "__pycache__", ".venv", "venv", ".cache", "coverage", ".idea",
-    ];
-
-    let mut paths: Vec<String> = Vec::new();
-    collect_paths(Path::new("."), 0, 2, IGNORED, &mut paths, MAX_ENTRIES);
-
-    if paths.is_empty() {
-        return None;
-    }
-
-    let map = paths.join("\n");
-    Some(format!("\n\n# Project layout\n\n{map}"))
-}
-
-fn collect_paths(
-    dir: &std::path::Path,
-    depth: usize,
-    max_depth: usize,
-    ignored: &[&str],
-    out: &mut Vec<String>,
-    cap: usize,
-) {
-    if out.len() >= cap {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| {
-        let is_file = e.file_type().map(|t| t.is_file()).unwrap_or(false);
-        (is_file as u8, e.file_name())
+    let _ = ui_tx.send(UiEvent::AgentDone {
+        input_tokens: total_input,
+        output_tokens: total_output,
+        tool_calls: response.tool_calls.len().min(1),
+        compressed_count: 0,
+        duration_secs: task_start.elapsed().as_secs() as u32,
+        cwd: task_cwd,
     });
 
-    for entry in entries {
-        if out.len() >= cap {
-            break;
-        }
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        // Skip hidden files/dirs and ignored dirs
-        if name_str.starts_with('.') && name_str != ".parecode" {
-            continue;
-        }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let path = entry.path();
-        let display = path.to_string_lossy().trim_start_matches("./").to_string();
-
-        if is_dir {
-            if ignored.contains(&name_str.as_ref()) {
-                continue;
-            }
-            out.push(format!("{display}/"));
-            if depth < max_depth {
-                collect_paths(&path, depth + 1, max_depth, ignored, out, cap);
-            }
-        } else {
-            out.push(display);
-        }
-    }
+    Ok(())
 }
 
-/// Load project conventions from AGENTS.md, CLAUDE.md, or .parecode/conventions.md.
-/// Returns None if no conventions file is found.
-fn load_conventions() -> Option<String> {
-    let candidates = [
-        "AGENTS.md",
-        "CLAUDE.md",
-        ".parecode/conventions.md",
-    ];
-    for path in &candidates {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            let trimmed = content.trim().to_string();
-            if !trimmed.is_empty() {
-                return Some(format!("\n\n# Project conventions ({path})\n\n{trimmed}"));
-            }
-        }
-    }
-    None
-}
-
-pub struct AgentConfig {
-    pub verbose: bool,
-    pub dry_run: bool,
-    pub context_tokens: u32,
-    pub _profile_name: String,
-    pub _model: String,
-    pub _show_timestamps: bool,
-    pub mcp: Arc<McpClient>,
-    /// Resolved hook commands (may be from explicit config or auto-detected).
-    pub hooks: Arc<HookConfig>,
-    /// When false, all hooks are suppressed for this run (set by `/hooks off`).
-    pub hooks_enabled: bool,
-    /// Auto-commit all changes after successful task completion.
-    pub auto_commit: bool,
-    /// Prefix for auto-commit messages (e.g. "parecode: ").
-    pub auto_commit_prefix: String,
-    /// Enable git integration: checkpoint before task, git status in system prompt, diff after.
-    pub git_context: bool,
-    /// Pre-rendered project graph section for injection into the system prompt.
-    /// When Some, replaces the generic `build_project_map()` depth-2 file walk.
-    /// When None, falls back to the generic map.
-    pub project_context: Option<String>,
-}
 
 /// Run agent, emitting UiEvents to a ratatui TUI over `ui_tx`.
 /// `attached` is a list of (path, content) pairs pre-loaded by the user via @.
@@ -211,57 +175,21 @@ pub async fn run_tui(
     let mut cache = FileCache::default();
     let mut loop_detector = LoopDetector::default();
 
-    // Build system prompt: base + project context (PIE graph or generic map) + conventions
-    let mut system_prompt = SYSTEM_PROMPT_BASE.to_string();
-    if let Some(ref ctx) = config.project_context {
-        // PIE graph section — cluster-grouped with line counts, richer than the generic map
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(ctx);
-    } else if let Some(map) = build_project_map() {
-        // Fallback: generic depth-2 file walk (no graph on disk yet)
-        system_prompt.push_str(&map);
-    }
-    if let Some(conventions) = load_conventions() {
-        system_prompt.push_str(&conventions);
-    }
-    // ── Git status injection ──────────────────────────────────────────────────
-    // Inject `git status --short` so the model knows what files are uncommitted.
-    // Skips silently if not in a git repo or git_context is disabled.
-    if config.git_context {
-        if let Some(status) = std::env::current_dir()
+    // Fetch git status once so build_system_prompt stays pure.
+    let git_status: Option<String> = if config.git_context {
+        std::env::current_dir()
             .ok()
             .and_then(|cwd| crate::git::GitRepo::open(&cwd))
             .and_then(|repo| repo.status_short().ok())
             .filter(|s| !s.trim().is_empty())
-        {
-            system_prompt.push_str(&format!(
-                "\n\n# Git status\n\n```\n{}\n```",
-                status.trim()
-            ));
-        }
-    }
+    } else {
+        None
+    };
+    let system_prompt = build_system_prompt(config, git_status.as_deref());
     let system_prompt = system_prompt.as_str();
     let system_tokens = crate::budget::estimate_tokens(system_prompt);
 
-    // Build the first user message:
-    //   1. Prior session context (summaries of earlier turns, if any)
-    //   2. Attached file contents (files pinned via @ in TUI)
-    //   3. The task itself
-    let user_content = {
-        let mut s = String::new();
-        if let Some(ctx) = prior_context {
-            s.push_str(&ctx);
-        }
-        if !attached.is_empty() {
-            s.push_str("The following files have been attached for context:\n\n");
-            for (path, content) in &attached {
-                s.push_str(&format!("[{path}]\n{content}\n\n"));
-            }
-            s.push_str("---\n\n");
-        }
-        s.push_str(task);
-        s
-    };
+    let user_content = build_user_message(task, prior_context.as_deref(), &attached);
 
     // ── Git checkpoint ────────────────────────────────────────────────────────
     // Create a checkpoint before the task starts. If the tree is dirty, this
@@ -318,74 +246,24 @@ pub async fn run_tui(
         tools.extend(mcp_tool_defs.iter().cloned());
 
         // ── Call the model ────────────────────────────────────────────────────
-        // Split <think>...</think> tokens into ThinkingChunk events so the TUI
-        // can render model reasoning separately from the actual response text.
+        // ThinkParser splits <think>…</think> blocks from normal text so the TUI
+        // can render reasoning separately. It owns all buffering state — no Arc/Mutex needed.
         let tx_clone = ui_tx.clone();
-        let in_think = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let think_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let in_think_c = in_think.clone();
-        let think_buf_c = think_buf.clone();
+        let parser = std::sync::Arc::new(std::sync::Mutex::new(ThinkParser::new()));
+        let parser_c = parser.clone();
         let response = client
             .chat(system_prompt, &messages, &tools, move |chunk| {
-                // Accumulate into a small lookahead buffer to handle tags split across chunks
-                think_buf_c.lock().unwrap().push_str(chunk);
-                loop {
-                    let buf = think_buf_c.lock().unwrap().clone();
-                    if in_think_c.load(std::sync::atomic::Ordering::Relaxed) {
-                        // Looking for </think>
-                        if let Some(pos) = buf.find("</think>") {
-                            let thinking = &buf[..pos];
-                            if !thinking.is_empty() {
-                                let _ = tx_clone.send(UiEvent::ThinkingChunk(thinking.to_string()));
-                            }
-                            *think_buf_c.lock().unwrap() = buf[pos + 8..].to_string();
-                            in_think_c.store(false, std::sync::atomic::Ordering::Relaxed);
-                        } else {
-                            // No close tag yet — flush all but last 8 chars (tag might be split)
-                            // Use floor_char_boundary so we don't slice inside a multi-byte char.
-                            let keep_bytes = buf.len().saturating_sub(8);
-                            let keep = buf.floor_char_boundary(keep_bytes);
-                            if keep > 0 {
-                                let _ = tx_clone.send(UiEvent::ThinkingChunk(buf[..keep].to_string()));
-                                *think_buf_c.lock().unwrap() = buf[keep..].to_string();
-                            }
-                            break;
-                        }
-                    } else {
-                        // Looking for <think>
-                        if let Some(pos) = buf.find("<think>") {
-                            let before = &buf[..pos];
-                            if !before.is_empty() {
-                                let _ = tx_clone.send(UiEvent::Chunk(before.to_string()));
-                            }
-                            *think_buf_c.lock().unwrap() = buf[pos + 7..].to_string();
-                            in_think_c.store(true, std::sync::atomic::Ordering::Relaxed);
-                        } else {
-                            // No open tag — flush all but last 7 chars.
-                            // saturating_sub gives a byte offset; step back to a
-                            // char boundary so multi-byte chars (e.g. em-dash) don't panic.
-                            let keep_bytes = buf.len().saturating_sub(7);
-                            let keep = buf.floor_char_boundary(keep_bytes);
-                            if keep > 0 {
-                                let _ = tx_clone.send(UiEvent::Chunk(buf[..keep].to_string()));
-                                *think_buf_c.lock().unwrap() = buf[keep..].to_string();
-                            }
-                            break;
-                        }
-                    }
-                }
+                let (normal, thinking) = parser_c.lock().unwrap().push(chunk);
+                if !normal.is_empty() { let _ = tx_clone.send(UiEvent::Chunk(normal)); }
+                if !thinking.is_empty() { let _ = tx_clone.send(UiEvent::ThinkingChunk(thinking)); }
             })
             .await?;
-        // Flush any remaining buffer content
+        // Drain any remainder held back by the lookahead buffer.
         {
-            let remainder = think_buf.lock().unwrap().clone();
-            if !remainder.is_empty() {
-                if in_think.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = ui_tx.send(UiEvent::ThinkingChunk(remainder));
-                } else {
-                    let _ = ui_tx.send(UiEvent::Chunk(remainder));
-                }
-            }
+            let p = std::mem::replace(&mut *parser.lock().unwrap(), ThinkParser::new());
+            let (normal, thinking) = p.finish();
+            if !normal.is_empty() { let _ = ui_tx.send(UiEvent::Chunk(normal)); }
+            if !thinking.is_empty() { let _ = ui_tx.send(UiEvent::ThinkingChunk(thinking)); }
         }
 
         total_input_tokens += response.input_tokens;
@@ -417,134 +295,23 @@ pub async fn run_tui(
         // ── Execute tool calls ────────────────────────────────────────────────
         // All tool calls from a single response are executed and all results
         // returned together (required by the OpenAI API spec).
-        //
-        // Dependency guard: if the model batches multiple mutating calls
-        // targeting the same file, only the first is executed. The rest get a
-        // stub result telling the model to re-plan after seeing that result.
-        // This prevents speculative chaining (e.g. append then edit the
-        // just-appended content with stale anchors).
-        //
-        // Read-only calls (read_file, search, list_files, bash) are always
-        // executed regardless — they don't mutate state so batching is safe.
         let mut tool_results: Vec<ContentPart> = Vec::new();
-        // Track which files have been mutated in this batch
         let mut mutated_files: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for tc in &response.tool_calls {
             tool_call_count += 1;
-
-            // Extract the target path for mutation-detection (edit/write/append ops)
-            let is_mutating = matches!(tc.name.as_str(), "edit_file" | "write_file" | "patch_file");
-            let target_path = if is_mutating {
-                serde_json::from_str::<serde_json::Value>(&tc.arguments)
-                    .ok()
-                    .and_then(|v| v["path"].as_str().map(|s| s.to_string()))
-            } else {
-                None
-            };
-
-            // Stub out dependent mutations: same file already mutated this batch
-            let content = if let Some(ref path) = target_path {
-                if mutated_files.contains(path) {
-                    let stub = format!(
-                        "[Not executed: '{}' was already modified by an earlier call in this \
-                         batch. Re-plan this edit after seeing that result — use fresh line \
-                         numbers and hashes from the post-edit context above.]",
-                        path
-                    );
-                    let _ = ui_tx.send(UiEvent::ToolResult {
-                        summary: format!("⚠ skipped dependent edit on {path}"),
-                    });
-                    tool_results.push(ContentPart::ToolResult {
-                        tool_use_id: tc.id.clone(),
-                        content: stub,
-                    });
-                    continue;
-                }
-            } else { () };
-            let _ = content; // suppress unused warning
-
-            let mut result_content = if loop_detector.record(&tc.name, &tc.arguments) {
-                let _ = ui_tx.send(UiEvent::LoopWarning { tool_name: tc.name.clone() });
-                format!(
-                    "[Loop detected: {} called with identical arguments. \
-                     Try a different approach or more specific arguments.]",
-                    tc.name
-                )
-            } else {
-                let raw_output = execute_tool(tc, config, &mut cache, &history, &ui_tx, &config.mcp).await;
-
-                // Bash commands may mutate files — invalidate any cached reads
-                // for paths that appear in the command string.
-                if tc.name == "bash" {
-                    if let Some(cmd) = serde_json::from_str::<serde_json::Value>(&tc.arguments)
-                        .ok()
-                        .and_then(|v| v["command"].as_str().map(|s| s.to_string()))
-                    {
-                        cache.invalidate_if_mentioned(&cmd);
-                    }
-                }
-
-                let (model_output, display_summary) = if config.dry_run {
-                    (raw_output.clone(), raw_output.clone())
-                } else {
-                    let (full, display) = history.record(&tc.id, &tc.name, &raw_output);
-                    (full, display)
-                };
-
-                let _ = ui_tx.send(UiEvent::ToolResult { summary: display_summary });
-
-                if config.verbose {
-                    let extra: Vec<&str> = model_output.lines().skip(1).take(4).collect();
-                    for line in extra {
-                        let _ = ui_tx.send(UiEvent::ToolResult { summary: format!("  {line}") });
-                    }
-                }
-
-                model_output
-            };
-
-            // ── on_edit hooks ─────────────────────────────────────────────────
-            // Run after each successful mutating call. Output is appended
-            // directly into the tool result so the model sees compile/lint
-            // errors and can self-correct immediately.
-            if is_mutating && config.hooks_enabled && !config.hooks.on_edit.is_empty() {
-                for cmd in &config.hooks.on_edit {
-                    let hr = hooks::run_hook(cmd).await;
-                    let success = hr.exit_code == 0;
-                    let hook_line = if success && hr.output.trim().is_empty() {
-                        format!("\n\n⚙ `{cmd}` ✓")
-                    } else {
-                        format!("\n\n⚙ `{cmd}` (exit {}):\n{}", hr.exit_code, hr.output)
-                    };
-                    result_content.push_str(&hook_line);
-                    let _ = ui_tx.send(UiEvent::HookOutput {
-                        event: "on_edit".to_string(),
-                        output: hr.output,
-                        exit_code: hr.exit_code,
-                    });
-                }
+            if let Some(part) = execute_one_tool_call(
+                tc,
+                &mut mutated_files,
+                &mut messages,
+                &mut cache,
+                &mut history,
+                &mut loop_detector,
+                config,
+                &ui_tx,
+            ).await {
+                tool_results.push(part);
             }
-
-            // Record mutation after successful execution and compress stale reads
-            if let Some(path) = target_path {
-                // Compress old read_file results for this path — their hashes
-                // and line numbers are now stale, wasting context budget.
-                if !result_content.contains("[Tool error") {
-                    history.compress_reads_for(&path);
-                    // Evict ALL stale content for this path from the messages
-                    // array — reads, old edit echoes, search results. Without
-                    // this, stale hashes/line numbers stay in context and
-                    // actively mislead the model on subsequent edits.
-                    evict_stale_content(&mut messages, &path);
-                }
-                mutated_files.insert(path);
-            }
-
-            tool_results.push(ContentPart::ToolResult {
-                tool_use_id: tc.id.clone(),
-                content: result_content,
-            });
         }
 
         messages.push(Message {
@@ -553,18 +320,10 @@ pub async fn run_tui(
             tool_calls: vec![],
         });
 
-        // ── Strip assistant reasoning from history ────────────────────────────
-        // The assistant turn that triggered these tool calls contains CoT reasoning
-        // text ("I need to check auth.rs to understand..."). Once we have the tool
-        // results, that reasoning is irrelevant and only wastes context budget.
-        // Keep: tool_calls (required by API), strip: the text content.
-        // Final assistant turns (no tool calls) are never touched — they're the
-        // visible response the user sees and may reference in follow-up turns.
-        if let Some(asst_msg) = messages.iter_mut().rev().nth(1) {
-            if asst_msg.role == "assistant" && !asst_msg.tool_calls.is_empty() {
-                asst_msg.content = MessageContent::from(String::new());
-            }
-        }
+        // Strip CoT reasoning from the assistant turn that triggered these tool
+        // calls — it wastes context once results are in. Final assistant turns
+        // (no tool calls) are never touched — they're the visible response.
+        strip_cot_from_last_assistant(&mut messages);
 
         // Update inflight tool count immediately after execution so the TUI
         // shows the correct count while the next API call streams.
@@ -579,15 +338,12 @@ pub async fn run_tui(
 
     // ── on_task_done hooks ────────────────────────────────────────────────────
     // Run after the agent loop. Output goes to TUI only — not into context.
-    if config.hooks_enabled && !config.hooks.on_task_done.is_empty() {
-        for cmd in &config.hooks.on_task_done {
-            let hr = hooks::run_hook(cmd).await;
-            let _ = ui_tx.send(UiEvent::HookOutput {
-                event: "on_task_done".to_string(),
-                output: hr.output,
-                exit_code: hr.exit_code,
-            });
-        }
+    for hr in hooks::run_task_done_hooks(&config.hooks, config.hooks_enabled).await {
+        let _ = ui_tx.send(UiEvent::HookOutput {
+            event: "on_task_done".to_string(),
+            output: hr.output,
+            exit_code: hr.exit_code,
+        });
     }
 
     // ── Git post-task ─────────────────────────────────────────────────────────
@@ -596,34 +352,19 @@ pub async fn run_tui(
         if let Some(cwd) = std::env::current_dir().ok() {
             if let Some(repo) = crate::git::GitRepo::open(&cwd) {
                 let ref_pt = checkpoint_hash.as_deref().unwrap_or("HEAD");
-                if let Ok(stat) = repo.diff_stat_from(ref_pt) {
-                    if !stat.trim().is_empty() {
-                        // Count lines that describe a changed file (contain '|')
-                        let files_changed = stat.lines().filter(|l| l.contains('|')).count();
-                        let _ = ui_tx.send(UiEvent::GitChanges {
-                            stat: stat.trim().to_string(),
-                            checkpoint_hash: checkpoint_hash.clone(),
-                            files_changed,
-                        });
-                    }
+                let pt = repo.post_task(ref_pt, task, config.auto_commit, &config.auto_commit_prefix);
+                if let Some(stat) = pt.diff_stat {
+                    let _ = ui_tx.send(UiEvent::GitChanges {
+                        stat,
+                        checkpoint_hash: checkpoint_hash.clone(),
+                        files_changed: pt.files_changed,
+                    });
                 }
-                if config.auto_commit {
-                    let summary: String = task
-                        .lines()
-                        .next()
-                        .unwrap_or(task)
-                        .chars()
-                        .take(72)
-                        .collect();
-                    let msg = format!("{}{}", config.auto_commit_prefix, summary);
-                    match repo.auto_commit(&msg) {
-                        Ok(()) => {
-                            let _ = ui_tx.send(UiEvent::GitAutoCommit { message: msg });
-                        }
-                        Err(e) => {
-                            let _ = ui_tx.send(UiEvent::GitError(format!("auto-commit: {e}")));
-                        }
-                    }
+                if let Some(msg) = pt.auto_committed {
+                    let _ = ui_tx.send(UiEvent::GitAutoCommit { message: msg });
+                }
+                if let Some(err) = pt.commit_error {
+                    let _ = ui_tx.send(UiEvent::GitError(err));
                 }
             }
         }
@@ -649,75 +390,321 @@ pub async fn run_tui(
     Ok(())
 }
 
-/// Quick mode — single API call, no multi-turn loop, minimal context.
-/// Targets < 2k tokens total. No file loading, no session history.
-/// Allows at most 1 tool call before returning (edit_file, search, bash read-only).
-pub async fn run_quick(
-    task: &str,
-    client: &Client,
-    config: &AgentConfig,
-    ui_tx: mpsc::UnboundedSender<UiEvent>,
-) -> Result<()> {
-    let task_start = std::time::Instant::now();
-    let task_cwd = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "unknown".to_string());
-    const QUICK_SYSTEM: &str = "You are PareCode in quick mode. Answer concisely in one response. \
-If a tool call is needed, make exactly one — prefer edit_file or search. \
-Do not read files unless strictly necessary. Keep responses short.";
 
-    // Lean tool list — only the tools that make sense for quick tasks
-    let quick_tools: Vec<crate::client::Tool> = tools::all_definitions()
-        .into_iter()
-        .filter(|t| matches!(t.name.as_str(), "edit_file" | "search" | "read_file" | "bash"))
-        .collect();
+/// Load project conventions from AGENTS.md, CLAUDE.md, or .parecode/conventions.md.
+/// Returns None if no conventions file is found.
+fn load_conventions() -> Option<String> {
+    let candidates = [
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".parecode/conventions.md",
+    ];
+    for path in &candidates {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let trimmed = content.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(format!("\n\n# Project conventions ({path})\n\n{trimmed}"));
+            }
+        }
+    }
+    None
+}
 
-    let messages = vec![Message {
-        role: "user".to_string(),
-        content: MessageContent::from(task.to_string()),
-        tool_calls: vec![],
-    }];
+pub struct AgentConfig {
+    pub verbose: bool,
+    pub dry_run: bool,
+    pub context_tokens: u32,
+    pub _profile_name: String,
+    pub _model: String,
+    pub _show_timestamps: bool,
+    pub mcp: Arc<McpClient>,
+    /// Resolved hook commands (may be from explicit config or auto-detected).
+    pub hooks: Arc<HookConfig>,
+    /// When false, all hooks are suppressed for this run (set by `/hooks off`).
+    pub hooks_enabled: bool,
+    /// Auto-commit all changes after successful task completion.
+    pub auto_commit: bool,
+    /// Prefix for auto-commit messages (e.g. "parecode: ").
+    pub auto_commit_prefix: String,
+    /// Enable git integration: checkpoint before task, git status in system prompt, diff after.
+    pub git_context: bool,
+    /// Pre-rendered project context (narrative + graph) for injection into the system prompt.
+    /// When None, no project structure is injected (executor plan steps).
+    pub project_context: Option<String>,
+}
 
-    let tx_clone = ui_tx.clone();
-    let response = client
-        .chat(QUICK_SYSTEM, &messages, &quick_tools, move |chunk| {
-            let _ = tx_clone.send(UiEvent::Chunk(chunk.to_string()));
-        })
-        .await?;
+// ── Pure prompt-assembly helpers ──────────────────────────────────────────────
 
-    let total_input = response.input_tokens;
-    let total_output = response.output_tokens;
+/// Assemble the full system prompt from base + optional project context + conventions + git status.
+/// `git_status` is pre-fetched by the caller so this function stays pure and testable.
+pub fn build_system_prompt(config: &AgentConfig, git_status: Option<&str>) -> String {
+    let mut prompt = SYSTEM_PROMPT_BASE.to_string();
 
-    // Send token stats so TUI tracks inflight usage (survives cancel/crash)
-    let _ = ui_tx.send(UiEvent::TokenStats {
-        _input: total_input,
-        _output: total_output,
-        total_input,
-        total_output,
-        tool_calls: 0,
-    }); 
-
-    // Execute at most one tool call
-    if let Some(tc) = response.tool_calls.first() {
-        let mut cache = FileCache::default();
-        let history = History::default();
-        let raw = execute_tool(tc, config, &mut cache, &history, &ui_tx, &config.mcp).await;
-        let _ = ui_tx.send(UiEvent::ToolResult {
-            summary: raw.lines().take(30).collect::<Vec<_>>().join("\n"),
-        });
+    if let Some(ref ctx) = config.project_context {
+        prompt.push_str("\n\n");
+        prompt.push_str(ctx);
     }
 
-    let _ = ui_tx.send(UiEvent::AgentDone {
-        input_tokens: total_input,
-        output_tokens: total_output,
-        tool_calls: response.tool_calls.len().min(1),
-        compressed_count: 0,
-        duration_secs: task_start.elapsed().as_secs() as u32,
-        cwd: task_cwd,
-    });
+    if let Some(conventions) = load_conventions() {
+        prompt.push_str(&conventions);
+    }
 
-    Ok(())
+    if let Some(status) = git_status {
+        if !status.trim().is_empty() {
+            prompt.push_str(&format!("\n\n# Git status\n\n```\n{}\n```", status.trim()));
+        }
+    }
+
+    prompt
+}
+
+/// Assemble the first user message: prior context + attached files + task.
+pub fn build_user_message(
+    task: &str,
+    prior_context: Option<&str>,
+    attached: &[(String, String)],
+) -> String {
+    let mut s = String::new();
+    if let Some(ctx) = prior_context {
+        s.push_str(ctx);
+    }
+    if !attached.is_empty() {
+        s.push_str("The following files have been attached for context:\n\n");
+        for (path, content) in attached {
+            s.push_str(&format!("[{path}]\n{content}\n\n"));
+        }
+        s.push_str("---\n\n");
+    }
+    s.push_str(task);
+    s
+}
+
+// ── Think-tag streaming parser ────────────────────────────────────────────────
+
+/// Splits a streaming text into normal chunks and `<think>…</think>` thinking chunks.
+///
+/// Models like DeepSeek emit `<think>` blocks mid-stream. The parser buffers a
+/// small lookahead window so tags split across chunk boundaries are handled
+/// correctly. Call `push(chunk)` for each incoming chunk; it returns the normal
+/// text and thinking text that can be flushed safely at that point. Call
+/// `finish()` once the stream ends to drain any remainder.
+pub struct ThinkParser {
+    buf: String,
+    in_think: bool,
+}
+
+impl ThinkParser {
+    pub fn new() -> Self {
+        Self { buf: String::new(), in_think: false }
+    }
+
+    /// Feed a new chunk. Returns `(normal_text, thinking_text)` ready to emit.
+    pub fn push(&mut self, chunk: &str) -> (String, String) {
+        self.buf.push_str(chunk);
+        let mut normal = String::new();
+        let mut thinking = String::new();
+
+        loop {
+            if self.in_think {
+                if let Some(pos) = self.buf.find("</think>") {
+                    thinking.push_str(&self.buf[..pos]);
+                    self.buf = self.buf[pos + 8..].to_string();
+                    self.in_think = false;
+                } else {
+                    // Flush all but the last 8 bytes (tag might be split across chunks).
+                    let keep = self.buf.floor_char_boundary(self.buf.len().saturating_sub(8));
+                    if keep > 0 {
+                        thinking.push_str(&self.buf[..keep]);
+                        self.buf = self.buf[keep..].to_string();
+                    }
+                    break;
+                }
+            } else if let Some(pos) = self.buf.find("<think>") {
+                normal.push_str(&self.buf[..pos]);
+                self.buf = self.buf[pos + 7..].to_string();
+                self.in_think = true;
+            } else {
+                // Flush all but the last 7 bytes (opening tag might be split).
+                let keep = self.buf.floor_char_boundary(self.buf.len().saturating_sub(7));
+                if keep > 0 {
+                    normal.push_str(&self.buf[..keep]);
+                    self.buf = self.buf[keep..].to_string();
+                }
+                break;
+            }
+        }
+
+        (normal, thinking)
+    }
+
+    /// Drain any buffered remainder after the stream ends.
+    pub fn finish(mut self) -> (String, String) {
+        let remainder = std::mem::take(&mut self.buf);
+        if self.in_think {
+            (String::new(), remainder)
+        } else {
+            (remainder, String::new())
+        }
+    }
+}
+
+
+// ── Tool call execution ───────────────────────────────────────────────────────
+
+/// Execute a single tool call, applying all guards, cache, dispatch, history,
+/// hooks, and stale-eviction in one focused function.
+///
+/// Returns `None` when the result was already pushed directly into `tool_results`
+/// by an early-continue path (dependency guard stub, cache hit). Returns
+/// `Some(ContentPart)` for the caller to collect into `tool_results`.
+async fn execute_one_tool_call(
+    tc: &ToolCall,
+    mutated_files: &mut std::collections::HashSet<String>,
+    messages: &mut Vec<Message>,
+    cache: &mut FileCache,
+    history: &mut History,
+    loop_detector: &mut LoopDetector,
+    config: &AgentConfig,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) -> Option<ContentPart> {
+    // ── Parse args ────────────────────────────────────────────────────────────
+    let args: Value = match serde_json::from_str(&tc.arguments) {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(ContentPart::ToolResult {
+                tool_use_id: tc.id.clone(),
+                content: format!("[Error parsing tool arguments: {e}]"),
+            });
+        }
+    };
+
+    // Classify once — used by cache, mutation guard, hooks, and stale eviction.
+    let kind = ToolKind::classify(&tc.name, &args);
+
+    // ── Dependency guard ──────────────────────────────────────────────────────
+    // If the model batches multiple mutations on the same file, stub all but
+    // the first. Prevents speculative chaining with stale line numbers/hashes.
+    if let ToolKind::Mutate { ref path } = kind {
+        if mutated_files.contains(path) {
+            let _ = ui_tx.send(UiEvent::ToolResult {
+                summary: format!("⚠ skipped dependent edit on {path}"),
+            });
+            return Some(ContentPart::ToolResult {
+                tool_use_id: tc.id.clone(),
+                content: format!(
+                    "[Not executed: '{path}' was already modified by an earlier call in \
+                     this batch. Re-plan this edit after seeing that result — use fresh \
+                     line numbers and hashes from the post-edit context above.]"
+                ),
+            });
+        }
+    }
+
+    // ── Loop detection + dry-run + cache + dispatch ───────────────────────────
+    let mut result_content = if loop_detector.record(&tc.name, &tc.arguments) {
+        let _ = ui_tx.send(UiEvent::LoopWarning { tool_name: tc.name.clone() });
+        format!(
+            "[Loop detected: {} called with identical arguments. \
+             Try a different approach or more specific arguments.]",
+            tc.name
+        )
+    } else if config.dry_run {
+        format!("[dry-run: {} not executed]", tc.name)
+    } else {
+        // ── Cache read (before dispatch) ──────────────────────────────────────
+        if let ToolKind::Read { ref path, has_range: false, is_symbols: false } = kind {
+            if let Some(hit) = cache.check(path) {
+                let _ = ui_tx.send(UiEvent::CacheHit { path: path.clone() });
+                let output = hit.into_message();
+                let (model_output, display) = history.record(&tc.id, &tc.name, &output);
+                let _ = ui_tx.send(UiEvent::ToolResult { summary: display });
+                // Cache hit: push directly and return None (no further processing needed).
+                return Some(ContentPart::ToolResult {
+                    tool_use_id: tc.id.clone(),
+                    content: model_output,
+                });
+            }
+        }
+
+        // ── Dispatch ──────────────────────────────────────────────────────────
+        let _ = ui_tx.send(UiEvent::ToolCall {
+            name: tc.name.clone(),
+            args_summary: format_args_summary(&args),
+        });
+        let raw = dispatch_tool(&tc.name, &args, &kind, cache, history, ui_tx, &config.mcp).await;
+
+        // ── Post-dispatch cache maintenance ───────────────────────────────────
+        match &kind {
+            ToolKind::Read { path, has_range: false, is_symbols: false } => {
+                cache.store(path, raw.clone());
+            }
+            ToolKind::Mutate { path } => {
+                cache.invalidate(path);
+            }
+            ToolKind::Other { is_bash: true } => {
+                if let Some(cmd) = args["command"].as_str() {
+                    cache.invalidate_if_mentioned(cmd);
+                }
+            }
+            _ => {}
+        }
+
+        raw
+    };
+
+    // ── History + display ─────────────────────────────────────────────────────
+    let (model_output, display_summary) = history.record(&tc.id, &tc.name, &result_content);
+    let _ = ui_tx.send(UiEvent::ToolResult { summary: display_summary });
+    if config.verbose {
+        for line in model_output.lines().skip(1).take(4) {
+            let _ = ui_tx.send(UiEvent::ToolResult { summary: format!("  {line}") });
+        }
+    }
+    result_content = model_output;
+
+    // ── on_edit hooks ─────────────────────────────────────────────────────────
+    // Appended into the tool result so the model sees compile/lint errors
+    // immediately and can self-correct without an extra round-trip.
+    if let ToolKind::Mutate { .. } = kind {
+        for hr in hooks::run_edit_hooks(&config.hooks, config.hooks_enabled).await {
+            let hook_line = if hr.exit_code == 0 && hr.output.trim().is_empty() {
+                format!("\n\n⚙ `{}` ✓", hr.cmd)
+            } else {
+                format!("\n\n⚙ `{}` (exit {}):\n{}", hr.cmd, hr.exit_code, hr.output)
+            };
+            result_content.push_str(&hook_line);
+            let _ = ui_tx.send(UiEvent::HookOutput {
+                event: "on_edit".to_string(),
+                output: hr.output,
+                exit_code: hr.exit_code,
+            });
+        }
+    }
+
+    // ── Post-mutation stale eviction ──────────────────────────────────────────
+    if let ToolKind::Mutate { ref path } = kind {
+        if !result_content.contains("[Tool error") {
+            history.compress_reads_for(path);
+            evict_stale_content(messages, path);
+        }
+        mutated_files.insert(path.clone());
+    }
+
+    Some(ContentPart::ToolResult {
+        tool_use_id: tc.id.clone(),
+        content: result_content,
+    })
+}
+
+/// Strip CoT reasoning text from the most recent assistant turn that has tool
+/// calls. Once tool results are in, the reasoning text only wastes context.
+/// Final assistant turns (no tool calls) are never touched.
+fn strip_cot_from_last_assistant(messages: &mut Vec<Message>) {
+    if let Some(asst_msg) = messages.iter_mut().rev().nth(1) {
+        if asst_msg.role == "assistant" && !asst_msg.tool_calls.is_empty() {
+            asst_msg.content = MessageContent::from(String::new());
+        }
+    }
 }
 
 // ── Stale content eviction ────────────────────────────────────────────────────
@@ -768,103 +755,70 @@ fn evict_stale_content(messages: &mut [Message], edited_path: &str) {
     }
 }
 
-// ── Tool execution ────────────────────────────────────────────────────────────
+// ── Tool kind classification ───────────────────────────────────────────────────
+//
+// Parsed once per tool call so the loop can make cache/mutation decisions
+// without re-parsing arguments or scattering tool-name strings across the code.
 
-async fn execute_tool(
-    tc: &ToolCall,
-    config: &AgentConfig,
+enum ToolKind {
+    /// read_file — may be served from / stored into cache.
+    Read { path: String, has_range: bool, is_symbols: bool },
+    /// edit_file / write_file / patch_file — mutates a file path.
+    Mutate { path: String },
+    /// Everything else. `is_bash` flags bash for post-run cache invalidation.
+    Other { is_bash: bool },
+}
+
+impl ToolKind {
+    fn classify(name: &str, args: &Value) -> Self {
+        match name {
+            "read_file" => ToolKind::Read {
+                path: args["path"].as_str().unwrap_or("").to_string(),
+                has_range: !args["line_range"].is_null(),
+                is_symbols: args["symbols"].as_bool().unwrap_or(false),
+            },
+            "edit_file" | "write_file" | "patch_file" => ToolKind::Mutate {
+                path: args["path"].as_str().unwrap_or("").to_string(),
+            },
+            "bash" => ToolKind::Other { is_bash: true },
+            _ => ToolKind::Other { is_bash: false },
+        }
+    }
+}
+
+// ── Tool dispatch ─────────────────────────────────────────────────────────────
+//
+// Pure routing: parse → call → return raw string.
+// Cache, history, hooks, dry-run and UI events are all handled by the caller.
+
+async fn dispatch_tool(
+    name: &str,
+    args: &Value,
+    kind: &ToolKind,
     cache: &mut FileCache,
     history: &History,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     mcp: &McpClient,
 ) -> String {
-    let args: Value = match serde_json::from_str(&tc.arguments) {
-        Ok(v) => v,
-        Err(e) => return format!("[Error parsing tool arguments: {e}]"),
-    };
-
-    // Display the tool call
-    let _ = ui_tx.send(UiEvent::ToolCall {
-        name: tc.name.clone(),
-        args_summary: format_args_summary(&args),
-    });
-
-    if config.dry_run {
-        return format!("[dry-run: {} not executed]", tc.name);
-    }
-
-    match tc.name.as_str() {
-        "bash" => {
-            match tools::bash::execute(&args).await {
-                Ok(output) => output,
-                Err(e) => format!("[Tool error: {e}]"),
-            }
-        }
-        "recall" => {
-            // Try by tool_call_id first, then by tool_name
-            let by_id = args["tool_call_id"].as_str()
-                .and_then(|id| history.recall(id));
-            if let Some(full) = by_id {
-                return full.to_string();
-            }
-            let by_name = args["tool_name"].as_str()
-                .and_then(|name| history.recall_by_name(name));
-            if let Some(full) = by_name {
-                return full.to_string();
-            }
-            "[recall: no matching tool result found]".to_string()
-        }
-        "ask_user" => {
-            let question = args["question"].as_str().unwrap_or("(no question provided)").to_string();
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<String>();
-            let _ = ui_tx.send(UiEvent::AskUser { question, reply_tx });
-            match reply_rx.await {
-                Ok(answer) => answer,
-                Err(_) => "[ask_user: no reply received (channel closed)]".to_string(),
-            }
-        }
-        "read_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            let is_symbols = args["symbols"].as_bool().unwrap_or(false);
-            let has_range = !args["line_range"].is_null();
-
-            // Cache only serves/stores full-content reads (no line_range, no symbols).
-            // Symbol-index reads are navigation-only and must not be cached as content.
-            if !has_range && !is_symbols {
-                if let Some(hit) = cache.check(path) {
-                    let _ = ui_tx.send(UiEvent::CacheHit { path: path.to_string() });
-                    return hit.into_message();
-                }
-            }
-
-            match tools::dispatch("read_file", &args) {
-                Ok(output) => {
-                    // Only cache full-content reads
-                    if !has_range && !is_symbols {
-                        cache.store(path, output.clone());
-                    }
-                    output
-                }
-                Err(e) => format!("[Tool error: {e}]"),
-            }
-        }
-        "write_file" | "edit_file" | "patch_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            match tools::dispatch(&tc.name, &args) {
-                Ok(o) => {
-                    cache.invalidate(path);
-                    o
-                }
+    match name {
+        "bash"     => tools::bash::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]")),
+        "recall"   => tools::recall::execute(args, history).unwrap_or_else(|e| e),
+        "ask_user" => tools::ask::execute(args, ui_tx.clone()).await.unwrap_or_else(|e| e),
+        "edit_file" | "write_file" | "patch_file" => {
+            match tools::dispatch(name, args) {
+                Ok(o) => o,
                 Err(e) => {
-                    // On edit failure, include the actual file content so the model
-                    // can see exactly what's there and correct its old_str.
-                    let hint = if let Some(hit) = cache.check(path) {
-                        format!(
-                            "\n\nCurrent file content for reference:\n{}",
-                            hit.content
-                        )
-                    } else if let Ok(content) = std::fs::read_to_string(path) {
-                        format!("\n\nCurrent file content for reference:\n{content}")
+                    // On edit failure, show the current file content so the model
+                    // can correct its old_str without an extra round-trip.
+                    let path = args["path"].as_str().unwrap_or("");
+                    let hint = if let ToolKind::Mutate { .. } = kind {
+                        if let Some(hit) = cache.check(path) {
+                            format!("\n\nCurrent file content for reference:\n{}", hit.content)
+                        } else if let Ok(content) = std::fs::read_to_string(path) {
+                            format!("\n\nCurrent file content for reference:\n{content}")
+                        } else {
+                            String::new()
+                        }
                     } else {
                         String::new()
                     };
@@ -873,18 +827,10 @@ async fn execute_tool(
             }
         }
         _ => {
-            // Try native tools first, then fall through to MCP
-            if tools::is_native(&tc.name) {
-                match tools::dispatch(&tc.name, &args) {
-                    Ok(output) => output,
-                    Err(e) => format!("[Tool error: {e}]"),
-                }
+            if tools::is_native(name) {
+                tools::dispatch(name, args).unwrap_or_else(|e| format!("[Tool error: {e}]"))
             } else {
-                // MCP tool: qualified name contains a '.'
-                match mcp.call(&tc.name, args).await {
-                    Ok(output) => output,
-                    Err(e) => format!("[MCP tool error: {e}]"),
-                }
+                mcp.call(name, args.clone()).await.unwrap_or_else(|e| format!("[MCP tool error: {e}]"))
             }
         }
     }
@@ -922,5 +868,385 @@ fn format_args_summary(args: &Value) -> String {
         pairs.join(", ")
     } else {
         args.to_string()
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── build_user_message ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_user_message_task_only() {
+        let msg = build_user_message("do the thing", None, &[]);
+        assert_eq!(msg, "do the thing");
+    }
+
+    #[test]
+    fn test_user_message_with_prior_context() {
+        let msg = build_user_message("new task", Some("prior stuff\n"), &[]);
+        assert!(msg.starts_with("prior stuff\n"));
+        assert!(msg.ends_with("new task"));
+    }
+
+    #[test]
+    fn test_user_message_with_attached_files() {
+        let attached = vec![
+            ("src/foo.rs".to_string(), "fn foo() {}".to_string()),
+        ];
+        let msg = build_user_message("fix it", None, &attached);
+        assert!(msg.contains("[src/foo.rs]"));
+        assert!(msg.contains("fn foo() {}"));
+        assert!(msg.contains("---"));
+        assert!(msg.ends_with("fix it"));
+    }
+
+    #[test]
+    fn test_user_message_ordering() {
+        // prior context → attached files → task, in that order
+        let attached = vec![("a.rs".to_string(), "content".to_string())];
+        let msg = build_user_message("task", Some("prior"), &attached);
+        let prior_pos = msg.find("prior").unwrap();
+        let attach_pos = msg.find("[a.rs]").unwrap();
+        let task_pos = msg.rfind("task").unwrap();
+        assert!(prior_pos < attach_pos);
+        assert!(attach_pos < task_pos);
+    }
+
+    // ── build_system_prompt ───────────────────────────────────────────────────
+
+    fn minimal_config() -> AgentConfig {
+        // McpClient::new is async; construct a dummy via the blocking runtime.
+        let mcp = tokio::runtime::Handle::try_current()
+            .map(|h| h.block_on(crate::mcp::McpClient::new(&[])))
+            .unwrap_or_else(|_| {
+                tokio::runtime::Runtime::new()
+                    .unwrap()
+                    .block_on(crate::mcp::McpClient::new(&[]))
+            });
+        AgentConfig {
+            verbose: false,
+            dry_run: false,
+            context_tokens: 8000,
+            _profile_name: String::new(),
+            _model: String::new(),
+            _show_timestamps: false,
+            mcp,
+            hooks: std::sync::Arc::new(crate::hooks::HookConfig::default()),
+            hooks_enabled: false,
+            auto_commit: false,
+            auto_commit_prefix: String::new(),
+            git_context: false,
+            project_context: None,
+        }
+    }
+
+    #[test]
+    fn test_system_prompt_contains_base() {
+        let config = minimal_config();
+        let prompt = build_system_prompt(&config, None);
+        assert!(prompt.contains("PareCode"));
+    }
+
+    #[test]
+    fn test_system_prompt_includes_project_context() {
+        let mut config = minimal_config();
+        config.project_context = Some("# Clusters\nfoo bar".to_string());
+        let prompt = build_system_prompt(&config, None);
+        assert!(prompt.contains("# Clusters"));
+        assert!(prompt.contains("foo bar"));
+    }
+
+    #[test]
+    fn test_system_prompt_git_status_included() {
+        let config = minimal_config();
+        let prompt = build_system_prompt(&config, Some("M src/foo.rs"));
+        assert!(prompt.contains("# Git status"));
+        assert!(prompt.contains("M src/foo.rs"));
+    }
+
+    #[test]
+    fn test_system_prompt_git_status_empty_skipped() {
+        let config = minimal_config();
+        let prompt = build_system_prompt(&config, Some("   "));
+        assert!(!prompt.contains("# Git status"));
+    }
+
+    #[test]
+    fn test_system_prompt_no_git_status() {
+        let config = minimal_config();
+        let prompt = build_system_prompt(&config, None);
+        assert!(!prompt.contains("# Git status"));
+    }
+
+    // ── ThinkParser ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_think_parser_no_tags() {
+        let mut p = ThinkParser::new();
+        let (normal, thinking) = p.push("hello world");
+        // Some held back as lookahead — drain with finish()
+        let (n2, t2) = p.finish();
+        assert_eq!(normal + &n2, "hello world");
+        assert!(thinking.is_empty() && t2.is_empty());
+    }
+
+    #[test]
+    fn test_think_parser_full_think_block() {
+        let mut p = ThinkParser::new();
+        let (n1, t1) = p.push("before<think>reasoning</think>after");
+        let (n2, t2) = p.finish();
+        assert_eq!(n1 + &n2, "beforeafter");
+        assert_eq!(t1 + &t2, "reasoning");
+    }
+
+    #[test]
+    fn test_think_parser_tag_split_across_chunks() {
+        let mut p = ThinkParser::new();
+        // "<think>" split as "<thi" + "nk>"
+        let (n1, t1) = p.push("hello<thi");
+        let (n2, t2) = p.push("nk>reasoning</think>done");
+        let (n3, t3) = p.finish();
+        assert_eq!(n1 + &n2 + &n3, "hellodone");
+        assert_eq!(t1 + &t2 + &t3, "reasoning");
+    }
+
+    #[test]
+    fn test_think_parser_close_tag_split_across_chunks() {
+        let mut p = ThinkParser::new();
+        let (n1, t1) = p.push("<think>thinking</thi");
+        let (n2, t2) = p.push("nk>normal");
+        let (n3, t3) = p.finish();
+        assert_eq!(n1 + &n2 + &n3, "normal");
+        assert!((t1 + &t2 + &t3).contains("thinking"));
+    }
+
+    #[test]
+    fn test_think_parser_multiple_blocks() {
+        let mut p = ThinkParser::new();
+        let input = "a<think>t1</think>b<think>t2</think>c";
+        let (n1, t1) = p.push(input);
+        let (n2, t2) = p.finish();
+        assert_eq!(n1 + &n2, "abc");
+        assert_eq!(t1 + &t2, "t1t2");
+    }
+
+    #[test]
+    fn test_think_parser_multibyte_chars() {
+        // em-dash (3 bytes in UTF-8) should not panic when split by the lookahead window
+        let mut p = ThinkParser::new();
+        let (n1, _) = p.push("hello — world");
+        let (n2, _) = p.finish();
+        assert_eq!(n1 + &n2, "hello — world");
+    }
+
+    #[test]
+    fn test_think_parser_unclosed_tag_goes_to_thinking_on_finish() {
+        let mut p = ThinkParser::new();
+        let (_, t1) = p.push("<think>half done");
+        let (normal, t2) = p.finish();
+        assert!(normal.is_empty());
+        assert!((t1 + &t2).contains("half done"));
+    }
+
+    // ── strip_cot_from_last_assistant ─────────────────────────────────────────
+
+    #[test]
+    fn test_strip_cot_strips_assistant_with_tool_calls() {
+        let tool_call = crate::client::ToolCall {
+            id: "tc1".to_string(),
+            name: "read_file".to_string(),
+            arguments: "{}".to_string(),
+        };
+        let mut messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::from("task".to_string()),
+                tool_calls: vec![],
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::from("I will now read the file...".to_string()),
+                tool_calls: vec![tool_call],
+            },
+            Message {
+                role: "tool".to_string(),
+                content: MessageContent::from("file content".to_string()),
+                tool_calls: vec![],
+            },
+        ];
+        strip_cot_from_last_assistant(&mut messages);
+        // The assistant turn (index 1, second from last) should have empty text
+        if let MessageContent::Text(t) = &messages[1].content {
+            assert!(t.is_empty(), "CoT text should be stripped");
+        }
+    }
+
+    #[test]
+    fn test_strip_cot_does_not_touch_final_assistant_turn() {
+        // Final assistant turn has no tool calls — must not be stripped
+        let mut messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::from("task".to_string()),
+                tool_calls: vec![],
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::from("Here is my answer.".to_string()),
+                tool_calls: vec![],
+            },
+        ];
+        strip_cot_from_last_assistant(&mut messages);
+        if let MessageContent::Text(t) = &messages[1].content {
+            assert_eq!(t, "Here is my answer.", "final turn must be untouched");
+        }
+    }
+
+    // ── execute_one_tool_call ─────────────────────────────────────────────────
+
+    async fn minimal_config_async() -> AgentConfig {
+        AgentConfig {
+            verbose: false,
+            dry_run: false,
+            context_tokens: 8000,
+            _profile_name: String::new(),
+            _model: String::new(),
+            _show_timestamps: false,
+            mcp: crate::mcp::McpClient::new(&[]).await,
+            hooks: std::sync::Arc::new(crate::hooks::HookConfig::default()),
+            hooks_enabled: false,
+            auto_commit: false,
+            auto_commit_prefix: String::new(),
+            git_context: false,
+            project_context: None,
+        }
+    }
+
+    fn make_tool_call(id: &str, name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: args.to_string(),
+        }
+    }
+
+    fn make_channel() -> (mpsc::UnboundedSender<UiEvent>, mpsc::UnboundedReceiver<UiEvent>) {
+        mpsc::unbounded_channel()
+    }
+
+    fn collect_events(rx: &mut mpsc::UnboundedReceiver<UiEvent>) -> Vec<UiEvent> {
+        let mut events = vec![];
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn test_execute_one_tool_call_parse_error() {
+        let config = minimal_config_async().await;
+        let tc = make_tool_call("id1", "read_file", "not valid json{{");
+        let (tx, mut rx) = make_channel();
+        let result = execute_one_tool_call(
+            &tc,
+            &mut Default::default(),
+            &mut vec![],
+            &mut FileCache::default(),
+            &mut History::default(),
+            &mut LoopDetector::default(),
+            &config,
+            &tx,
+        ).await;
+        let part = result.expect("should return Some on parse error");
+        if let ContentPart::ToolResult { content, .. } = part {
+            assert!(content.contains("Error parsing tool arguments"), "got: {content}");
+        } else {
+            panic!("expected ToolResult");
+        }
+        // No UI events emitted for parse errors
+        let events = collect_events(&mut rx);
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_one_tool_call_dependency_guard() {
+        let config = minimal_config_async().await;
+        let tc = make_tool_call("id2", "edit_file", r#"{"path":"src/foo.rs"}"#);
+        let (tx, mut rx) = make_channel();
+        let mut mutated = std::collections::HashSet::new();
+        mutated.insert("src/foo.rs".to_string());
+
+        let result = execute_one_tool_call(
+            &tc,
+            &mut mutated,
+            &mut vec![],
+            &mut FileCache::default(),
+            &mut History::default(),
+            &mut LoopDetector::default(),
+            &config,
+            &tx,
+        ).await;
+        let part = result.expect("dependency guard returns Some stub");
+        if let ContentPart::ToolResult { content, .. } = part {
+            assert!(content.contains("Not executed"), "got: {content}");
+            assert!(content.contains("src/foo.rs"));
+        }
+        let events = collect_events(&mut rx);
+        assert!(events.iter().any(|e| matches!(e, UiEvent::ToolResult { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_execute_one_tool_call_loop_detection() {
+        let config = minimal_config_async().await;
+        let tc = make_tool_call("id3", "bash", r#"{"command":"ls"}"#);
+        let (tx, mut rx) = make_channel();
+        let mut detector = LoopDetector::default();
+        // Prime the detector with one call
+        detector.record("bash", r#"{"command":"ls"}"#);
+
+        let result = execute_one_tool_call(
+            &tc,
+            &mut Default::default(),
+            &mut vec![],
+            &mut FileCache::default(),
+            &mut History::default(),
+            &mut detector,
+            &config,
+            &tx,
+        ).await;
+        let part = result.expect("loop detection returns Some");
+        if let ContentPart::ToolResult { content, .. } = part {
+            assert!(content.contains("Loop detected"), "got: {content}");
+        }
+        let events = collect_events(&mut rx);
+        assert!(events.iter().any(|e| matches!(e, UiEvent::LoopWarning { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_execute_one_tool_call_dry_run() {
+        let mut config = minimal_config_async().await;
+        config.dry_run = true;
+        let tc = make_tool_call("id4", "bash", r#"{"command":"rm -rf /"}"#);
+        let (tx, _rx) = make_channel();
+
+        let result = execute_one_tool_call(
+            &tc,
+            &mut Default::default(),
+            &mut vec![],
+            &mut FileCache::default(),
+            &mut History::default(),
+            &mut LoopDetector::default(),
+            &config,
+            &tx,
+        ).await;
+        let part = result.expect("dry_run returns Some");
+        if let ContentPart::ToolResult { content, .. } = part {
+            assert!(content.contains("dry-run"), "got: {content}");
+            assert!(content.contains("bash"));
+        }
     }
 }

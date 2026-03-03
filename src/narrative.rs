@@ -89,11 +89,6 @@ impl ProjectNarrative {
         }
     }
 
-    /// Add an incremental patch note (post-task learning hook for Phase 3).
-    pub fn patch(&mut self, note: String) {
-        self.patches.push(note);
-    }
-
     /// Build a context string for injection into planning/agent system prompts.
     ///
     /// Format:
@@ -220,9 +215,16 @@ impl ProjectNarrative {
                 out.push_str(&format!("… and {} more clusters\n", others.len() - remaining_cap));
             }
         } else if relevant.is_empty() {
-            // No relevant clusters — show all as full detail up to max_clusters
+            // No relevant clusters — sort by learned context weights (high-weight first)
+            let weights = crate::context_weights::ContextWeights::load();
+            let mut sorted_clusters: Vec<&crate::pie::Cluster> = all_clusters.iter().collect();
+            sorted_clusters.sort_by(|a, b| {
+                let wa = weights.mean_weight(&a.entry_files);
+                let wb = weights.mean_weight(&b.entry_files);
+                wb.partial_cmp(&wa).unwrap_or(std::cmp::Ordering::Equal)
+            });
             out.push_str("\n## Clusters\n");
-            for cluster in all_clusters.iter().take(max_clusters) {
+            for cluster in sorted_clusters.iter().take(max_clusters) {
                 out.push_str(&format!("\n### {} ({} files)\n", cluster.name, cluster.files.len()));
                 if let Some(summary) = self.cluster_summaries.get(&cluster.name) {
                     out.push_str(summary);

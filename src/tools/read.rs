@@ -42,7 +42,7 @@ pub fn format_line(line_num: usize, content: &str) -> String {
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "read_file",
-        "description": "Read a file with line numbers and content hashes. Small files (≤300 lines) are returned in full; larger files get a preamble + symbol index + tail — use line_range=[start,end] to read specific sections. Each line is prefixed `N [hash] | content` — the 4-char hash is the anchor for edit_file.",
+        "description": "Read a file with line numbers and content hashes for editing.\n\nSMALL FILES (≤300 lines): returned in full — one call is enough to edit anywhere in the file.\n\nLARGE FILES (>300 lines): returns preamble (imports) + symbol index (function/struct names with line numbers) + tail. The symbol index gives you the exact line number of every function. Use that line number immediately with line_range — do NOT read the whole file first.\n\nWORKFLOW FOR LARGE FILES:\n1. read_file(path) → get symbol index showing `fn foo` at line 142\n2. read_file(path, line_range=[138, 165]) → get the section with hashes\n3. edit_file using old_str from step 2\n\nEach line is prefixed `N [hash] | content`. The 4-char hash is the anchor for edit_file.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -52,11 +52,11 @@ pub fn definition() -> Value {
                 "line_range": {
                     "type": "array",
                     "items": { "type": "integer" },
-                    "description": "[start, end] 1-indexed inclusive"
+                    "description": "[start, end] 1-indexed inclusive. Use line numbers from the symbol index."
                 },
                 "symbols": {
                     "type": "boolean",
-                    "description": "Return symbol index instead of content (large files)"
+                    "description": "Return symbol index only (no content). Useful for very large files when you only need to know where things are."
                 }
             },
             "required": ["path"]

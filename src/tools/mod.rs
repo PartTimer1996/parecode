@@ -99,12 +99,11 @@ pub fn all_definitions() -> Vec<Tool> {
 pub fn tools_for_turn(turn: usize, history_has_summaries: bool) -> Vec<Tool> {
     let thresholds = TurnThresholds::default();
     let mut t = vec![
+        def(ask::definition()),    // first: clarify before spiralling into reads
         def(read::definition()),
         def(edit::definition()),
         def(bash::definition()),
         def(search::definition()),
-        def(ask::definition()),
-        def(ask::definition()),
     ];
 
     // Exploration phase: navigation + file creation

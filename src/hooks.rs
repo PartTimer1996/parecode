@@ -83,6 +83,8 @@ impl HookConfig {
 // ── Result ─────────────────────────────────────────────────────────────────────
 
 pub struct HookResult {
+    /// The command that was run.
+    pub cmd: String,
     /// Merged stdout + stderr
     pub output: String,
     pub exit_code: i32,
@@ -198,12 +200,14 @@ pub async fn run_hook(cmd: &str) -> HookResult {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
             return HookResult {
+                cmd: cmd.to_string(),
                 output: format!("[hook failed to start: {e}]"),
                 exit_code: -1,
             };
         }
         Err(_) => {
             return HookResult {
+                cmd: cmd.to_string(),
                 output: format!("[hook timed out after {HOOK_TIMEOUT_SECS}s]"),
                 exit_code: -1,
             };
@@ -229,7 +233,38 @@ pub async fn run_hook(cmd: &str) -> HookResult {
         format!("{truncated}\n[+{} lines truncated]", lines.len() - HOOK_MAX_LINES)
     };
 
-    HookResult { output, exit_code }
+    HookResult { cmd: cmd.to_string(), output, exit_code }
+}
+
+/// Run all `on_edit` hooks and return their results.
+///
+/// Returns an empty vec if `hooks_enabled` is false or `on_edit` is empty.
+/// The caller appends hook output to the tool result string and emits UI events
+/// — keeping this function free of any UI dependency.
+pub async fn run_edit_hooks(hooks: &HookConfig, hooks_enabled: bool) -> Vec<HookResult> {
+    if !hooks_enabled || hooks.on_edit.is_empty() {
+        return vec![];
+    }
+    let mut results = Vec::with_capacity(hooks.on_edit.len());
+    for cmd in &hooks.on_edit {
+        results.push(run_hook(cmd).await);
+    }
+    results
+}
+
+/// Run all `on_task_done` hooks from `config` and return their results.
+///
+/// Returns an empty vec if `hooks_enabled` is false or `on_task_done` is empty.
+/// Callers map the results to UI events — keeping this function free of any UI dependency.
+pub async fn run_task_done_hooks(hooks: &HookConfig, hooks_enabled: bool) -> Vec<HookResult> {
+    if !hooks_enabled || hooks.on_task_done.is_empty() {
+        return vec![];
+    }
+    let mut results = Vec::with_capacity(hooks.on_task_done.len());
+    for cmd in &hooks.on_task_done {
+        results.push(run_hook(cmd).await);
+    }
+    results
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -497,4 +532,98 @@ mod tests {
     // Note: write_hooks_to_config tests would require mocking the filesystem
     // and config module, which is complex for unit tests. Integration tests
     // would be more appropriate for testing that function.
+
+    // ── run_task_done_hooks ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_task_done_hooks_disabled() {
+        let hooks = HookConfig {
+            on_task_done: vec!["echo should_not_run".to_string()],
+            ..Default::default()
+        };
+        let results = run_task_done_hooks(&hooks, false).await;
+        assert!(results.is_empty(), "hooks_enabled=false should return empty");
+    }
+
+    #[tokio::test]
+    async fn test_run_task_done_hooks_empty_list() {
+        let hooks = HookConfig::default();
+        let results = run_task_done_hooks(&hooks, true).await;
+        assert!(results.is_empty(), "empty on_task_done should return empty");
+    }
+
+    #[tokio::test]
+    async fn test_run_task_done_hooks_runs_all() {
+        let hooks = HookConfig {
+            on_task_done: vec![
+                "echo first".to_string(),
+                "echo second".to_string(),
+            ],
+            ..Default::default()
+        };
+        let results = run_task_done_hooks(&hooks, true).await;
+        assert_eq!(results.len(), 2);
+        assert!(results[0].output.contains("first"));
+        assert!(results[1].output.contains("second"));
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(results[1].exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn test_run_task_done_hooks_captures_failure() {
+        let hooks = HookConfig {
+            on_task_done: vec!["exit 5".to_string()],
+            ..Default::default()
+        };
+        let results = run_task_done_hooks(&hooks, true).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].exit_code, 5);
+    }
+
+    // ── run_edit_hooks ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_edit_hooks_disabled() {
+        let hooks = HookConfig {
+            on_edit: vec!["echo should_not_run".to_string()],
+            ..Default::default()
+        };
+        let results = run_edit_hooks(&hooks, false).await;
+        assert!(results.is_empty(), "hooks_enabled=false should return empty");
+    }
+
+    #[tokio::test]
+    async fn test_run_edit_hooks_empty_list() {
+        let hooks = HookConfig::default();
+        let results = run_edit_hooks(&hooks, true).await;
+        assert!(results.is_empty(), "empty on_edit should return empty");
+    }
+
+    #[tokio::test]
+    async fn test_run_edit_hooks_runs_all() {
+        let hooks = HookConfig {
+            on_edit: vec![
+                "echo alpha".to_string(),
+                "echo beta".to_string(),
+            ],
+            ..Default::default()
+        };
+        let results = run_edit_hooks(&hooks, true).await;
+        assert_eq!(results.len(), 2);
+        assert!(results[0].output.contains("alpha"));
+        assert!(results[1].output.contains("beta"));
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(results[1].exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn test_run_edit_hooks_captures_failure() {
+        let hooks = HookConfig {
+            on_edit: vec!["exit 3".to_string()],
+            ..Default::default()
+        };
+        let results = run_edit_hooks(&hooks, true).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].exit_code, 3);
+    }
 }

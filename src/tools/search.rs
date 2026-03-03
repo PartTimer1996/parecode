@@ -8,7 +8,7 @@ const MAX_MATCHES: usize = 50;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "search",
-        "description": "Search for a pattern in files using ripgrep. Returns matching lines with context.",
+        "description": "Search for a pattern across files using ripgrep.\n\nUSE THIS FOR:\n- Finding all call sites of a function before renaming it\n- Checking whether a pattern exists across multiple files\n- Confirming a string was fully removed after a replacement task\n\nDO NOT USE THIS FOR:\n- Locating a function or type you want to edit — use the symbol index from read_file instead\n- Verifying an edit was applied correctly — the edit_file result already shows the updated lines\n- Understanding a file's structure — read_file gives you a symbol index",
         "parameters": {
             "type": "object",
             "properties": {
@@ -18,15 +18,15 @@ pub fn definition() -> Value {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Dir or file (default: .)"
+                    "description": "Dir or file to search (default: .)"
                 },
                 "file_pattern": {
                     "type": "string",
-                    "description": "Glob filter, e.g. '*.ts'"
+                    "description": "Glob filter, e.g. '*.ts', '*.rs'"
                 },
                 "context_lines": {
                     "type": "integer",
-                    "description": "Default: 2"
+                    "description": "Lines of context around each match (default: 2)"
                 }
             },
             "required": ["pattern"]

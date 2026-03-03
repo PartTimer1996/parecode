@@ -5,7 +5,7 @@ use std::fs;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "edit_file",
-        "description": "Edit an existing file. Replace mode: old_str→new_str (old_str must be unique). Append mode: append=true to add at end. Returns ±10 lines with fresh hashes after success.",
+        "description": "Edit an existing file. Replace mode: provide old_str (must match exactly once) and new_str. Append mode: append=true adds new_str at end of file.\n\nRETURN VALUE: On success, returns a fresh ±15 line window centred on the edit with updated line numbers and hashes. USE THESE HASHES for any follow-up edits to the same file — do NOT use hashes from an earlier read_file call, they are now stale. Do NOT re-read the file after a successful edit.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -14,18 +14,19 @@ pub fn definition() -> Value {
                 },
                 "old_str": {
                     "type": "string",
-                    "description": "Exact string to replace (must match once). Omit for append."
+                    "description": "Exact string to replace — must match exactly once in the file. Include enough surrounding context (full lines, function signatures, nearby comments) to be unique. Omit only for append mode."
                 },
                 "new_str": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Replacement text. For append mode, the text to add at end of file."
                 },
                 "anchor": {
                     "type": "string",
-                    "description": "4-char hash from read_file line prefix"
+                    "description": "Optional 4-char hash of the first line of old_str (from a read_file result). Used for stale-content detection."
                 },
                 "append": {
                     "type": "boolean",
-                    "description": "Append new_str to end of file"
+                    "description": "When true, appends new_str to end of file. old_str is ignored."
                 }
             },
             "required": ["path", "new_str"]
@@ -289,11 +290,11 @@ fn post_edit_context(path: &str, anchor_line: usize) -> String {
     }
     // Clamp anchor to valid range (0-based internally)
     let centre = anchor_line.saturating_sub(1).min(total - 1);
-    let lo = centre.saturating_sub(10);
-    let hi = (centre + 10).min(total);
+    let lo = centre.saturating_sub(15);
+    let hi = (centre + 15).min(total);
 
     let mut out = format!(
-        "\n[{path} after edit — lines {}-{} of {total}]\n",
+        "\n[{path} after edit — lines {}-{} of {total} — use these hashes for any further edits to this file]\n",
         lo + 1, hi
     );
     for (i, line) in lines[lo..hi].iter().enumerate() {
