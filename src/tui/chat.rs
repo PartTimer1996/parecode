@@ -220,12 +220,15 @@ pub fn build_items(state: &AppState, term_width: u16) -> Vec<ListItem<'static>> 
                 }
             }
 
-            ConversationEntry::CacheHit(path) => {
-                let path = path.clone();
+            ConversationEntry::CacheHit { path, lines } => {
                 items.push(ListItem::new(Line::from(vec![
-                    Span::raw("    "),
-                    Span::styled("↩ cache  ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(path, Style::default().fg(Color::DarkGray)),
+                    Span::raw("  "),
+                    Span::styled("⚡ read_file ", Style::default().fg(Color::Cyan)),
+                    Span::styled(path.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("  {lines} lines · cached"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ])));
             }
 

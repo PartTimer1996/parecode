@@ -224,7 +224,9 @@ async fn run_single_shot(
 
     // Spawn agent
     let agent_handle = tokio::spawn(async move {
-        agent::run_tui(&task, &client, &config, vec![], None, tx).await
+        agent::run_tui(&task, &client, &config, vec![], None, tx,
+            std::sync::Arc::new(tokio::sync::Mutex::new(crate::cache::FileCache::default()))
+        ).await
     });
 
     // Print events to stdout, tracking accumulated token usage
@@ -253,8 +255,8 @@ fn print_event_plain(ev: &tui::UiEvent, accum_input: &mut u32, accum_output: &mu
             let first = summary.lines().next().unwrap_or(summary);
             println!("    → {first}");
         }
-        UiEvent::CacheHit { path } => {
-            println!("    ↩ cache  {path}");
+        UiEvent::CacheHit { path, lines } => {
+            println!("    ⚡ read_file {path}  {lines} lines · cached");
         }
         UiEvent::LoopWarning { tool_name } => {
             println!("  ⚠ loop detected on {tool_name}");

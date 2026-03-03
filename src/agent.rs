@@ -14,53 +14,57 @@ use crate::tui::UiEvent;
 
 const MAX_TOOL_CALLS: usize = 40;
 
-const SYSTEM_PROMPT_BASE: &str = r#"You are PareCode, a focused coding assistant. You help with software engineering tasks by using the available tools.
+const SYSTEM_PROMPT_BASE: &str = r#"You are PareCode, a focused coding assistant. Complete tasks using the available tools.
 
-# Core principles
-- Act decisively. When you know what to change, apply the edit immediately.
-- Minimum tool calls. Every unnecessary read or search wastes tokens and slows the task.
-- When done, say so and stop.
-- Ask early. If the task is vague or could go multiple ways, ask_user BEFORE reading files. One question saves more tokens than ten reads.
+# Principles
+- **Minimum tool calls.** Every unnecessary read, search, or bash costs tokens and time.
+- **Act, don't explore.** If you know what to change, change it. Do not read to confirm what you already know.
+- **Ask only when blocked.** Use `ask_user` if the task names a file or symbol that does not appear in the project graph and you cannot proceed. Never ask about things you can look up.
+- **When done, stop.** Do not summarise what you did unless asked.
 
-# The project graph — use it, trust it
-The system prompt contains a pre-built project graph: cluster summaries, key files, and a symbol list with every function and struct already located.
-- **The graph tells you which file a symbol lives in.** Do not search for it.
-- **The graph shows every function name and its approximate line number.** Do not read a file just to understand what it contains.
-- Read only to get edit hashes for a specific section you are about to change.
+# Project graph
+If a project graph appears below, it contains every cluster, file, and symbol with exact line numbers — a full index of the codebase.
+- **Use it as ground truth.** It tells you which file a symbol lives in and exactly which line.
+- **Do not search for symbols in the graph.** Do not read a file to discover its contents. The graph already tells you.
+- **Read only to obtain edit hashes** for the specific lines you are about to change.
+- If no project graph appears, use `list_files` once to orient yourself, then proceed.
 
-# Read workflow
-**Small files (≤300 lines):** `read_file(path)` returns the full file with hashes. One call — edit immediately from those hashes.
+# Reading files
+**Small files (≤300 lines):** `read_file(path)` returns the full file with line numbers and hashes. One call is enough — edit immediately.
 
-**Large files (>300 lines):** `read_file(path)` returns preamble + symbol index (function names + line numbers) + tail.
-- The symbol index tells you exactly where each function starts.
-- Follow up with `read_file(path, line_range=[N-2, N+40])` to get only that section with hashes.
-- Do not read the whole file. Do not search for the function name. The index already told you where it is.
+**Large files (>300 lines):** `read_file(path)` returns preamble + symbol index + tail. The symbol index gives exact line numbers for every function and struct. Then: `read_file(path, line_range=[start, end])` to fetch only the section you need.
 
-**Never re-read a file already read this session.** Use `recall` to retrieve any previous tool output instead.
+**Do not re-read a file unless you have edited it since your last read.** Before an edit the cache returns identical content — a re-read is a wasted call. After an edit you must re-read the changed region to get fresh hashes.
 
-# Edit workflow — the hash lifecycle
+# Editing — the hash lifecycle
+Each line is prefixed `N [hash] | content`. The hash is the required anchor for `edit_file`.
+
 1. Read the section → get hashes.
-2. `edit_file` with `old_str` taken verbatim from that read → succeeds.
-3. **The edit result contains a fresh ±15 line window with updated hashes for that region of the file.**
-4. Next edit to the same region: use the hashes from step 3. The hashes from step 1 are now stale.
-5. Next edit to a different region of the same file: `read_file(path, line_range=[...])` for that new location.
-6. **Never use hashes from before an edit to the same file — they are stale the moment the file changes.**
+2. `edit_file` — `old_str` must be copied verbatim (including the `N [hash] |` prefix) from that read.
+3. The edit result returns a fresh window with **new hashes** for the changed region.
+4. Further edits to the same region: use hashes from step 3. Hashes from step 1 are stale.
+5. Edit to a different region of the same file: `read_file(path, line_range=[...])` for that location first.
 
-ONE edit per response. Every write invalidates all previously seen hashes for that file.
+**Only edit one file per turn.** For 2+ non-adjacent changes in one file, use `patch_file` in a single call — never chain multiple `edit_file` calls.
 
-# File mutation
-- `write_file`: new files only. Never on existing files.
-- `edit_file`: single-location changes, inserts, appends.
-- `patch_file`: 3+ non-adjacent locations in one file — do them all in one call instead of multiple edits.
-- Plan mode: line numbers in "Completed steps" preamble are stale. Use anchors from pre-loaded content only.
+# Choosing the right mutation tool
+- `edit_file` — single contiguous change, insert, or append.
+- `patch_file` — 2+ non-adjacent locations in one file. Always prefer over multiple `edit_file` calls.
+- `write_file` — new files only. Never use on an existing file.
 
-# When not to use search
-- NOT to locate a function → the symbol index has the line number
-- NOT to verify an edit was applied → the edit result already shows the updated lines with new hashes
-- YES for: finding all call sites before rename, cross-file pattern existence check, confirming a string is fully removed
+# bash — builds and state changes only
+`bash` is for: compiling, running tests, git, package managers, and anything that changes external state.
 
-# Verification
-After editing source: run `bash` to compile. That is the only verification needed — the edit result already confirmed the change was written."#;
+**Never use bash to read files or explore the project.** These are forbidden via bash:
+- `cat`, `head`, `tail` → use `read_file` (provides hashes; cached; stale eviction aware)
+- `grep`, `rg` → use `search` (structured results, no wasted context)
+- `ls`, `find` → use `list_files` (respects project ignore rules)
+
+Using bash for file reading bypasses the session cache (re-hits disk every call), produces output without hashes (breaking `edit_file`), and fills context with unstructured text that cannot be evicted after edits.
+
+# search
+- YES: finding all call sites of a function, checking a pattern exists across files, confirming a string was fully removed.
+- NO: locating a function or symbol — the project graph has the exact line number. NO: verifying an edit — the edit result already shows the updated lines."#;
 
 /// Quick mode — single API call, no multi-turn loop, minimal context.
 /// Targets < 2k tokens total. No file loading, no session history.
@@ -150,6 +154,7 @@ pub async fn run_tui(
     attached: Vec<(String, String)>,
     prior_context: Option<String>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
+    shared_cache: std::sync::Arc<tokio::sync::Mutex<crate::cache::FileCache>>,
 ) -> Result<()> {
     let task_start = std::time::Instant::now();
     let task_cwd = std::env::current_dir()
@@ -172,7 +177,8 @@ pub async fn run_tui(
 
     let budget = Budget::new(config.context_tokens);
     let mut history = History::default();
-    let mut cache = FileCache::default();
+    let mut cache = shared_cache.lock().await;
+    cache.next_turn(); // advance turn counter at task boundary
     let mut loop_detector = LoopDetector::default();
 
     // Fetch git status once so build_system_prompt stays pure.
@@ -287,8 +293,23 @@ pub async fn run_tui(
             tool_calls: response.tool_calls.clone(),
         });
 
-        // No tool calls → done
+        // No tool calls → done, unless the model emitted XML <invoke> syntax
+        // instead of JSON tool calls (a known failure mode for some models trained
+        // on Anthropic-style prompts). Detect and send a corrective message.
         if response.tool_calls.is_empty() {
+            if response.text.contains("<invoke") && response.text.contains("</invoke>") {
+                messages.push(Message {
+                    role: "user".to_string(),
+                    content: MessageContent::from(
+                        "You used XML <invoke> tool syntax instead of JSON tool calls. \
+                         Use the JSON tool_calls format provided in the API — do not emit \
+                         XML. Retry your intended action now using the correct format."
+                            .to_string(),
+                    ),
+                    tool_calls: vec![],
+                });
+                continue;
+            }
             break;
         }
 
@@ -299,8 +320,7 @@ pub async fn run_tui(
         let mut mutated_files: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for tc in &response.tool_calls {
-            tool_call_count += 1;
-            if let Some(part) = execute_one_tool_call(
+            let (part, dispatched) = execute_one_tool_call(
                 tc,
                 &mut mutated_files,
                 &mut messages,
@@ -309,7 +329,11 @@ pub async fn run_tui(
                 &mut loop_detector,
                 config,
                 &ui_tx,
-            ).await {
+            ).await;
+            if dispatched {
+                tool_call_count += 1;
+            }
+            if let Some(part) = part {
                 tool_results.push(part);
             }
         }
@@ -557,6 +581,8 @@ impl ThinkParser {
 /// Returns `None` when the result was already pushed directly into `tool_results`
 /// by an early-continue path (dependency guard stub, cache hit). Returns
 /// `Some(ContentPart)` for the caller to collect into `tool_results`.
+/// The bool indicates whether a real dispatch occurred (i.e. not a cache hit or stub) —
+/// callers use this to increment the tool call counter accurately.
 async fn execute_one_tool_call(
     tc: &ToolCall,
     mutated_files: &mut std::collections::HashSet<String>,
@@ -566,15 +592,15 @@ async fn execute_one_tool_call(
     loop_detector: &mut LoopDetector,
     config: &AgentConfig,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
-) -> Option<ContentPart> {
+) -> (Option<ContentPart>, bool) {
     // ── Parse args ────────────────────────────────────────────────────────────
     let args: Value = match serde_json::from_str(&tc.arguments) {
         Ok(v) => v,
         Err(e) => {
-            return Some(ContentPart::ToolResult {
+            return (Some(ContentPart::ToolResult {
                 tool_use_id: tc.id.clone(),
                 content: format!("[Error parsing tool arguments: {e}]"),
-            });
+            }), false);
         }
     };
 
@@ -589,19 +615,21 @@ async fn execute_one_tool_call(
             let _ = ui_tx.send(UiEvent::ToolResult {
                 summary: format!("⚠ skipped dependent edit on {path}"),
             });
-            return Some(ContentPart::ToolResult {
+            return (Some(ContentPart::ToolResult {
                 tool_use_id: tc.id.clone(),
                 content: format!(
                     "[Not executed: '{path}' was already modified by an earlier call in \
                      this batch. Re-plan this edit after seeing that result — use fresh \
                      line numbers and hashes from the post-edit context above.]"
                 ),
-            });
+            }), false);
         }
     }
 
     // ── Loop detection + dry-run + cache + dispatch ───────────────────────────
+    let mut dispatched = true;
     let mut result_content = if loop_detector.record(&tc.name, &tc.arguments) {
+        dispatched = false;
         let _ = ui_tx.send(UiEvent::LoopWarning { tool_name: tc.name.clone() });
         format!(
             "[Loop detected: {} called with identical arguments. \
@@ -609,20 +637,40 @@ async fn execute_one_tool_call(
             tc.name
         )
     } else if config.dry_run {
+        dispatched = false;
         format!("[dry-run: {} not executed]", tc.name)
     } else {
         // ── Cache read (before dispatch) ──────────────────────────────────────
-        if let ToolKind::Read { ref path, has_range: false, is_symbols: false } = kind {
-            if let Some(hit) = cache.check(path) {
-                let _ = ui_tx.send(UiEvent::CacheHit { path: path.clone() });
-                let output = hit.into_message();
-                let (model_output, display) = history.record(&tc.id, &tc.name, &output);
-                let _ = ui_tx.send(UiEvent::ToolResult { summary: display });
-                // Cache hit: push directly and return None (no further processing needed).
-                return Some(ContentPart::ToolResult {
-                    tool_use_id: tc.id.clone(),
-                    content: model_output,
-                });
+        if let ToolKind::Read { ref path, is_symbols: false, .. } = kind {
+            // Full read hit
+            if let ToolKind::Read { has_range: false, .. } = kind {
+                if let Some(hit) = cache.check(path) {
+                    let _ = ui_tx.send(UiEvent::CacheHit { path: path.clone(), lines: hit.total_lines });
+                    let output = hit.into_message();
+                    let (model_output, _) = history.record(&tc.id, &tc.name, &output);
+                    return (Some(ContentPart::ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: model_output,
+                    }), false);
+                }
+            }
+            // Ranged read hit — serve slice from cached lines
+            if let ToolKind::Read { has_range: true, .. } = kind {
+                if let Some(range) = args["line_range"].as_array() {
+                    let start = range.first().and_then(|v| v.as_u64())
+                        .map(|n| (n as usize).saturating_sub(1)).unwrap_or(0);
+                    let end = range.get(1).and_then(|v| v.as_u64())
+                        .map(|n| n as usize).unwrap_or(usize::MAX);
+                    if let Some(hit) = cache.check_range(path, start, end) {
+                        let _ = ui_tx.send(UiEvent::CacheHit { path: path.clone(), lines: hit.range_lines });
+                        let output = hit.into_message();
+                        let (model_output, _) = history.record(&tc.id, &tc.name, &output);
+                        return (Some(ContentPart::ToolResult {
+                            tool_use_id: tc.id.clone(),
+                            content: model_output,
+                        }), false);
+                    }
+                }
             }
         }
 
@@ -636,7 +684,19 @@ async fn execute_one_tool_call(
         // ── Post-dispatch cache maintenance ───────────────────────────────────
         match &kind {
             ToolKind::Read { path, has_range: false, is_symbols: false } => {
-                cache.store(path, raw.clone());
+                // Full read — cache the raw content so ranged re-reads are also free.
+                // We re-read from disk here to get the raw lines (raw is already formatted output).
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    cache.store(path, content);
+                }
+            }
+            ToolKind::Read { path, has_range: true, is_symbols: false } => {
+                // Ranged read miss — prime the cache with the full file so future
+                // reads of any window (including different ranges) are free.
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+                    cache.store_lines(path, lines);
+                }
             }
             ToolKind::Mutate { path } => {
                 cache.invalidate(path);
@@ -690,10 +750,10 @@ async fn execute_one_tool_call(
         mutated_files.insert(path.clone());
     }
 
-    Some(ContentPart::ToolResult {
+    (Some(ContentPart::ToolResult {
         tool_use_id: tc.id.clone(),
         content: result_content,
-    })
+    }), dispatched)
 }
 
 /// Strip CoT reasoning text from the most recent assistant turn that has tool
@@ -1151,7 +1211,7 @@ mod tests {
         let config = minimal_config_async().await;
         let tc = make_tool_call("id1", "read_file", "not valid json{{");
         let (tx, mut rx) = make_channel();
-        let result = execute_one_tool_call(
+        let (result, dispatched) = execute_one_tool_call(
             &tc,
             &mut Default::default(),
             &mut vec![],
@@ -1161,6 +1221,7 @@ mod tests {
             &config,
             &tx,
         ).await;
+        assert!(!dispatched, "parse error should not count as dispatched");
         let part = result.expect("should return Some on parse error");
         if let ContentPart::ToolResult { content, .. } = part {
             assert!(content.contains("Error parsing tool arguments"), "got: {content}");
@@ -1180,7 +1241,7 @@ mod tests {
         let mut mutated = std::collections::HashSet::new();
         mutated.insert("src/foo.rs".to_string());
 
-        let result = execute_one_tool_call(
+        let (result, dispatched) = execute_one_tool_call(
             &tc,
             &mut mutated,
             &mut vec![],
@@ -1190,6 +1251,7 @@ mod tests {
             &config,
             &tx,
         ).await;
+        assert!(!dispatched, "dependency guard stub should not count as dispatched");
         let part = result.expect("dependency guard returns Some stub");
         if let ContentPart::ToolResult { content, .. } = part {
             assert!(content.contains("Not executed"), "got: {content}");
@@ -1208,7 +1270,7 @@ mod tests {
         // Prime the detector with one call
         detector.record("bash", r#"{"command":"ls"}"#);
 
-        let result = execute_one_tool_call(
+        let (result, dispatched) = execute_one_tool_call(
             &tc,
             &mut Default::default(),
             &mut vec![],
@@ -1218,6 +1280,7 @@ mod tests {
             &config,
             &tx,
         ).await;
+        assert!(!dispatched, "loop detection should not count as dispatched");
         let part = result.expect("loop detection returns Some");
         if let ContentPart::ToolResult { content, .. } = part {
             assert!(content.contains("Loop detected"), "got: {content}");
@@ -1233,7 +1296,7 @@ mod tests {
         let tc = make_tool_call("id4", "bash", r#"{"command":"rm -rf /"}"#);
         let (tx, _rx) = make_channel();
 
-        let result = execute_one_tool_call(
+        let (result, dispatched) = execute_one_tool_call(
             &tc,
             &mut Default::default(),
             &mut vec![],
@@ -1243,6 +1306,7 @@ mod tests {
             &config,
             &tx,
         ).await;
+        assert!(!dispatched, "dry-run should not count as dispatched");
         let part = result.expect("dry_run returns Some");
         if let ContentPart::ToolResult { content, .. } = part {
             assert!(content.contains("dry-run"), "got: {content}");

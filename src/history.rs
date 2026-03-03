@@ -330,3 +330,216 @@ fn truncate_to_lines(s: &str, n: usize) -> String {
     }
     format!("{}\n[+{} lines truncated]", lines[..n].join("\n"), lines.len() - n)
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── History Store ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_history_record_stores_and_returns_summaries() {
+        let mut history = History::default();
+        let (model_out, display_out) = history.record("call-1", "read_file", "file content here");
+        
+        assert_eq!(history.records.len(), 1);
+        assert_eq!(history.records[0].tool_call_id, "call-1");
+        assert_eq!(history.records[0].tool_name, "read_file");
+        assert_eq!(history.records[0].full_output, "file content here");
+        // Model output for read_file is full content
+        assert_eq!(model_out, "file content here");
+        // Display summary is shortened
+        assert!(display_out.starts_with("✓ Read"));
+    }
+
+    #[test]
+    fn test_history_recall_by_id() {
+        let mut history = History::default();
+        history.record("call-1", "bash", "full output");
+        
+        assert_eq!(history.recall("call-1"), Some("full output"));
+        assert_eq!(history.recall("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_history_recall_by_name() {
+        let mut history = History::default();
+        history.record("call-1", "bash", "first output");
+        history.record("call-2", "read_file", "second output");
+        history.record("call-3", "bash", "third output");
+        
+        // Should recall most recent bash
+        assert_eq!(history.recall_by_name("bash"), Some("third output"));
+        assert_eq!(history.recall_by_name("read_file"), Some("second output"));
+        assert_eq!(history.recall_by_name("unknown"), None);
+    }
+
+    #[test]
+    fn test_compressed_count() {
+        let mut history = History::default();
+
+        // read_file returns full output (not compressed)
+        history.record("c1", "read_file", &"x".repeat(1000));
+        // bash with long output gets summarized (shorter than full output)
+        // The summarise_bash function keeps head+tail for long success outputs
+        let long_bash = (0..50).map(|i| format!("output line {}\n", i)).collect::<String>();
+        history.record("c2", "bash", &long_bash);
+
+        assert_eq!(history.compressed_count(), 1);
+    }
+
+    #[test]
+    fn test_compress_reads_for() {
+        let mut history = History::default();
+
+        // Create a read_file record with long content (>200 chars summary)
+        let long_output = "[src/main.rs — 100 lines]\n".to_string() + &"line x\n".repeat(50);
+        history.record("c1", "read_file", &long_output);
+
+        let summary_len = history.records[0].summary.len();
+        assert!(summary_len > 200, "summary should be >200 chars for this test");
+        assert!(!history.records[0].summary.contains("Stale"));
+
+        // Compress for the path
+        history.compress_reads_for("src/main.rs");
+
+        assert!(history.records[0].summary.contains("Stale"));
+        assert!(history.records[0].full_output.contains("Stale"));
+    }
+
+    // ── Helpers ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_first_line() {
+        assert_eq!(first_line("hello\nworld"), "hello");
+        assert_eq!(first_line("single"), "single");
+        assert_eq!(first_line(""), "");
+    }
+
+    #[test]
+    fn test_truncate_to_lines() {
+        assert_eq!(truncate_to_lines("a\nb\nc", 5), "a\nb\nc");
+        assert_eq!(truncate_to_lines("a\nb\nc", 2), "a\nb\n[+1 lines truncated]");
+        assert_eq!(truncate_to_lines("a\nb", 2), "a\nb");
+    }
+
+    // ── Summarisation ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_summarise_read_file_keeps_content() {
+        let output = "[src/lib.rs — 50 lines]\nline 1\nline 2";
+        let result = summarise("read_file", output);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_summarise_edit_build_failure_keeps_output() {
+        let output = "⚠ FILE WRITTEN BUT BUILD BROKEN\nerror: something";
+        let result = summarise("edit_file", output);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_summarise_edit_success_summarises() {
+        let output = "✓ Edited src/main.rs\n  10 [a1b2] | pub fn new_func() {\n  11 [c3d4] | }";
+        let result = summarise("edit_file", output);
+        assert!(result.contains("✓ Edited"));
+        assert!(result.contains("new_func"));
+    }
+
+    #[test]
+    fn test_summarise_list_small_keeps_full() {
+        let output = "src/\n  main.rs\n  lib.rs";
+        let result = summarise_list(output);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_summarise_list_large_keeps_directories() {
+        let mut large = String::new();
+        for i in 0..100 {
+            large.push_str(&format!("src/module{}/\n", i));
+        }
+        large.push_str("  file1.rs\n"); // file, not directory
+        
+        let result = summarise_list(&large);
+        assert!(result.contains("src/module0/"));
+        assert!(!result.contains("file1.rs"));
+        assert!(result.contains("files omitted"));
+    }
+
+    #[test]
+    fn test_summarise_search_no_matches() {
+        let output = "No matches found in project";
+        let result = summarise_search(output);
+        assert_eq!(result, "No matches found in project");
+    }
+
+    #[test]
+    fn test_summarise_search_small_keeps_full() {
+        let output = "src/a.rs:1:fn foo() {}\nsrc/b.rs:2:fn bar() {}";
+        let result = summarise_search(output);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_summarise_search_large_truncates() {
+        let mut large = String::new();
+        for i in 1..=50 {
+            large.push_str(&format!("src/f{}.rs:{i}:fn test_{i}() {{\n", i));
+        }
+        
+        let result = summarise_search(&large);
+        assert!(result.contains("test_1"));
+        assert!(!result.contains("test_50")); // should be omitted
+        assert!(result.contains("matches"));
+    }
+
+    #[test]
+    fn test_summarise_bash_short_keeps_full() {
+        let output = "line1\nline2\nline3";
+        let result = summarise_bash(output);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_summarise_bash_error_keeps_diagnostics() {
+        let output = "compiling...\nwarning: unused variable\nerror[E0425]: cannot find value\nnote: help: try using\nmore output";
+        let result = summarise_bash(output);
+        // Error keywords are kept
+        assert!(result.contains("error[E0425]"));
+        assert!(result.contains("warning:"));
+        assert!(result.contains("note:")); // note: is kept as diagnostic
+    }
+
+    #[test]
+    fn test_summarise_bash_success_head_tail() {
+        let mut output = String::new();
+        for i in 1..=30 {
+            output.push_str(&format!("output line {}\n", i));
+        }
+        
+        let result = summarise_bash(&output);
+        assert!(result.contains("output line 1"));
+        assert!(result.contains("output line 30"));
+        assert!(result.contains("omitted"));
+    }
+
+    #[test]
+    fn test_display_summarise_read_file() {
+        let output = "[src/main.rs — 42 lines]\n  1 [hash] | fn main()\n  2 [hash] | }";
+        let result = display_summarise("read_file", output);
+        assert!(result.contains("src/main.rs"), "should contain path");
+        assert!(result.contains("lines shown"), "should mention lines shown");
+    }
+
+    #[test]
+    fn test_display_summarise_other_uses_summarise() {
+        let output = "some bash output";
+        let result = display_summarise("bash", output);
+        // Short bash output stays full (≤20 lines), so it contains the original
+        assert_eq!(result, output);
+    }
+}

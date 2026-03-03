@@ -273,14 +273,234 @@ pub fn build_prior_context(turns: &[ConversationTurn]) -> Option<String> {
 }
 
 fn truncate_str(s: &str, max_chars: usize) -> &str {
-    if s.len() <= max_chars {
+    // max_chars is character count, not bytes
+    if s.chars().count() <= max_chars {
         s
     } else {
-        // Walk back to a char boundary
-        let mut end = max_chars;
-        while !s.is_char_boundary(end) {
-            end -= 1;
+        // Find the byte index of the max_chars-th character
+        let mut byte_len = 0;
+        for (i, (byte_idx, _)) in s.char_indices().enumerate() {
+            if i == max_chars {
+                byte_len = byte_idx;
+                break;
+            }
         }
-        &s[..end]
+        // If max_chars >= number of chars, we already returned above
+        // So byte_len should be set to the start of the max_chars-th char
+        &s[..byte_len]
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_cwd_basename() {
+        assert_eq!(cwd_basename("/home/user/projects/foo"), "foo");
+        assert_eq!(cwd_basename("foo"), "foo");
+        assert_eq!(cwd_basename("/"), "unknown");
+        assert_eq!(cwd_basename(""), "unknown");
+        assert_eq!(cwd_basename("/tmp/"), "tmp");
+    }
+
+    #[test]
+    fn test_truncate_str() {
+        let s = "hello world";
+        assert_eq!(truncate_str(s, 5), "hello");
+        assert_eq!(truncate_str(s, 11), "hello world");
+        assert_eq!(truncate_str(s, 20), "hello world");
+        // Test multi-byte character boundary: crab emoji is 4 bytes
+        let s2 = "hello 🦀 world";
+        // s2 length in chars: 'h'(1) e l l o ' '(6) 🦀(1) ' '(8) w o r l d(13)
+        assert_eq!(truncate_str(s2, 5), "hello");
+        assert_eq!(truncate_str(s2, 6), "hello ");
+        assert_eq!(truncate_str(s2, 7), "hello 🦀");
+        assert_eq!(truncate_str(s2, 8), "hello 🦀 ");
+        assert_eq!(truncate_str(s2, 13), "hello 🦀 world");
+        assert_eq!(truncate_str(s2, 20), "hello 🦀 world");
+        // Ensure no panic on multi-byte boundary
+        let _ = truncate_str(s2, 0);
+        let _ = truncate_str(s2, 100);
+    }
+
+    #[test]
+    fn test_build_prior_context_empty() {
+        assert_eq!(build_prior_context(&[]), None);
+    }
+
+    #[test]
+    fn test_build_prior_context_single_turn_no_tools() {
+        let turn = ConversationTurn {
+            turn_index: 0,
+            timestamp: 1234567890,
+            user_message: "Hello".to_string(),
+            agent_response: "Hi there".to_string(),
+            tool_summary: String::new(),
+        };
+        let context = build_prior_context(&[turn]).unwrap();
+        assert!(context.contains("[Turn 1]"));
+        assert!(context.contains("User: Hello"));
+        assert!(context.contains("Assistant: Hi there"));
+    }
+
+    #[test]
+    fn test_build_prior_context_with_tools() {
+        let turn = ConversationTurn {
+            turn_index: 2,
+            timestamp: 1234567890,
+            user_message: "Change file".to_string(),
+            agent_response: "I'll edit it".to_string(),
+            tool_summary: "edit_file src/main.rs, read_file src/main.rs".to_string(),
+        };
+        let context = build_prior_context(&[turn]).unwrap();
+        assert!(context.contains("[Turn 3]"));
+        assert!(context.contains("User: Change file"));
+        assert!(context.contains("Files modified: edit_file src/main.rs"));
+        assert!(context.contains("Tools used: read_file src/main.rs"));
+        assert!(context.contains("Assistant: I'll edit it"));
+    }
+
+    #[test]
+    fn test_build_prior_context_tool_dedup() {
+        let turn = ConversationTurn {
+            turn_index: 0,
+            timestamp: 1234567890,
+            user_message: "Edit multiple times".to_string(),
+            agent_response: "Editing".to_string(),
+            tool_summary: "edit_file src/main.rs, edit_file src/main.rs, read_file src/main.rs".to_string(),
+        };
+        let context = build_prior_context(&[turn]).unwrap();
+        // Should deduplicate edit_file src/main.rs
+        assert!(context.contains("Files modified: edit_file src/main.rs"));
+        // Should not appear twice
+        let modified_line = context.lines().find(|l| l.contains("Files modified")).unwrap();
+        assert_eq!(modified_line.matches("edit_file src/main.rs").count(), 1);
+        // read_file should appear in Tools used
+        assert!(context.contains("Tools used: read_file src/main.rs"));
+    }
+
+    #[test]
+    fn test_build_prior_context_truncation() {
+        let mut turns = Vec::new();
+        // Create a turn with a very long response that will be truncated
+        let turn = ConversationTurn {
+            turn_index: 0,
+            timestamp: 1234567890,
+            user_message: "a".repeat(1000),
+            agent_response: "b".repeat(3000),
+            tool_summary: String::new(),
+        };
+        turns.push(turn);
+        // The context should still be generated
+        let context = build_prior_context(&turns).unwrap();
+        // The user message preview is limited to 500 chars, response to 2000 chars
+        // So the total length should be within budget
+        assert!(context.len() < PRIOR_CONTEXT_TOKEN_CAP * 4);
+    }
+
+    #[test]
+    fn test_append_and_load_turns() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let path = file.path();
+        let turn = ConversationTurn {
+            turn_index: 0,
+            timestamp: 1234567890,
+            user_message: "test".to_string(),
+            agent_response: "response".to_string(),
+            tool_summary: "read_file".to_string(),
+        };
+        append_turn(path, &turn)?;
+        // Append another turn
+        let turn2 = ConversationTurn {
+            turn_index: 1,
+            timestamp: 1234567891,
+            user_message: "test2".to_string(),
+            agent_response: "response2".to_string(),
+            tool_summary: String::new(),
+        };
+        append_turn(path, &turn2)?;
+        let loaded = load_session_turns(path)?;
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].user_message, "test");
+        assert_eq!(loaded[1].user_message, "test2");
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_session_turns_empty_file() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let path = file.path();
+        let loaded = load_session_turns(path)?;
+        assert_eq!(loaded.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_session_turns_invalid_json() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        std::fs::write(path, "not json\n").unwrap();
+        let result = load_session_turns(path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sessions_dir_env_var() {
+        // Just test that the function returns a path containing "parecode/sessions"
+        // We can't safely modify env vars in tests without unsafe, so just verify basic behavior
+        let path = sessions_dir();
+        assert!(path.to_string_lossy().contains("parecode/sessions"));
+    }
+
+    #[test]
+    fn test_build_prior_context_order() {
+        let turns = vec![
+            ConversationTurn {
+                turn_index: 0,
+                timestamp: 1,
+                user_message: "first".to_string(),
+                agent_response: "first response".to_string(),
+                tool_summary: String::new(),
+            },
+            ConversationTurn {
+                turn_index: 1,
+                timestamp: 2,
+                user_message: "second".to_string(),
+                agent_response: "second response".to_string(),
+                tool_summary: String::new(),
+            },
+        ];
+        let context = build_prior_context(&turns).unwrap();
+        // Context should preserve chronological order
+        let first_pos = context.find("[Turn 1]");
+        let second_pos = context.find("[Turn 2]");
+        assert!(first_pos.is_some() && second_pos.is_some());
+        assert!(first_pos.unwrap() < second_pos.unwrap());
+        // Should include the header
+        assert!(context.contains("# Conversation history"));
+    }
+
+    #[test]
+    fn test_build_prior_context_budget_cap() {
+        let mut turns = Vec::new();
+        // Create many turns that exceed the token budget
+        for i in 0..10 {
+            turns.push(ConversationTurn {
+                turn_index: i,
+                timestamp: i as i64,
+                user_message: "x".repeat(500),
+                agent_response: "y".repeat(1000),
+                tool_summary: String::new(),
+            });
+        }
+        let context = build_prior_context(&turns).unwrap();
+        // Should include some turns but not all (due to char budget)
+        assert!(context.len() < PRIOR_CONTEXT_TOKEN_CAP * 4);
+        // Should include at least one turn
+        assert!(context.contains("[Turn"));
     }
 }

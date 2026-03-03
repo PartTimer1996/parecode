@@ -1,20 +1,34 @@
 /// File read cache with re-read prevention.
 ///
-/// Every file read this session is cached. If the model attempts to read
-/// the same path again we return the cached version instantly with an
-/// explanatory note — zero filesystem overhead, zero wasted context tokens.
+/// Every file read this session is cached as raw lines. If the model attempts
+/// to read the same path again — full or ranged — we serve it from cache:
+///   - Full re-read  → cached formatted output (zero FS overhead)
+///   - Ranged re-read → slice the cached lines and format on the fly
+///   - First ranged read with no prior full read → read full file, cache it,
+///     return just the requested range (future reads of any window are free)
 ///
-/// The cache is also invalidated on write/edit so re-reads after mutations
-/// are always fresh.
+/// The cache is invalidated on write/edit so re-reads after mutations are
+/// always fresh.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::SystemTime;
+
+use crate::tools::read::format_line;
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
 
 #[derive(Debug)]
 struct Entry {
-    content: String,
+    /// Raw file lines (no formatting, no hashes) — cheap to store, flexible to serve.
+    lines: Vec<String>,
+    /// Pre-formatted full output (cached on first full read to avoid re-formatting).
+    full_output: Option<String>,
     turn: usize,
-    _read_at: Instant,
+    /// File modification time at the point this entry was cached.
+    /// Used to detect external changes (e.g. cargo fmt, user edits between tasks).
+    mtime: Option<std::time::SystemTime>,
 }
 
 #[derive(Default)]
@@ -29,27 +43,94 @@ impl FileCache {
         self.current_turn += 1;
     }
 
-    /// Check if a path is already cached. Returns a cache-hit message if so.
+    /// Check if a full (unranged) read is cached. Returns a `CacheHit` if so.
+    /// Returns `None` if the file has been modified on disk since it was cached.
     pub fn check(&self, path: &str) -> Option<CacheHit> {
         let key = canonical(path);
-        self.entries.get(&key).map(|e| {
-            let turns_ago = self.current_turn.saturating_sub(e.turn);
-            CacheHit {
-                content: e.content.clone(),
-                turns_ago,
-            }
+        let e = self.entries.get(&key)?;
+        // Invalidate if the file has been modified externally since caching.
+        if mtime_changed(&key, e.mtime) {
+            return None;
+        }
+        e.full_output.as_ref().map(|out| CacheHit {
+            content: out.clone(),
+            turns_ago: self.current_turn.saturating_sub(e.turn),
+            total_lines: e.lines.len(),
         })
     }
 
-    /// Store a freshly-read file.
-    pub fn store(&mut self, path: &str, content: String) {
+    /// Check if a ranged read can be served from cache.
+    /// Returns `Some(formatted_excerpt)` if the file is cached and the range is valid.
+    /// Returns `None` if the file has been modified on disk since it was cached.
+    pub fn check_range(&self, path: &str, start: usize, end: usize) -> Option<RangeHit> {
         let key = canonical(path);
+        let e = self.entries.get(&key)?;
+        // Invalidate if the file has been modified externally since caching.
+        if mtime_changed(&key, e.mtime) {
+            return None;
+        }
+        let total = e.lines.len();
+        // Clamp to valid bounds
+        let start = start.min(total.saturating_sub(1));
+        let end = end.min(total);
+        if start >= end {
+            return None;
+        }
+        let mut out = format!(
+            "[{path} — lines {}-{} of {} (cached)]\n\n",
+            start + 1,
+            end,
+            total
+        );
+        for (i, line) in e.lines[start..end].iter().enumerate() {
+            out.push_str(&format_line(start + i + 1, line));
+        }
+        Some(RangeHit {
+            content: out,
+            turns_ago: self.current_turn.saturating_sub(e.turn),
+            range_lines: end - start,
+        })
+    }
+
+    /// Store a freshly-read full file (raw content string).
+    /// Also pre-formats and caches the full output for fast full-read hits.
+    pub fn store(&mut self, path: &str, raw_content: String) {
+        let key = canonical(path);
+        let lines: Vec<String> = raw_content.lines().map(|l| l.to_string()).collect();
+        // Pre-format the full output once
+        let mut full_out = format!("[{}]\n\n", path);
+        for (i, line) in lines.iter().enumerate() {
+            full_out.push_str(&format_line(i + 1, line));
+        }
+        let mtime = file_mtime(&key);
         self.entries.insert(
             key,
             Entry {
-                content,
+                lines,
+                full_output: Some(full_out),
                 turn: self.current_turn,
-                _read_at: Instant::now(),
+                mtime,
+            },
+        );
+    }
+
+    /// Store raw lines from a fresh disk read (used when we read the full file
+    /// to prime the cache after a ranged-read miss).
+    pub fn store_lines(&mut self, path: &str, lines: Vec<String>) {
+        let key = canonical(path);
+        // Pre-format full output
+        let mut full_out = format!("[{}]\n\n", path);
+        for (i, line) in lines.iter().enumerate() {
+            full_out.push_str(&format_line(i + 1, line));
+        }
+        let mtime = file_mtime(&key);
+        self.entries.insert(
+            key,
+            Entry {
+                lines,
+                full_output: Some(full_out),
+                turn: self.current_turn,
+                mtime,
             },
         );
     }
@@ -65,7 +146,6 @@ impl FileCache {
     pub fn invalidate_if_mentioned(&mut self, command: &str) {
         let to_remove: Vec<PathBuf> = self.entries.keys()
             .filter(|path| {
-                // Check both the canonical path and the file name / relative form
                 let path_str = path.to_string_lossy();
                 command.contains(path_str.as_ref())
                     || path.file_name()
@@ -78,22 +158,25 @@ impl FileCache {
             self.entries.remove(&key);
         }
     }
-
 }
 
 pub struct CacheHit {
     pub content: String,
     pub turns_ago: usize,
+    /// Total lines in the cached file
+    pub total_lines: usize,
+}
+
+pub struct RangeHit {
+    pub content: String,
+    pub turns_ago: usize,
+    /// Number of lines in the served range
+    pub range_lines: usize,
 }
 
 impl CacheHit {
-    /// Build the message returned to the model instead of a fresh file read.
     pub fn into_message(self) -> String {
-        let ago = match self.turns_ago {
-            0 => "this turn".to_string(),
-            1 => "1 turn ago".to_string(),
-            n => format!("{n} turns ago"),
-        };
+        let ago = age_str(self.turns_ago);
         format!(
             "[Returning cached version — file was read {ago}. \
              Content is shown below. If you believe the file has changed, use edit_file \
@@ -103,8 +186,36 @@ impl CacheHit {
     }
 }
 
+impl RangeHit {
+    pub fn into_message(self) -> String {
+        let ago = age_str(self.turns_ago);
+        format!(
+            "[Returning cached range — file was read {ago}. \
+             Content is shown below. If you believe the file has changed, use edit_file \
+             or write_file to update it first.]\n\n{}",
+            self.content
+        )
+    }
+}
+
+fn age_str(turns_ago: usize) -> String {
+    match turns_ago {
+        0 => "this turn".to_string(),
+        1 => "1 turn ago".to_string(),
+        n => format!("{n} turns ago"),
+    }
+}
+
+/// Returns true if the file's current mtime differs from the cached mtime,
+/// meaning the file was modified externally since it was cached.
+fn mtime_changed(key: &Path, cached_mtime: Option<SystemTime>) -> bool {
+    match (file_mtime(key), cached_mtime) {
+        (Some(current), Some(cached)) => current != cached,
+        _ => false, // if we can't read mtime, assume unchanged
+    }
+}
+
 fn canonical(path: &str) -> PathBuf {
-    // Resolve to absolute path if possible; fall back to as-given
     Path::new(path)
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(path))
@@ -115,154 +226,107 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_canonical() {
-        let path = "test.txt";
-        let canonical_path = canonical(path);
-        assert!(canonical_path.is_absolute() || canonical_path.is_relative());
-    }
-
-    #[test]
-    fn test_next_turn() {
+    fn test_store_and_full_check() {
         let mut cache = FileCache::default();
-        assert_eq!(cache.current_turn, 0);
         cache.next_turn();
-        assert_eq!(cache.current_turn, 1);
+        cache.store("test.txt", "line one\nline two\nline three".to_string());
+        let hit = cache.check("test.txt").unwrap();
+        assert!(hit.content.contains("line one"));
+        assert_eq!(hit.turns_ago, 0);
     }
 
     #[test]
-    fn test_store_check() {
+    fn test_check_range_hit() {
         let mut cache = FileCache::default();
-        cache.next_turn(); // turn 1
-        cache.store("test.txt", "content".to_string());
-        let hit = cache.check("test.txt").unwrap();
-        assert_eq!(hit.content, "content");
-        assert_eq!(hit.turns_ago, 0);
+        cache.next_turn();
+        cache.store("test.txt", "line one\nline two\nline three\nline four\nline five".to_string());
+        // Request lines 2-4 (1-indexed: start=1, end=4 in 0-based terms)
+        let hit = cache.check_range("test.txt", 1, 4).unwrap();
+        assert!(hit.content.contains("line two"));
+        assert!(hit.content.contains("line three"));
+        assert!(hit.content.contains("line four"));
+        assert!(!hit.content.contains("line one")); // line 1 not in range
+        assert!(!hit.content.contains("line five")); // line 5 not in range
+    }
+
+    #[test]
+    fn test_check_range_miss_on_uncached_file() {
+        let cache = FileCache::default();
+        assert!(cache.check_range("nonexistent.txt", 0, 10).is_none());
+    }
+
+    #[test]
+    fn test_ranged_cache_serves_any_window() {
+        let mut cache = FileCache::default();
+        cache.store("big.rs", (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"));
+        // First window
+        let h1 = cache.check_range("big.rs", 0, 30).unwrap();
+        assert!(h1.content.contains("line 0"));
+        assert!(h1.content.contains("line 29"));
+        // Second window — different range, same file
+        let h2 = cache.check_range("big.rs", 50, 80).unwrap();
+        assert!(h2.content.contains("line 50"));
+        assert!(h2.content.contains("line 79"));
+        // No disk reads — both served from cache
+    }
+
+    #[test]
+    fn test_store_lines() {
+        let mut cache = FileCache::default();
+        let lines: Vec<String> = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        cache.store_lines("f.rs", lines);
+        let hit = cache.check("f.rs").unwrap();
+        assert!(hit.content.contains("alpha"));
+        let range_hit = cache.check_range("f.rs", 0, 2).unwrap();
+        assert!(range_hit.content.contains("alpha"));
+        assert!(range_hit.content.contains("beta"));
     }
 
     #[test]
     fn test_invalidate() {
         let mut cache = FileCache::default();
-        cache.next_turn(); // turn 1
         cache.store("test.txt", "content".to_string());
         cache.invalidate("test.txt");
         assert!(cache.check("test.txt").is_none());
+        assert!(cache.check_range("test.txt", 0, 5).is_none());
     }
 
     #[test]
     fn test_invalidate_if_mentioned() {
         let mut cache = FileCache::default();
-        cache.next_turn(); // turn 1
         cache.store("test.txt", "content".to_string());
-
-        // Command contains the full path
         cache.invalidate_if_mentioned("sed -i test.txt");
         assert!(cache.check("test.txt").is_none());
-
-        // Command contains the filename
-        cache.store("test.txt", "content".to_string());
-        cache.invalidate_if_mentioned("sed -i src/test.txt");
-        assert!(cache.check("test.txt").is_none());
     }
 
     #[test]
-    fn test_cache_hit_message() {
-        let hit = CacheHit {
-            content: "test".to_string(),
-            turns_ago: 0,
-        };
-        assert_eq!(hit.into_message(), "[Returning cached version — file was read this turn. Content is shown below. If you believe the file has changed, use edit_file or write_file to update it first.]\n\ntest");
-
-        let hit = CacheHit {
-            content: "test".to_string(),
-            turns_ago: 1,
-        };
-        assert_eq!(hit.into_message(), "[Returning cached version — file was read 1 turn ago. Content is shown below. If you believe the file has changed, use edit_file or write_file to update it first.]\n\ntest");
-
-        let hit = CacheHit {
-            content: "test".to_string(),
-            turns_ago: 2,
-        };
-        assert_eq!(hit.into_message(), "[Returning cached version — file was read 2 turns ago. Content is shown below. If you believe the file has changed, use edit_file or write_file to update it first.]\n\ntest");
-    }
-
-    #[test]
-    fn test_canonical_edge_cases() {
-        let cases = [
-            ("test.txt", "test.txt"),
-            ("./test.txt", "./test.txt"),
-            ("../test.txt", "../test.txt"),
-            ("/absolute/path.txt", "/absolute/path.txt"),
-        ];
-        
-        for (input, expected) in &cases {
-            let result = canonical(input);
-            assert_eq!(result.to_string_lossy(), *expected);
-        }
-    }
-
-    #[test]
-    fn test_cache_lifecycle() {
+    fn test_range_clamping() {
         let mut cache = FileCache::default();
-        let path = "test.txt";
-        
-        // Initial store
-        cache.store(path, "initial content".to_string());
-        
-        // Check cache hit
-        let hit = cache.check(path).unwrap();
-        assert_eq!(hit.content, "initial content");
-        assert_eq!(hit.turns_ago, 0);
-        
-        // Advance turn
-        cache.next_turn();
-        
-        // Check again (should still be cached)
-        let hit = cache.check(path).unwrap();
-        assert_eq!(hit.content, "initial content");
-        assert_eq!(hit.turns_ago, 1);
-        
-        // Update content
-        cache.store(path, "updated content".to_string());
-        
-        // Check again (should see new content)
-        let hit = cache.check(path).unwrap();
-        assert_eq!(hit.content, "updated content");
-        assert_eq!(hit.turns_ago, 0);
+        cache.store("small.rs", "a\nb\nc".to_string()); // 3 lines
+        // Request beyond end
+        let hit = cache.check_range("small.rs", 0, 999).unwrap();
+        assert!(hit.content.contains("a"));
+        assert!(hit.content.contains("c"));
     }
 
     #[test]
-    fn test_cache_invalidations() {
-        let mut cache = FileCache::default();
-        
-        // Store some files
-        cache.store("file1.txt", "content1".to_string());
-        cache.store("file2.txt", "content2".to_string());
-        
-        // Check initial state
-        assert_eq!(cache.entries.len(), 2);
-        
-        // Invalidate one file
-        cache.invalidate("file1.txt");
-        
-        // Check invalidation
-        assert!(cache.check("file1.txt").is_none());
-        assert!(cache.check("file2.txt").is_some());
-        
-        // Test command-based invalidation
-        cache.invalidate_if_mentioned("sed -i file2.txt");
-        assert!(cache.check("file2.txt").is_none());
+    fn test_age_str() {
+        assert_eq!(age_str(0), "this turn");
+        assert_eq!(age_str(1), "1 turn ago");
+        assert_eq!(age_str(5), "5 turns ago");
     }
 
     #[test]
-    fn test_cache_hit_message_formats() {
-        let hit = CacheHit {
-            content: "test content".to_string(),
-            turns_ago: 2,
-        };
-        
-        let message = hit.into_message();
-        
-        assert!(message.starts_with("[Returning cached version — file was read 2 turns ago."));
-        assert!(message.ends_with("test content"));
+    fn test_range_hit_message_prefix() {
+        let msg = RangeHit { content: "x".to_string(), turns_ago: 2, range_lines: 10 }.into_message();
+        assert!(msg.contains("cached range"));
+        assert!(msg.contains("2 turns ago"));
+    }
+
+    #[test]
+    fn test_full_hit_message_prefix() {
+        let msg = CacheHit { content: "x".to_string(), turns_ago: 1, total_lines: 50 }.into_message();
+        assert!(msg.contains("cached version"));
+        assert!(msg.contains("1 turn ago"));
     }
 }

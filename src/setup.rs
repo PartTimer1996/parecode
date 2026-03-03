@@ -767,4 +767,103 @@ mod tests {
         assert_eq!(guess_context_tokens("llama3.1:70b"), 131_072);
         assert_eq!(guess_context_tokens("deepseek-coder-v2:16b"), 65_536);
     }
+
+    #[test]
+    fn test_truncate() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello", 5), "hello");
+        assert_eq!(truncate("hello world", 8), "hello w…");
+        assert_eq!(truncate("hello world", 5), "hell…");
+        assert_eq!(truncate("", 10), "");
+    }
+
+
+    #[test]
+    fn test_profile_form_to_config_toml() {
+        let form = ProfileForm {
+            profile_name: "test".to_string(),
+            endpoint: "http://example.com".to_string(),
+            model: "test-model".to_string(),
+            context_tokens: 12345,
+            api_key: Some("secret-key".to_string()),
+            key_source: None,
+        };
+
+        let config = form.to_config_toml();
+        assert!(config.contains("default_profile = \"test\""));
+        assert!(config.contains("endpoint       = \"http://example.com\""));
+        assert!(config.contains("model          = \"test-model\""));
+        assert!(config.contains("context_tokens = 12345"));
+        assert!(config.contains("api_key        = \"secret-key\""));
+        assert!(config.contains(PROFILE_EXAMPLES));
+    }
+
+
+    #[test]
+    fn test_update_cache_path() {
+        let path = update_cache_path();
+        // Should be in XDG_DATA_HOME or ~/.local/share/parecode/update-check
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("parecode"));
+        assert!(path_str.ends_with("update-check"));
+    }
+
+    #[test]
+    fn test_read_write_update_cache() {
+        use tempfile::tempdir;
+        use std::fs;
+        use std::time::{SystemTime, Duration};
+
+        let dir = tempdir().unwrap();
+        let cache_path = dir.path().join("update-check");
+
+        // Cache is empty initially
+        assert!(read_update_cache(&cache_path).is_none());
+
+        // Write cache
+        write_update_cache(&cache_path, "1.2.3");
+        assert_eq!(read_update_cache(&cache_path).unwrap(), "1.2.3");
+
+        // Manually modify file timestamp to be old (>24 hours)
+        // by setting modification time to Unix epoch
+        let metadata = fs::metadata(&cache_path).unwrap();
+        let _mtime = metadata.modified().unwrap();
+        
+        // Simulate an old file by creating a new file with old timestamp
+        // We'll just test that the cache works with a fresh file first
+        fs::remove_file(&cache_path).unwrap();
+        write_update_cache(&cache_path, "1.2.3");
+        
+        // This should be fresh
+        assert_eq!(read_update_cache(&cache_path).unwrap(), "1.2.3");
+        
+        // Now create an explicitly old file
+        fs::remove_file(&cache_path).unwrap();
+        fs::write(&cache_path, "1.2.3").unwrap();
+        
+        // Set an old modification time
+        #[cfg(unix)]
+        {
+            let now = SystemTime::now();
+            let one_day_ago = now - Duration::from_secs(25 * 60 * 60); // 25 hours
+            let filetime = filetime::FileTime::from_system_time(one_day_ago);
+            filetime::set_file_mtime(&cache_path, filetime).unwrap();
+        }
+        
+        
+        // Cache should be invalid due to age
+        assert!(read_update_cache(&cache_path).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_is_ollama_running_does_not_panic() {
+        // Just verify the function runs without panicking
+        let _ = is_ollama_running().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_for_update_does_not_panic() {
+        // Just verify the function runs without panicking
+        let _ = check_for_update().await;
+    }
 }

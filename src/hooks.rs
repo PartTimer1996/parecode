@@ -10,6 +10,7 @@ use tokio::process::Command;
 // ── Config ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(PartialEq)]
 pub struct HookConfig {
     /// Commands run after every successful edit_file or write_file call.
     /// Output is injected into the model's tool result so it can self-correct.
@@ -189,7 +190,7 @@ pub fn write_active_hooks(name: Option<&str>) {
 // ── Runner ────────────────────────────────────────────────────────────────────
 
 const HOOK_TIMEOUT_SECS: u64 = 30;
-const HOOK_MAX_LINES: usize = 50;
+const HOOK_MAX_LINES: usize = 100;
 
 /// Run a single hook command via `sh -c`. Merges stdout + stderr.
 /// Caps output at `HOOK_MAX_LINES` lines to avoid bloating context.
@@ -229,8 +230,11 @@ pub async fn run_hook(cmd: &str) -> HookResult {
     let output = if lines.len() <= HOOK_MAX_LINES {
         combined
     } else {
-        let truncated = lines[..HOOK_MAX_LINES].join("\n");
-        format!("{truncated}\n[+{} lines truncated]", lines.len() - HOOK_MAX_LINES)
+        // Tail-truncate: keep the last HOOK_MAX_LINES lines.
+        // cargo test puts failures and summary at the end, not the start.
+        let skipped = lines.len() - HOOK_MAX_LINES;
+        let tail = lines[skipped..].join("\n");
+        format!("[{skipped} lines omitted]\n{tail}")
     };
 
     HookResult { cmd: cmd.to_string(), output, exit_code }
@@ -484,13 +488,18 @@ mod tests {
         let lines = HOOK_MAX_LINES + 10;
         let cmd = format!("seq 1 {}", lines);
         let result = run_hook(&cmd).await;
-        
+
         assert_eq!(result.exit_code, 0);
         let output_lines: Vec<&str> = result.output.lines().collect();
-        
-        // Should have HOOK_MAX_LINES + 1 (truncation message)
+
+        // Should have HOOK_MAX_LINES + 1 (omission header line)
         assert_eq!(output_lines.len(), HOOK_MAX_LINES + 1);
-        assert!(result.output.contains("[+10 lines truncated]"));
+        // Tail-truncation: last line is the final seq number
+        assert!(result.output.contains(&lines.to_string()));
+        // Omission header present
+        assert!(result.output.contains("lines omitted"));
+        // Head (line 1) is NOT present — it was skipped
+        assert!(!result.output.starts_with("1\n"));
     }
 
     #[tokio::test]

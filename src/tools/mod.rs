@@ -164,3 +164,114 @@ pub fn dispatch(name: &str, args: &Value) -> Result<String> {
         .map(|(_, f)| f(args))
         .ok_or_else(|| anyhow!("Unknown tool: '{}'", name))?
 }
+
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_all_tool_names() {
+        let names = all_tool_names();
+        assert!(names.contains(&TOOL_READ_FILE));
+        assert!(names.contains(&TOOL_WRITE_FILE));
+        assert!(names.contains(&TOOL_EDIT_FILE));
+        assert!(names.contains(&TOOL_PATCH_FILE));
+        assert!(names.contains(&TOOL_BASH));
+        assert!(names.contains(&TOOL_SEARCH));
+        assert!(names.contains(&TOOL_LIST_FILES));
+        assert!(names.contains(&TOOL_RECALL));
+        assert!(names.contains(&TOOL_ASK_USER));
+        assert_eq!(names.len(), 9);
+    }
+
+    #[test]
+    fn test_turn_thresholds_default() {
+        let t = TurnThresholds::default();
+        assert_eq!(t.exploration_end, 1);
+        assert_eq!(t.mutation_start, 2);
+        assert_eq!(t.recall_useful, 3);
+    }
+
+    #[test]
+    fn test_get_tool() {
+        assert!(get_tool(TOOL_READ_FILE).is_some());
+        assert!(get_tool(TOOL_BASH).is_some());
+        assert!(get_tool("invalid_tool").is_none());
+        
+        let read_def = get_tool(TOOL_READ_FILE).unwrap();
+        assert_eq!(read_def["name"], TOOL_READ_FILE);
+    }
+
+    #[test]
+    fn test_all_definitions() {
+        let defs = all_definitions();
+        assert_eq!(defs.len(), 9);
+        assert!(defs.iter().any(|d| d.name == TOOL_READ_FILE));
+        assert!(defs.iter().any(|d| d.name == TOOL_ASK_USER));
+    }
+
+    #[test]
+    fn test_tools_for_turn_logic() {
+        // Turn 0: Exploration (includes list and write)
+        let t0 = tools_for_turn(0, false);
+        let names0: Vec<_> = t0.iter().map(|d| d.name.as_str()).collect();
+        assert!(names0.contains(&TOOL_LIST_FILES));
+        assert!(names0.contains(&TOOL_WRITE_FILE));
+        assert!(!names0.contains(&TOOL_PATCH_FILE));
+        assert!(!names0.contains(&TOOL_RECALL));
+
+        // Turn 2: Mutation (includes patch)
+        let t2 = tools_for_turn(2, false);
+        let names2: Vec<_> = t2.iter().map(|d| d.name.as_str()).collect();
+        assert!(!names2.contains(&TOOL_LIST_FILES));
+        assert!(names2.contains(&TOOL_PATCH_FILE));
+        assert!(!names2.contains(&TOOL_RECALL));
+
+        // Turn 2 with summaries: Should include recall even if turn < recall_useful
+        let t2s = tools_for_turn(2, true);
+        let names2s: Vec<_> = t2s.iter().map(|d| d.name.as_str()).collect();
+        assert!(names2s.contains(&TOOL_RECALL));
+
+        // Turn 4: Recall useful
+        let t4 = tools_for_turn(4, false);
+        let names4: Vec<_> = t4.iter().map(|d| d.name.as_str()).collect();
+        assert!(names4.contains(&TOOL_RECALL));
+    }
+
+    #[test]
+    fn test_is_native() {
+        assert!(is_native(TOOL_READ_FILE));
+        assert!(is_native(TOOL_PATCH_FILE));
+        assert!(!is_native("mcp_custom_tool"));
+        assert!(!is_native(""));
+    }
+
+    #[test]
+    fn test_dispatch_unknown_tool() {
+        let res = dispatch("unknown", &json!({}));
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().to_string(), "Unknown tool: 'unknown'");
+    }
+
+    #[test]
+    fn test_def_helper_edges() {
+        // Test with missing fields or wrong types
+        let d = def(json!({}));
+        assert_eq!(d.name, "");
+        assert_eq!(d.description, "");
+        assert!(d.parameters.is_null());
+
+        let d2 = def(json!({
+            "name": "foo",
+            "description": 123, // wrong type
+            "parameters": {"type": "object"}
+        }));
+        assert_eq!(d2.name, "foo");
+        assert_eq!(d2.description, ""); // defaults to empty string on non-str
+        assert_eq!(d2.parameters["type"], "object");
+    }
+}

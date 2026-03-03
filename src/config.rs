@@ -7,7 +7,7 @@ use std::path::PathBuf;
 // ── MCP server config ─────────────────────────────────────────────────────────
 
 /// Configuration for a single MCP server process.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerConfig {
     /// Human-readable name, used as the server prefix in tool names ("brave.brave_web_search")
     pub name: String,
@@ -20,7 +20,7 @@ pub struct McpServerConfig {
 
 // ── Profile ───────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Profile {
     /// OpenAI-compatible endpoint URL
     pub endpoint: String,
@@ -354,3 +354,205 @@ context_tokens = 32768
 # name    = "fetch"
 # command = ["uvx", "mcp-server-fetch"]
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Default functions ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_context_tokens() {
+        assert_eq!(default_context_tokens(), 32_768);
+    }
+
+    #[test]
+    fn test_default_auto_commit_prefix() {
+        assert_eq!(default_auto_commit_prefix(), "parecode: ".to_string());
+    }
+
+    #[test]
+    fn test_default_git_context() {
+        assert_eq!(default_git_context(), true);
+    }
+
+    #[test]
+    fn test_default_profile_name() {
+        assert_eq!(default_profile_name(), "default".to_string());
+    }
+
+    // ── Profile ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_profile_default() {
+        let profile = Profile::default();
+        assert_eq!(profile.endpoint, "http://localhost:11434/v1/chat/completions");
+        assert_eq!(profile.model, "qwen3:14b");
+        assert_eq!(profile.context_tokens, 32_768);
+        assert_eq!(profile.api_key, None);
+        assert_eq!(profile.planner_model, None);
+        assert_eq!(profile.mcp_servers, Vec::new());
+        assert_eq!(profile.cost_per_mtok_input, None);
+        assert_eq!(profile.hooks, crate::hooks::HookConfig::default());
+        assert_eq!(profile.hooks_disabled, false);
+        assert_eq!(profile.auto_commit, false);
+        assert_eq!(profile.auto_commit_prefix, "parecode: ".to_string());
+        assert_eq!(profile.git_context, true);
+    }
+
+    // ── ConfigFile ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_file_resolve_profile() {
+        let mut file = ConfigFile::default();
+        file.default_profile = "local".to_string();
+        let profile = Profile {
+            endpoint: "http://example.com".to_string(),
+            model: "test".to_string(),
+            ..Default::default()
+        };
+        file.profiles.insert("local".to_string(), profile.clone());
+        file.profiles.insert("other".to_string(), Profile::default());
+
+        // Resolve default
+        assert_eq!(file.resolve_profile(None), Some(&profile));
+        // Resolve explicit existing
+        assert_eq!(file.resolve_profile(Some("other")), Some(&Profile::default()));
+        // Resolve non-existent
+        assert_eq!(file.resolve_profile(Some("missing")), None);
+        // Empty config file
+        let empty = ConfigFile::default();
+        assert_eq!(empty.resolve_profile(None), None);
+        assert_eq!(empty.resolve_profile(Some("local")), None);
+    }
+
+    // ── ResolvedConfig ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_resolved_config_resolve() {
+        let mut file = ConfigFile::default();
+        file.default_profile = "local".to_string();
+        let profile = Profile {
+            endpoint: "http://example.com".to_string(),
+            model: "model1".to_string(),
+            context_tokens: 1000,
+            api_key: Some("key1".to_string()),
+            planner_model: Some("planner1".to_string()),
+            cost_per_mtok_input: Some(0.5),
+            hooks: crate::hooks::HookConfig::default(),
+            hooks_disabled: false,
+            auto_commit: true,
+            auto_commit_prefix: "prefix: ".to_string(),
+            git_context: false,
+            ..Default::default()
+        };
+        file.profiles.insert("local".to_string(), profile.clone());
+        // Add a hook config
+        let mut hooks = HashMap::new();
+        hooks.insert("rust".to_string(), crate::hooks::HookConfig::default());
+        file.hooks = hooks;
+        file.active_hooks = Some("rust".to_string());
+
+        // No overrides
+        let resolved = ResolvedConfig::resolve(&file, None, None, None, None);
+        assert_eq!(resolved.endpoint, "http://example.com");
+        assert_eq!(resolved.model, "model1");
+        assert_eq!(resolved.context_tokens, 1000);
+        assert_eq!(resolved.api_key, Some("key1".to_string()));
+        assert_eq!(resolved.profile_name, "local");
+        assert_eq!(resolved.planner_model, Some("planner1".to_string()));
+        assert_eq!(resolved.cost_per_mtok_input, Some(0.5));
+        assert_eq!(resolved.hooks, crate::hooks::HookConfig::default());
+        assert_eq!(resolved.hooks_disabled, false);
+        assert_eq!(resolved.auto_commit, true);
+        assert_eq!(resolved.auto_commit_prefix, "prefix: ".to_string());
+        assert_eq!(resolved.git_context, false);
+        assert_eq!(resolved.available_hooks, vec!["rust".to_string()]);
+        assert_eq!(resolved.active_hooks, Some("rust".to_string()));
+        assert_eq!(resolved.active_hook_config, crate::hooks::HookConfig::default());
+
+        // Override profile
+        let other_profile = Profile {
+            endpoint: "http://other.com".to_string(),
+            model: "model2".to_string(),
+            ..Default::default()
+        };
+        file.profiles.insert("other".to_string(), other_profile);
+        let resolved = ResolvedConfig::resolve(&file, Some("other"), None, None, None);
+        assert_eq!(resolved.endpoint, "http://other.com");
+        assert_eq!(resolved.model, "model2");
+        assert_eq!(resolved.profile_name, "other");
+
+        // CLI overrides
+        let resolved = ResolvedConfig::resolve(
+            &file,
+            None,
+            Some("http://override.com"),
+            Some("override_model"),
+            Some("override_key"),
+        );
+        assert_eq!(resolved.endpoint, "http://override.com");
+        assert_eq!(resolved.model, "override_model");
+        assert_eq!(resolved.api_key, Some("override_key".to_string()));
+        // Other fields from profile unchanged
+        assert_eq!(resolved.context_tokens, 1000);
+        assert_eq!(resolved.planner_model, Some("planner1".to_string()));
+    }
+
+    // ── Serialization ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_profile_serialization_defaults() {
+        let toml_str = r#"
+            endpoint = "http://localhost:11434/v1/chat/completions"
+            model = "qwen3:14b"
+        "#;
+        let profile: Profile = toml::from_str(toml_str).unwrap();
+        assert_eq!(profile.context_tokens, 32_768);
+        assert_eq!(profile.api_key, None);
+        assert_eq!(profile.planner_model, None);
+        assert_eq!(profile.mcp_servers, Vec::new());
+        assert_eq!(profile.cost_per_mtok_input, None);
+        assert_eq!(profile.hooks, crate::hooks::HookConfig::default());
+        assert_eq!(profile.hooks_disabled, false);
+        assert_eq!(profile.auto_commit, false);
+        assert_eq!(profile.auto_commit_prefix, "parecode: ".to_string());
+        assert_eq!(profile.git_context, true);
+    }
+
+    #[test]
+    fn test_mcp_server_config_serialization() {
+        let toml_str = r#"
+            name = "brave"
+            command = ["npx", "-y", "@modelcontextprotocol/server-brave-search"]
+            [env]
+            BRAVE_API_KEY = "BSA..."
+        "#;
+        let config: McpServerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.name, "brave");
+        assert_eq!(config.command, vec!["npx", "-y", "@modelcontextprotocol/server-brave-search"]);
+        assert_eq!(config.env.get("BRAVE_API_KEY"), Some(&"BSA...".to_string()));
+    }
+
+    // ── Constants ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_config_toml_is_valid() {
+        // Ensure the default config template is valid TOML
+        toml::from_str::<toml::Value>(DEFAULT_CONFIG_TOML).unwrap();
+    }
+
+    // ── Path functions ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_path() {
+        let path = config_path();
+        assert!(path.ends_with("parecode/config.toml"));
+    }
+
+    #[test]
+    fn test_dirs_config_dir_env() {
+        // This is a weak test but ensures the function doesn't panic
+        let _ = dirs_config_dir();
+    }
+}

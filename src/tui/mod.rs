@@ -64,7 +64,7 @@ pub enum UiEvent {
     /// Result of a tool call
     ToolResult { summary: String },
     /// Cache hit on a file read
-    CacheHit { path: String },
+    CacheHit { path: String, lines: usize },
     /// Loop detected on a tool
     LoopWarning { tool_name: String },
     /// Context was compressed
@@ -132,7 +132,7 @@ pub enum ConversationEntry {
     ThinkingChunk(String),     // model reasoning inside <think>...</think>
     ToolCall { name: String, args_summary: String },
     ToolResult(String),
-    CacheHit(String),
+    CacheHit { path: String, lines: usize },
     SystemMsg(String),         // warnings, budget notices, etc.
     HookOutput { event: String, output: String, success: bool },
     TaskComplete {
@@ -493,6 +493,9 @@ pub struct AppState {
     pub project_narrative: Option<crate::narrative::ProjectNarrative>,
     /// PIE Phase 3 context weights — tracks which files are useful vs wasted per task.
     pub context_weights: crate::context_weights::ContextWeights,
+    /// File read cache — persists across tasks in the same session so repeat reads
+    /// of unchanged files are served from memory, not disk.
+    pub file_cache: std::sync::Arc<tokio::sync::Mutex<crate::cache::FileCache>>,
 }
 
 impl AppState {
@@ -570,6 +573,7 @@ impl AppState {
             project_graph: None,     // populated during splash in event_loop
             project_narrative: None, // populated during splash in event_loop
             context_weights: crate::context_weights::ContextWeights::load(),
+            file_cache: std::sync::Arc::new(tokio::sync::Mutex::new(crate::cache::FileCache::default())),
         }
     }
 
@@ -628,8 +632,8 @@ impl AppState {
             UiEvent::ToolResult { summary } => {
                 self.push(ConversationEntry::ToolResult(summary));
             }
-            UiEvent::CacheHit { path } => {
-                self.push(ConversationEntry::CacheHit(path));
+            UiEvent::CacheHit { path, lines } => {
+                self.push(ConversationEntry::CacheHit { path, lines });
             }
             UiEvent::LoopWarning { tool_name } => {
                 self.push(ConversationEntry::SystemMsg(
@@ -3023,9 +3027,10 @@ fn launch_agent(
     state.collecting_response.clear();
     state.collecting_tools.clear();
 
+    let file_cache = state.file_cache.clone();
     tokio::spawn(async move {
         tokio::select! {
-            result = crate::agent::run_tui(&task, &client, &agent_config, attached, prior_context, ui_tx.clone()) => {
+            result = crate::agent::run_tui(&task, &client, &agent_config, attached, prior_context, ui_tx.clone(), file_cache) => {
                 if let Err(e) = result {
                     let _ = ui_tx.send(UiEvent::AgentError(e.to_string()));
                 }

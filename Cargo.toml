@@ -15,7 +15,6 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-tempfile = "3"
 clap_complete = "4"
 reqwest = { version = "0.13.2", features = ["json", "stream"] }
 tokio = { version = "1", features = ["full"] }
@@ -33,6 +32,10 @@ flate2 = "1"
 tar = "0.4"
 zip = "8.1.0"
 xz2 = "0.1"
+
+[dev-dependencies]
+filetime = "0.2"
+tempfile = "3"
 
 # The profile that 'dist' will build with
 [profile.dist]

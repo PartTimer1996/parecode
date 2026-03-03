@@ -706,6 +706,7 @@ pub async fn execute_step(
         attached,
         prior_context,
         ui_tx,
+        std::sync::Arc::new(tokio::sync::Mutex::new(crate::cache::FileCache::default())),
     )
     .await
 }
