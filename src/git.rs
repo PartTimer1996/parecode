@@ -46,11 +46,11 @@ impl GitRepo {
             root: PathBuf::from(root.trim()),
         })
     }
-}
 
-/// Returns `true` if `path` is inside a git repository and git is installed.
-pub fn is_git_repo(path: &Path) -> bool {
-    GitRepo::open(path).is_some()
+    /// Returns `true` if `path` is inside a git repository and git is installed.
+    pub fn is_git_repo(path: &Path) -> bool {
+        GitRepo::open(path).is_some()
+    }
 }
 
 // ── Core operations ────────────────────────────────────────────────────────────
@@ -58,12 +58,36 @@ pub fn is_git_repo(path: &Path) -> bool {
 impl GitRepo {
     /// Create a checkpoint before a task runs.
     ///
-    /// Always returns the current HEAD hash without creating any commits.
-    /// This preserves the user's working tree state — dirty files are left as-is.
+    /// Returns the current HEAD hash.
+    /// If the working tree has uncommitted changes, stages everything and creates a
+    /// WIP commit with the given summary (truncated to 72 chars).
+    /// Uses `--no-verify` to bypass user pre-commit hooks.
     /// The /undo command uses these hashes to `git reset --hard` back.
-    pub fn checkpoint(&self, _task_summary: &str) -> Result<String> {
-        self.run_git(&["rev-parse", "HEAD"])
-            .map(|s| s.trim().to_string())
+    pub fn checkpoint(&self, task_summary: &str) -> Result<String> {
+        // Check if there are uncommitted changes
+        let status = self.run_git(&["status", "--porcelain"])?;
+        if status.trim().is_empty() {
+            // Clean tree — return HEAD hash only
+            self.run_git(&["rev-parse", "HEAD"])
+                .map(|s| s.trim().to_string())
+        } else {
+            // Dirty tree — create a WIP commit
+            let summary: String = task_summary
+                .lines()
+                .next()
+                .unwrap_or(task_summary)
+                .chars()
+                .take(72)
+                .collect();
+            let message = format!("parecode: checkpoint {}", summary);
+            
+            self.run_git(&["add", "-A"])?;
+            self.run_git(&["commit", "--no-verify", "-m", &message])?;
+            
+            // Return the new commit hash
+            self.run_git(&["rev-parse", "HEAD"])
+                .map(|s| s.trim().to_string())
+        }
     }
 
     /// Revert the working tree to the `n`th most recent parecode checkpoint (1-based).
@@ -297,10 +321,10 @@ mod tests {
     #[test]
     fn test_is_git_repo() {
         let dir = tempdir().unwrap();
-        assert!(!is_git_repo(dir.path()));
+        assert!(!GitRepo::is_git_repo(dir.path()));
 
         let (_dir, repo) = setup_git_repo();
-        assert!(is_git_repo(&repo.root));
+        assert!(GitRepo::is_git_repo(&repo.root));
     }
 
     #[test]
@@ -479,12 +503,25 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_message_ignored() {
+    fn test_checkpoint_message_included_in_wip_commit() {
         let (_dir, repo) = setup_git_repo();
-        let hash1 = repo.checkpoint("message1").unwrap();
-        let hash2 = repo.checkpoint("message2").unwrap();
-        // checkpoint doesn't create commits, so hash should be same
-        assert_eq!(hash1, hash2);
+        
+        // Make dirty changes
+        fs::write(repo.root.join("file.txt"), "content").unwrap();
+        
+        let hash1 = repo.checkpoint("test message 1").unwrap();
+        // Verify commit message includes the summary
+        let log = repo.run_git(&["log", "--format=%s", "-1"]).unwrap();
+        assert!(log.contains("test message 1"));
+        
+        // Make more changes
+        fs::write(repo.root.join("file2.txt"), "content2").unwrap();
+        
+        let hash2 = repo.checkpoint("test message 2").unwrap();
+        assert_ne!(hash1, hash2, "different checkpoints should have different hashes");
+        
+        let log2 = repo.run_git(&["log", "--format=%s", "-1"]).unwrap();
+        assert!(log2.contains("test message 2"));
     }
 
     #[test]
@@ -531,10 +568,13 @@ mod tests {
         fs::write(repo.root.join("dirty1.txt"), "1").unwrap();
         fs::write(repo.root.join("dirty2.txt"), "2").unwrap();
 
-        // checkpoint still returns HEAD hash (the last commit)
-        // It doesn't create a new commit on its own
+        // checkpoint with dirty tree should create a new commit
         let after_dirty = repo.checkpoint("dirty").unwrap();
-        assert_eq!(clean_hash, after_dirty);
+        assert_ne!(clean_hash, after_dirty, "dirty tree should create new commit");
+        
+        // Verify commit exists with correct message
+        let log = repo.run_git(&["log", "--oneline", "-1"]).unwrap();
+        assert!(log.contains("parecode: checkpoint dirty"));
     }
 
     #[test]

@@ -554,7 +554,7 @@ impl AppState {
             sidebar_focused: false,
             sidebar_selected: 0,
             sidebar_entries: Vec::new(),
-            git_available: crate::git::is_git_repo(std::path::Path::new(".")),
+            git_available: crate::git::GitRepo::is_git_repo(std::path::Path::new(".")),
             last_checkpoint_hash: None,
             git_stat_content: String::new(),
             git_diff_content: String::new(),
