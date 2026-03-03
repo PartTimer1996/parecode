@@ -31,7 +31,6 @@ use crossterm::{
     event::{
         Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
         EnableBracketedPaste, DisableBracketedPaste,
-        EnableMouseCapture, DisableMouseCapture,
         MouseEventKind,
     },
     execute,
