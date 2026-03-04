@@ -3028,20 +3028,13 @@ fn launch_agent(
         .map(|f| f.path.clone())
         .collect();
 
-    // Build prior context from completed turns (up to the active_turn rollback pointer)
-    let active_limit = state
-        .session
-        .as_ref()
-        .map(|s| s.active_turn + 1) // turns[0..=active_turn]
-        .unwrap_or(usize::MAX);
-    let visible_turns: Vec<&ConversationTurn> = state
-        .conversation_turns
+    // Pass the last few completed turns for session continuity (capped in agent.rs).
+    let active_limit = state.session.as_ref().map(|s| s.active_turn + 1).unwrap_or(usize::MAX);
+    let prior_turns: Vec<crate::sessions::ConversationTurn> = state.conversation_turns
         .iter()
         .filter(|t| t.turn_index < active_limit)
+        .cloned()
         .collect();
-    // Clone needed to move into the spawn closure
-    let visible_owned: Vec<ConversationTurn> = visible_turns.iter().map(|t| (*t).clone()).collect();
-    let prior_context = sessions::build_prior_context(&visible_owned);
 
     // Reset collectors for this new run
     state.collecting_response.clear();
@@ -3053,7 +3046,7 @@ fn launch_agent(
     let file_cache = state.file_cache.clone();
     tokio::spawn(async move {
         tokio::select! {
-            result = crate::agent::run_tui(&task, &client, &agent_config, attached, prior_context, ui_tx.clone(), file_cache) => {
+            result = crate::agent::run_tui(&task, &client, &agent_config, attached, prior_turns, ui_tx.clone(), file_cache) => {
                 if let Err(e) = result {
                     let _ = ui_tx.send(UiEvent::AgentError(e.to_string()));
                 }

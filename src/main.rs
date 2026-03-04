@@ -224,7 +224,7 @@ async fn run_single_shot(
 
     // Spawn agent
     let agent_handle = tokio::spawn(async move {
-        agent::run_tui(&task, &client, &config, vec![], None, tx,
+        agent::run_tui(&task, &client, &config, vec![], vec![], tx,
             std::sync::Arc::new(tokio::sync::Mutex::new(crate::cache::FileCache::default()))
         ).await
     });

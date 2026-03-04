@@ -99,13 +99,13 @@ Do not read files unless strictly necessary. Keep responses short.";
 
 /// Run agent, emitting UiEvents to a ratatui TUI over `ui_tx`.
 /// `attached` is a list of file paths hinted by the user via #file — no content, just pointers.
-/// `prior_context` is an optional preamble summarising earlier turns in this session.
+/// `prior_turns` is the last N completed turns from this session, prepended as message pairs.
 pub async fn run_tui(
     task: &str,
     client: &Client,
     config: &AgentConfig,
     attached: Vec<String>,
-    prior_context: Option<String>,
+    prior_turns: Vec<crate::sessions::ConversationTurn>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     shared_cache: std::sync::Arc<tokio::sync::Mutex<crate::cache::FileCache>>,
 ) -> Result<()> {
@@ -148,7 +148,7 @@ pub async fn run_tui(
     let system_prompt = system_prompt.as_str();
     let system_tokens = crate::budget::estimate_tokens(system_prompt);
 
-    let user_content = build_user_message(task, prior_context.as_deref(), &attached);
+    let user_content = build_user_message(task, &attached);
 
     // ── Git checkpoint ────────────────────────────────────────────────────────
     // Create a checkpoint before the task starts. If the tree is dirty, this
@@ -176,6 +176,27 @@ pub async fn run_tui(
     // project summary as pre-executed context (high salience, sent once).
     if let (Some(graph), Some(narrative)) = (&config.project_graph, &config.project_narrative) {
         messages.extend(pie_injection_messages(graph, narrative));
+    }
+
+    // ── Prior turn pairs ─────────────────────────────────────────────────────
+    // Inject the last few turns as lean user/assistant pairs so the model has
+    // session continuity for follow-up tasks. No tool results — just what was
+    // asked and what was answered. Capped to avoid token bloat.
+    const MAX_PRIOR_TURNS: usize = 3;
+    let prior_start = prior_turns.len().saturating_sub(MAX_PRIOR_TURNS);
+    for turn in &prior_turns[prior_start..] {
+        let user_text: String = turn.user_message.chars().take(300).collect();
+        let assistant_text: String = turn.agent_response.chars().take(500).collect();
+        messages.push(Message {
+            role: "user".to_string(),
+            content: MessageContent::from(user_text),
+            tool_calls: vec![],
+        });
+        messages.push(Message {
+            role: "assistant".to_string(),
+            content: MessageContent::from(assistant_text),
+            tool_calls: vec![],
+        });
     }
 
     messages.push(Message {
@@ -461,17 +482,10 @@ pub fn build_system_prompt(config: &AgentConfig, git_status: Option<&str>) -> St
     prompt
 }
 
-/// Assemble the first user message: prior context + attached file hints + task.
+/// Assemble the user message: attached file hints + task.
 /// `attached` is paths only — no content. The model uses read_file if it needs content.
-pub fn build_user_message(
-    task: &str,
-    prior_context: Option<&str>,
-    attached: &[String],
-) -> String {
+pub fn build_user_message(task: &str, attached: &[String]) -> String {
     let mut s = String::new();
-    if let Some(ctx) = prior_context {
-        s.push_str(ctx);
-    }
     if !attached.is_empty() {
         s.push_str("Relevant files (use read_file if you need content):\n");
         for path in attached {
@@ -1015,21 +1029,14 @@ mod tests {
 
     #[test]
     fn test_user_message_task_only() {
-        let msg = build_user_message("do the thing", None, &[]);
+        let msg = build_user_message("do the thing", &[]);
         assert_eq!(msg, "do the thing");
-    }
-
-    #[test]
-    fn test_user_message_with_prior_context() {
-        let msg = build_user_message("new task", Some("prior stuff\n"), &[]);
-        assert!(msg.starts_with("prior stuff\n"));
-        assert!(msg.ends_with("new task"));
     }
 
     #[test]
     fn test_user_message_with_attached_files() {
         let attached = vec!["src/foo.rs".to_string()];
-        let msg = build_user_message("fix it", None, &attached);
+        let msg = build_user_message("fix it", &attached);
         assert!(msg.contains("src/foo.rs"));
         assert!(msg.contains("read_file"));
         assert!(msg.ends_with("fix it"));
@@ -1037,13 +1044,11 @@ mod tests {
 
     #[test]
     fn test_user_message_ordering() {
-        // prior context → attached hints → task, in that order
+        // attached hints before task
         let attached = vec!["a.rs".to_string()];
-        let msg = build_user_message("task", Some("prior"), &attached);
-        let prior_pos = msg.find("prior").unwrap();
+        let msg = build_user_message("task", &attached);
         let attach_pos = msg.find("a.rs").unwrap();
         let task_pos = msg.rfind("task").unwrap();
-        assert!(prior_pos < attach_pos);
         assert!(attach_pos < task_pos);
     }
 

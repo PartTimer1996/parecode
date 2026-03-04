@@ -692,6 +692,7 @@ fn try_write_plan_to_disk(plan: &Plan) -> anyhow::Result<()> {
 /// `prior_summaries` is a list of (description, summary) from completed steps,
 /// injected as a compact preamble so the model knows what changed before this step.
 /// Returns `Ok(())` on success, `Err(msg)` on failure.
+/// TESTING IS ESSENtiAL TO BE IMPROVED!! 
 pub async fn execute_step(
     step: &PlanStep,
     client: &Client,
@@ -733,7 +734,7 @@ pub async fn execute_step(
         client,
         config,
         attached,
-        prior_context,
+        vec![], // executor steps don't need session history
         ui_tx,
         std::sync::Arc::new(tokio::sync::Mutex::new(crate::cache::FileCache::default())),
     )
