@@ -280,8 +280,17 @@ pub async fn run_tui(
         // returned together (required by the OpenAI API spec).
         let mut tool_results: Vec<ContentPart> = Vec::new();
         let mut mutated_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut all_terminal = true; // all calls were mutations or bash (no reads/queries)
+        let mut any_error = false;   // any result contained an error/failure marker
 
         for tc in &response.tool_calls {
+            let is_terminal_kind = matches!(
+                ToolKind::classify(&tc.name, &serde_json::from_str(&tc.arguments).unwrap_or(Value::Null)),
+                ToolKind::Mutate { .. } | ToolKind::Other { is_bash: true }
+            );
+            if !is_terminal_kind {
+                all_terminal = false;
+            }
             let (part, dispatched) = execute_one_tool_call(
                 tc,
                 &mut mutated_files,
@@ -296,6 +305,15 @@ pub async fn run_tui(
                 tool_call_count += 1;
             }
             if let Some(part) = part {
+                if let ContentPart::ToolResult { ref content, .. } = part {
+                    if content.contains("[Tool error")
+                        || content.contains("✗ build check failed")
+                        || content.contains("⚠ FILE WRITTEN BUT BUILD BROKEN")
+                        || content.contains("⚠ skipped dependent edit")
+                    {
+                        any_error = true;
+                    }
+                }
                 tool_results.push(part);
             }
         }
@@ -310,6 +328,15 @@ pub async fn run_tui(
         // calls — it wastes context once results are in. Final assistant turns
         // (no tool calls) are never touched — they're the visible response.
         strip_cot_from_last_assistant(&mut messages);
+
+        // **MASSIVELY IMPORTANT TO TEST** If we end early when we shouldn't we ruin workflows
+        // ── Early-exit: skip the "I'm done" round-trip ────────────────────────
+        // If every tool call this turn was a mutation or bash and none failed,
+        // the task is complete. Breaking here avoids a wasted API call that
+        // sends the full accumulated context just to receive a "done" message.
+        if should_skip_done_turn(all_terminal, !mutated_files.is_empty(), any_error) {
+            break;
+        }
 
         // Update inflight tool count immediately after execution so the TUI
         // shows the correct count while the next API call streams.
@@ -970,6 +997,23 @@ fn format_args_summary(args: &Value) -> String {
     }
 }
 
+/// Decide whether to skip the final "I'm done" model round-trip.
+///
+/// Returns `true` (break early) when:
+/// - Every tool call was a mutation (edit/write/patch) or bash — no reads/queries
+/// - At least one file was actually mutated (guards against pure-bash turns like `git status`)
+/// - No result contained an error or failure marker
+///
+/// When `true`, the agent has verifiably completed the task and the next API call
+/// would only produce a summary message, wasting the full accumulated context as input.
+pub fn should_skip_done_turn(
+    all_terminal: bool,
+    mutated_files_nonempty: bool,
+    any_error: bool,
+) -> bool {
+    all_terminal && mutated_files_nonempty && !any_error
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1353,5 +1397,82 @@ mod tests {
             assert!(content.contains("dry-run"), "got: {content}");
             assert!(content.contains("bash"));
         }
+    }
+
+    // ── should_skip_done_turn ─────────────────────────────────────────────────
+    // These tests are critical: a false positive (skipping when we shouldn't)
+    // breaks multi-step tasks by cutting off the agent mid-workflow.
+
+    #[test]
+    fn test_skip_done_turn_happy_path() {
+        // Clean mutation turn → should skip
+        assert!(should_skip_done_turn(true, true, false));
+    }
+
+    #[test]
+    fn test_skip_done_turn_no_mutation_no_skip() {
+        // all_terminal=true but mutated_files is empty → pure bash like `git status`
+        // Must NOT skip — the model may need to react to the output
+        assert!(!should_skip_done_turn(true, false, false));
+    }
+
+    #[test]
+    fn test_skip_done_turn_has_read_no_skip() {
+        // Model did a read_file + edit_file → all_terminal=false
+        // Must NOT skip — model needs to confirm/continue after reading
+        assert!(!should_skip_done_turn(false, true, false));
+    }
+
+    #[test]
+    fn test_skip_done_turn_has_query_no_skip() {
+        // Model called project_index or search → all_terminal=false
+        // Must NOT skip — model is exploring, not done
+        assert!(!should_skip_done_turn(false, false, false));
+    }
+
+    #[test]
+    fn test_skip_done_turn_error_no_skip() {
+        // Mutation happened but build check failed → any_error=true
+        // Must NOT skip — model needs to see and fix the error
+        assert!(!should_skip_done_turn(true, true, true));
+    }
+
+    #[test]
+    fn test_skip_done_turn_error_with_read_no_skip() {
+        // Error AND had reads — doubly must not skip
+        assert!(!should_skip_done_turn(false, true, true));
+    }
+
+    #[test]
+    fn test_skip_done_turn_all_false_no_skip() {
+        // Nothing terminal, no mutations, has errors — clearly don't skip
+        assert!(!should_skip_done_turn(false, false, true));
+    }
+
+    #[test]
+    fn test_skip_done_turn_only_error_no_skip() {
+        // Only error flag set, rest false
+        assert!(!should_skip_done_turn(false, false, true));
+    }
+
+    #[test]
+    fn test_skip_done_turn_mutation_with_error_no_skip() {
+        // Mutation succeeded but a skipped-dependent-edit error also present
+        // Must NOT skip — model needs to re-plan the skipped edit
+        assert!(!should_skip_done_turn(true, true, true));
+    }
+
+    #[test]
+    fn test_skip_done_turn_bash_only_no_mutation_no_skip() {
+        // all_terminal=true (only bash calls) but no files mutated
+        // e.g. model ran `cargo test` — must NOT skip, it needs to see results
+        assert!(!should_skip_done_turn(true, false, false));
+    }
+
+    #[test]
+    fn test_skip_done_turn_bash_with_mutation_skips() {
+        // bash + edit_file both in the same turn, all succeeded
+        // all_terminal=true, mutated_files non-empty, no errors → skip
+        assert!(should_skip_done_turn(true, true, false));
     }
 }
