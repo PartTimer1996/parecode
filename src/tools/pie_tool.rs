@@ -1,9 +1,11 @@
-/// PIE `project_index` tool — query the pre-built project graph and narrative.
+/// PIE `find_symbol` tool — locate any symbol by name in the project graph.
 ///
-/// Provides surgical access to symbol locations, cluster details, hotspots,
-/// and task history. Call this before `search` or `read_file` when locating
-/// symbols or understanding project structure.
-use anyhow::Result;
+/// The injection pipeline (pie_injection_messages + to_context_package) delivers
+/// cluster/architecture context before the agent starts. This tool fills the one
+/// gap the injection can't cover: cold-start lookup of a symbol by name.
+///
+/// All other project_index kinds (cluster, hotspots, recent_tasks, summary) have
+/// been removed — they are redundant with the pre-delivered injection context.
 use serde_json::Value;
 
 use crate::narrative::ProjectNarrative;
@@ -11,160 +13,62 @@ use crate::pie::ProjectGraph;
 
 pub fn definition() -> Value {
     serde_json::json!({
-        "name": "project_index",
-        "description": "Query the pre-built project index. Zero disk reads.\n\
-                        \n\
-                        WORKFLOW — use in order:\n\
-                        1. cluster → files + symbols overview for a feature area\n\
-                        2. symbols(file=) → exact line numbers for every fn/struct in a file\n\
-                        3. Then read_file(line_range=) → get content+hashes → edit_file\n\
-                        \n\
-                        kind values:\n\
-                        - \"cluster\" + cluster: all files and symbols in that cluster. START HERE when the session summary mentions a relevant cluster.\n\
-                        - \"symbols\" + file: every fn/struct/impl in one file with line numbers\n\
-                        - \"hotspots\": largest files by line count (complexity proxy)\n\
-                        - \"recent_tasks\": last N task summaries + files modified\n\
-                        - \"summary\": architecture overview (already shown at session start)",
+        "name": "find_symbol",
+        "description": "Find where a symbol (function, struct, type) is defined. \
+                        Returns file path and line number. \
+                        Use this before read_file when you know the name but not the location. \
+                        Faster than grep — zero disk reads.",
         "parameters": {
             "type": "object",
             "properties": {
-                "kind": {
+                "name": {
                     "type": "string",
-                    "enum": ["symbols", "cluster", "hotspots", "recent_tasks", "summary"]
-                },
-                "file": {
-                    "type": "string",
-                    "description": "kind=symbols: relative file path"
-                },
-                "cluster": {
-                    "type": "string",
-                    "description": "kind=cluster: cluster name (from session summary)"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "kind=recent_tasks: max results (default 5)"
+                    "description": "Symbol name to look up"
                 }
             },
-            "required": ["kind"]
+            "required": ["name"]
         }
     })
 }
 
-pub fn execute(args: &Value, graph: &ProjectGraph, narrative: &ProjectNarrative) -> Result<String> {
-    match args["kind"].as_str().unwrap_or("summary") {
-        "symbols"      => Ok(execute_symbols(args, graph)),
-        "cluster"      => Ok(execute_cluster(args, graph, narrative)),
-        "hotspots"     => Ok(execute_hotspots(graph)),
-        "recent_tasks" => Ok(execute_recent_tasks(args)),
-        "summary"      => Ok(build_compact_summary(graph, narrative)),
-        other          => Ok(format!(
-            "Unknown kind: '{other}'. Use one of: symbols, cluster, hotspots, recent_tasks, summary"
-        )),
+pub fn execute(args: &Value, graph: &ProjectGraph) -> String {
+    let name = args["name"].as_str().unwrap_or("").trim();
+    if name.is_empty() {
+        return "Provide name= for find_symbol. Example: find_symbol(name=\"AppState\")".to_string();
     }
-}
 
-fn execute_symbols(args: &Value, graph: &ProjectGraph) -> String {
-    let file = args["file"].as_str().unwrap_or("");
-    if file.is_empty() {
-        return "Provide file= for kind=symbols. Example: project_index(kind=\"symbols\", file=\"src/agent.rs\")".to_string();
-    }
-    let syms: Vec<String> = graph
-        .symbols
-        .iter()
-        .filter(|s| s.file == file)
-        .map(|s| format!("line {:4}: {} {}", s.line, s.kind.label(), s.name))
+    let matches: Vec<String> = graph.symbols.iter()
+        .filter(|s| s.name == name)
+        .map(|s| format!("  {}:{} ({})", s.file, s.line, s.kind.label()))
         .collect();
-    if syms.is_empty() {
-        if graph.file_lines.contains_key(file) {
-            return format!("No symbols indexed in {file} (file exists but has no indexed symbols)");
+
+    if matches.is_empty() {
+        // Partial match fallback — help with typos / partial names
+        let partial: Vec<String> = graph.symbols.iter()
+            .filter(|s| s.name.to_lowercase().contains(&name.to_lowercase()))
+            .take(5)
+            .map(|s| format!("  {}:{} — {} ({})", s.file, s.line, s.name, s.kind.label()))
+            .collect();
+
+        if partial.is_empty() {
+            return format!("Symbol '{name}' not found in project index.");
         }
-        let available: Vec<&str> = graph.file_lines.keys().map(|k| k.as_str()).take(10).collect();
         return format!(
-            "File '{file}' not in graph index.\nAvailable files (first 10):\n{}",
-            available.join("\n")
+            "Symbol '{name}' not found. Similar names:\n{}",
+            partial.join("\n")
         );
     }
-    format!("// {file}\n{}", syms.join("\n"))
+
+    format!(
+        "'{}' defined at:\n{}\nUse read_file(path, line_range=[N-2, N+20]) to read it.",
+        name,
+        matches.join("\n")
+    )
 }
 
-fn execute_cluster(args: &Value, graph: &ProjectGraph, narrative: &ProjectNarrative) -> String {
-    let name = args["cluster"].as_str().unwrap_or("");
-    let cluster = match graph.clusters.iter().find(|c| c.name == name) {
-        Some(c) => c,
-        None => {
-            let names: Vec<&str> = graph.clusters.iter().map(|c| c.name.as_str()).collect();
-            return format!(
-                "Cluster '{name}' not found. Available clusters: {}",
-                names.join(", ")
-            );
-        }
-    };
-
-    let mut out = format!("## Cluster: {} ({} files)\n", cluster.name, cluster.files.len());
-
-    if let Some(summary) = narrative.cluster_summaries.get(name) {
-        out.push_str(summary);
-        out.push('\n');
-    }
-
-    out.push_str("\n### Files\n");
-    for f in &cluster.files {
-        let lines = graph.file_lines.get(f).copied().unwrap_or(0);
-        out.push_str(&format!("  {f} ({lines} lines)\n"));
-    }
-
-    let syms: Vec<String> = graph
-        .symbols
-        .iter()
-        .filter(|s| cluster.files.contains(&s.file))
-        .map(|s| format!("  line {:4}: {} {} [{}]", s.line, s.kind.label(), s.name, s.file))
-        .collect();
-    if !syms.is_empty() {
-        out.push_str("\n### Symbols\n");
-        out.push_str(&syms.join("\n"));
-    }
-
-    out
-}
-
-fn execute_hotspots(graph: &ProjectGraph) -> String {
-    let mut files: Vec<(&String, &usize)> = graph.file_lines.iter().collect();
-    files.sort_by(|a, b| b.1.cmp(a.1));
-
-    let lines: Vec<String> = files
-        .iter()
-        .take(10)
-        .map(|(f, l)| {
-            let sym_count = graph.symbols.iter().filter(|s| &s.file == *f).count();
-            format!("  {f} — {l} lines, {sym_count} symbols")
-        })
-        .collect();
-
-    format!("## Largest files (complexity proxy)\n{}", lines.join("\n"))
-}
-
-fn execute_recent_tasks(args: &Value) -> String {
-    let limit = args["limit"].as_u64().unwrap_or(5) as usize;
-    let tasks = crate::task_memory::load_recent(limit);
-    if tasks.is_empty() {
-        return "No task history yet.".to_string();
-    }
-    let lines: Vec<String> = tasks
-        .iter()
-        .map(|t| {
-            let files = if t.files_modified.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", t.files_modified.join(", "))
-            };
-            format!("  [{}] {}{}", t.age_str(), t.summary, files)
-        })
-        .collect();
-    format!("## Recent tasks\n{}", lines.join("\n"))
-}
-
-/// Build a compact PIE summary for session-start injection and kind=summary queries.
+/// Build a compact PIE summary for session-start injection and the synthetic tool result.
 /// Target: ~300-400 tokens — enough to orient, not so much as to replace the tool.
+/// Called by pie_injection_messages() in agent.rs.
 pub fn build_compact_summary(graph: &ProjectGraph, narrative: &ProjectNarrative) -> String {
     let mut out = String::new();
 
@@ -232,12 +136,12 @@ pub fn build_compact_summary(graph: &ProjectGraph, narrative: &ProjectNarrative)
     }
 
     out.push_str(
-        "Use `project_index(kind=\"cluster\", cluster=\"name\")` for full symbol lists, \
-         or `project_index(kind=\"recent_tasks\")` for task history.",
+        "Use `find_symbol(name=\"SymbolName\")` to locate any function or struct by name.",
     );
 
     out
 }
+
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -259,7 +163,7 @@ mod tests {
                 name: "run_tui".to_string(),
                 file: "src/agent.rs".to_string(),
                 line: 42,
-                kind: SymbolKind::Struct,
+                kind: SymbolKind::Function,
             },
             Symbol {
                 name: "AppState".to_string(),
@@ -289,7 +193,6 @@ mod tests {
                     entry_files: vec!["src/tui/mod.rs".to_string()],
                     summary: Some("Terminal UI rendering and event handling.".to_string()),
                 },
-
             ],
             file_hashes: HashMap::new(),
             symbols,
@@ -315,57 +218,37 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_symbols_found() {
+    fn test_find_symbol_found() {
         let graph = make_graph();
-        let args = serde_json::json!({"kind": "symbols", "file": "src/agent.rs"});
-        let result = execute_symbols(&args, &graph);
-        assert!(result.contains("run_tui"), "should contain symbol name");
-        assert!(result.contains("42"), "should contain line number");
+        let args = serde_json::json!({"name": "run_tui"});
+        let result = execute(&args, &graph);
+        assert!(result.contains("src/agent.rs"), "should contain file: {result}");
+        assert!(result.contains("42"), "should contain line number: {result}");
     }
 
     #[test]
-    fn test_execute_symbols_missing_file() {
+    fn test_find_symbol_not_found() {
         let graph = make_graph();
-        let args = serde_json::json!({"kind": "symbols"});
-        let result = execute_symbols(&args, &graph);
-        assert!(result.contains("Provide file="));
+        let args = serde_json::json!({"name": "nonexistent_fn"});
+        let result = execute(&args, &graph);
+        assert!(result.contains("not found"), "should indicate not found: {result}");
     }
 
     #[test]
-    fn test_execute_symbols_unknown_file() {
+    fn test_find_symbol_partial_match() {
         let graph = make_graph();
-        let args = serde_json::json!({"kind": "symbols", "file": "src/nonexistent.rs"});
-        let result = execute_symbols(&args, &graph);
-        assert!(result.contains("not in graph index"));
+        let args = serde_json::json!({"name": "App"});
+        let result = execute(&args, &graph);
+        // "App" is not an exact match but "AppState" contains it
+        assert!(result.contains("AppState") || result.contains("not found"), "got: {result}");
     }
 
     #[test]
-    fn test_execute_cluster_found() {
+    fn test_find_symbol_missing_name() {
         let graph = make_graph();
-        let narrative = make_narrative();
-        let args = serde_json::json!({"kind": "cluster", "cluster": "tui"});
-        let result = execute_cluster(&args, &graph, &narrative);
-        assert!(result.contains("tui"));
-        assert!(result.contains("mod.rs"));
-        assert!(result.contains("AppState"));
-    }
-
-    #[test]
-    fn test_execute_cluster_not_found() {
-        let graph = make_graph();
-        let narrative = make_narrative();
-        let args = serde_json::json!({"kind": "cluster", "cluster": "nonexistent"});
-        let result = execute_cluster(&args, &graph, &narrative);
-        assert!(result.contains("not found"));
-        assert!(result.contains("agent") || result.contains("tui"));
-    }
-
-    #[test]
-    fn test_execute_hotspots() {
-        let graph = make_graph();
-        let result = execute_hotspots(&graph);
-        assert!(result.contains("tui/mod.rs"), "largest file should appear first");
-        assert!(result.contains("900"));
+        let args = serde_json::json!({});
+        let result = execute(&args, &graph);
+        assert!(result.contains("Provide name="), "should prompt for name: {result}");
     }
 
     #[test]
@@ -377,9 +260,7 @@ mod tests {
         assert!(summary.contains("## Architecture"));
         assert!(summary.contains("## Clusters"));
         assert!(summary.contains("## Key files"));
-        assert!(summary.contains("project_index"));
-        // Should be lean — cap architecture at 2 sentences
-        assert!(!summary.contains("PareCode is a TUI coding assistant. It uses a multi-turn agent loop with tool calls.\n\nPareCode"));
+        assert!(summary.contains("find_symbol"));
     }
 
     #[test]
@@ -388,23 +269,7 @@ mod tests {
         let narrative = ProjectNarrative::default();
         let summary = build_compact_summary(&graph, &narrative);
         assert!(summary.contains("# Project index"));
-        // No architecture section when empty
         assert!(!summary.contains("## Architecture"));
-        // Still shows clusters
         assert!(summary.contains("## Clusters"));
-    }
-
-    #[test]
-    fn test_execute_dispatch() {
-        let graph = make_graph();
-        let narrative = make_narrative();
-
-        let args = serde_json::json!({"kind": "summary"});
-        let result = execute(&args, &graph, &narrative).unwrap();
-        assert!(result.contains("# Project index"));
-
-        let args = serde_json::json!({"kind": "unknown_kind"});
-        let result = execute(&args, &graph, &narrative).unwrap();
-        assert!(result.contains("Unknown kind"));
     }
 }

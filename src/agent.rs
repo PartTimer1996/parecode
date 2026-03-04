@@ -130,7 +130,7 @@ pub async fn run_tui(
     // Tool schemas are ~2,600 tokens; rebuilding every turn wastes nothing but
     // the Vec alloc — the real saving is sending the same bytes as a pointer.
     // More importantly this makes the phase key explicit and auditable.
-    let mut cached_tools: Option<(/*key:*/ (usize, bool, bool), Vec<Tool>)> = None;
+    let mut cached_tools: Option<(/*key:*/ (usize, bool), Vec<Tool>)> = None;
 
     let budget = Budget::new(config.context_tokens);
     let mut history = History::default();
@@ -235,8 +235,7 @@ pub async fn run_tui(
         // Vec allocation per turn. The tool schemas themselves are not re-sent
         // (HTTP body is built fresh each call); this just avoids redundant work.
         let has_graph = config.project_graph.is_some();
-        let has_summaries = history.compressed_count() > 0;
-        let tool_key = (turn, has_summaries, has_graph);
+        let tool_key = (turn, has_graph);
         let tools = match &cached_tools {
             Some((key, t)) if *key == tool_key => t.clone(),
             _ => {
@@ -546,8 +545,8 @@ pub fn pie_injection_messages(
             content: MessageContent::Text(String::new()),
             tool_calls: vec![ToolCall {
                 id: PIE_TOOL_CALL_ID.to_string(),
-                name: "project_index".to_string(),
-                arguments: r#"{"kind":"summary"}"#.to_string(),
+                name: "find_symbol".to_string(),
+                arguments: r#"{"name":"__summary__"}"#.to_string(),
             }],
         },
         Message {
@@ -999,14 +998,21 @@ async fn dispatch_tool(
     config: &AgentConfig,
 ) -> String {
     match name {
-        "bash" => tools::bash::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]")),
+        "bash" => {
+            // Graph intercept: if the command is a plain grep/rg for a known symbol,
+            // return the indexed location instead of running the subprocess.
+            if let Some(intercept) = bash_graph_intercept(args, config) {
+                intercept
+            } else {
+                tools::bash::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]"))
+            }
+        }
 
-        // ── project_index — in-memory graph query, no disk I/O for symbol/cluster kinds
-        "project_index" => {
-            match (&config.project_graph, &config.project_narrative) {
-                (Some(g), Some(n)) => tools::pie_tool::execute(args, g, n)
-                    .unwrap_or_else(|e| format!("[project_index error: {e}]")),
-                _ => "[project_index: no project graph available for this session]".to_string(),
+        // ── find_symbol — in-memory graph lookup, zero disk reads
+        "find_symbol" => {
+            match &config.project_graph {
+                Some(g) => tools::pie_tool::execute(args, g),
+                None => "[find_symbol: no project graph available for this session]".to_string(),
             }
         }
         "ask_user" => tools::ask::execute(args, ui_tx.clone()).await.unwrap_or_else(|e| e),
@@ -1043,6 +1049,80 @@ async fn dispatch_tool(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// If the bash command is a plain grep/rg for a symbol name that's in the
+/// project graph, short-circuit with the indexed location.
+///
+/// Only intercepts simple identifier patterns (no regex metacharacters).
+/// Falls through to real bash for complex patterns or unknown identifiers.
+fn bash_graph_intercept(args: &Value, config: &AgentConfig) -> Option<String> {
+    let graph = config.project_graph.as_ref()?;
+    let command = args["command"].as_str()?;
+
+    // Extract the pattern from common grep/rg invocations:
+    //   grep -n "Foo" src/...    rg "Foo"    grep -rn 'Foo'
+    let pattern = extract_grep_pattern(command)?;
+
+    // Only intercept plain identifiers — skip if it contains regex metacharacters
+    let is_plain = !pattern.chars().any(|c| ".*+?[](){}\\^$|:".contains(c));
+    if !is_plain || pattern.len() < 2 {
+        return None;
+    }
+
+    let files = graph.by_name.get(pattern)?;
+    if files.is_empty() {
+        return None;
+    }
+
+    let locations: Vec<String> = files.iter().map(|f| {
+        let line = graph.symbols.iter()
+            .find(|s| s.name == pattern && &s.file == f)
+            .map(|s| s.line)
+            .unwrap_or(0);
+        if line > 0 {
+            format!("  {f}:{line}")
+        } else {
+            format!("  {f}")
+        }
+    }).collect();
+
+    Some(format!(
+        "[graph intercept] '{}' found in index — no grep needed:\n{}\n\
+         Use read_file(path, line_range=[N-2, N+20]) to read that section.",
+        pattern,
+        locations.join("\n")
+    ))
+}
+
+/// Extract the grep/rg search pattern from a command string.
+/// Returns None if the command isn't a simple grep/rg invocation.
+fn extract_grep_pattern(command: &str) -> Option<&str> {
+    let cmd = command.trim();
+
+    // Must start with grep or rg
+    if !cmd.starts_with("grep") && !cmd.starts_with("rg") {
+        return None;
+    }
+
+    // Find a quoted or unquoted pattern argument.
+    // Strategy: skip flags (starting with -), grab first non-flag token.
+    let mut tokens = cmd.split_whitespace().skip(1); // skip "grep"/"rg"
+    loop {
+        let tok = tokens.next()?;
+        if tok.starts_with('-') {
+            // Flag — skip its argument if it takes one (e.g. -e, --include, -f)
+            if matches!(tok, "-e" | "-f" | "--include" | "--exclude" | "--type" | "-t" | "-g") {
+                tokens.next(); // skip the argument
+            }
+            continue;
+        }
+        // Strip surrounding quotes
+        let pat = tok.trim_matches(|c| c == '"' || c == '\'');
+        if !pat.is_empty() {
+            return Some(pat);
+        }
+    }
+}
 
 fn format_args_summary(args: &Value) -> String {
     if let Some(obj) = args.as_object() {

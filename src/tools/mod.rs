@@ -20,7 +20,7 @@ pub const TOOL_EDIT_FILE: &str = "edit_file";
 pub const TOOL_PATCH_FILE: &str = "patch_file";
 pub const TOOL_BASH: &str = "bash";
 pub const TOOL_ASK_USER: &str = "ask_user";
-pub const TOOL_PROJECT_INDEX: &str = "project_index";
+pub const TOOL_FIND_SYMBOL: &str = "find_symbol";
 
 // Turn thresholds for phase-adaptive tool selection
 const TURN_EXPLORATION_END: usize = 1;
@@ -29,7 +29,7 @@ const TURN_MUTATION_START: usize = 2;
 /// All tool names as a slice, useful for bulk operations.
 pub fn all_tool_names() -> &'static [&'static str] {
     &[
-        TOOL_PROJECT_INDEX,
+        TOOL_FIND_SYMBOL,
         TOOL_READ_FILE,
         TOOL_WRITE_FILE,
         TOOL_EDIT_FILE,
@@ -58,7 +58,7 @@ impl Default for TurnThresholds {
 /// Dispatch to get a tool's definition by name.
 pub fn get_tool(name: &str) -> Option<Value> {
     match name {
-        TOOL_PROJECT_INDEX => Some(pie_tool::definition()),
+        TOOL_FIND_SYMBOL => Some(pie_tool::definition()),
         TOOL_READ_FILE => Some(read::definition()),
         TOOL_WRITE_FILE => Some(write::definition()),
         TOOL_EDIT_FILE => Some(edit::definition()),
@@ -92,7 +92,7 @@ pub fn tools_for_turn(turn: usize, has_graph: bool) -> Vec<Tool> {
     let thresholds = TurnThresholds::default();
     let mut t: Vec<Tool> = Vec::new();
 
-    // project_index first when available — high salience position
+    // find_symbol first when available — high salience position
     if has_graph {
         t.push(def(pie_tool::definition()));
     }
@@ -166,6 +166,7 @@ mod tests {
         assert!(names.contains(&TOOL_PATCH_FILE));
         assert!(names.contains(&TOOL_BASH));
         assert!(names.contains(&TOOL_ASK_USER));
+        assert!(names.contains(&TOOL_FIND_SYMBOL));
         assert_eq!(names.len(), 7);
     }
 
@@ -180,8 +181,9 @@ mod tests {
     fn test_get_tool() {
         assert!(get_tool(TOOL_READ_FILE).is_some());
         assert!(get_tool(TOOL_BASH).is_some());
+        assert!(get_tool(TOOL_FIND_SYMBOL).is_some());
         assert!(get_tool("invalid_tool").is_none());
-        
+
         let read_def = get_tool(TOOL_READ_FILE).unwrap();
         assert_eq!(read_def["name"], TOOL_READ_FILE);
     }

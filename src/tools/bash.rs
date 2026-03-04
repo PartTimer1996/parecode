@@ -9,7 +9,9 @@ const MAX_OUTPUT_LINES: usize = 500;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "bash",
-        "description": "Run a shell command. Returns stdout and stderr. Avoid interactive commands.\nUse for: compiling, tests, git, package managers. Do NOT use for reading files — read_file provides hashes required for editing.",
+        "description": "Run a shell command. Use for: compiling, tests, git, package managers.\n\
+                        DO NOT use grep/rg for symbol lookup — project_index has exact locations with zero disk reads. Only grep for call-site patterns across the codebase after you already know where the definition lives.\n\
+                        DO NOT use for reading files — read_file provides hashes required for editing.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -87,7 +89,7 @@ pub async fn execute(args: &Value) -> Result<String> {
     }
 
     // When the model uses bash for navigation (pwd, ls, find, tree), nudge it
-    // toward project_index which is faster, pre-indexed, and costs fewer tokens.
+    // toward find_symbol which is faster, pre-indexed, and costs fewer tokens.
     let cmd_trim = command.trim();
     let is_nav = cmd_trim == "pwd"
         || cmd_trim.starts_with("ls")
@@ -97,8 +99,8 @@ pub async fn execute(args: &Value) -> Result<String> {
         || cmd_trim.contains("; ls");
     if is_nav {
         result.push_str(
-            "\n[Use project_index(kind=\"summary\") for project structure — \
-             already indexed, zero disk reads, covers all files and clusters.]"
+            "\n[Project is pre-indexed — use find_symbol(name=\"SymbolName\") to locate \
+             any function or struct without disk reads.]"
         );
     }
 
