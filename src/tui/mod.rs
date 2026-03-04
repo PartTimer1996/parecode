@@ -356,8 +356,6 @@ impl PlanReviewState {
 pub struct AttachedFile {
     /// Display path (relative, as typed)
     pub path: String,
-    /// File contents read at attach time
-    pub content: String,
 }
 
 // ── AppState ──────────────────────────────────────────────────────────────────
@@ -2452,8 +2450,8 @@ fn handle_submit(
         for token in re_tokens {
             let path = &token[1..];
             if !state.attached_files.iter().any(|f| f.path == path) {
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    state.attached_files.push(AttachedFile { path: path.to_string(), content });
+                if std::path::Path::new(path).exists() {
+                    state.attached_files.push(AttachedFile { path: path.to_string() });
                 }
             }
         }
@@ -3025,9 +3023,9 @@ fn launch_agent(
         project_narrative: state.project_narrative.as_ref().map(|n| std::sync::Arc::new(n.clone())),
     };
 
-    let attached: Vec<(String, String)> = state.attached_files
+    let attached: Vec<String> = state.attached_files
         .iter()
-        .map(|f| (f.path.clone(), f.content.clone()))
+        .map(|f| f.path.clone())
         .collect();
 
     // Build prior context from completed turns (up to the active_turn rollback pointer)
@@ -3048,6 +3046,9 @@ fn launch_agent(
     // Reset collectors for this new run
     state.collecting_response.clear();
     state.collecting_tools.clear();
+    // Clear attached files — they were consumed into the first user message; don't re-send next turn
+    state.attached_files.clear();
+    state.focused_chip = None;
 
     let file_cache = state.file_cache.clone();
     tokio::spawn(async move {
@@ -3111,6 +3112,8 @@ fn launch_quick(
 
     state.collecting_response.clear();
     state.collecting_tools.clear();
+    state.attached_files.clear();
+    state.focused_chip = None;
 
     tokio::spawn(async move {
         tokio::select! {
@@ -3159,10 +3162,12 @@ fn generate_and_show_plan(
         client.set_api_key(key.clone());
     }
 
-    let context_files: Vec<(String, String)> = state.attached_files
+    let context_files: Vec<String> = state.attached_files
         .iter()
-        .map(|f| (f.path.clone(), f.content.clone()))
+        .map(|f| f.path.clone())
         .collect();
+    state.attached_files.clear();
+    state.focused_chip = None;
 
     let project = cwd_str()
         .split('/')

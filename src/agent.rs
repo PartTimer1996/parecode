@@ -99,13 +99,13 @@ Do not read files unless strictly necessary. Keep responses short.";
 
 
 /// Run agent, emitting UiEvents to a ratatui TUI over `ui_tx`.
-/// `attached` is a list of (path, content) pairs pre-loaded by the user via @.
+/// `attached` is a list of file paths hinted by the user via #file — no content, just pointers.
 /// `prior_context` is an optional preamble summarising earlier turns in this session.
 pub async fn run_tui(
     task: &str,
     client: &Client,
     config: &AgentConfig,
-    attached: Vec<(String, String)>,
+    attached: Vec<String>,
     prior_context: Option<String>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     shared_cache: std::sync::Arc<tokio::sync::Mutex<crate::cache::FileCache>>,
@@ -462,22 +462,23 @@ pub fn build_system_prompt(config: &AgentConfig, git_status: Option<&str>) -> St
     prompt
 }
 
-/// Assemble the first user message: prior context + attached files + task.
+/// Assemble the first user message: prior context + attached file hints + task.
+/// `attached` is paths only — no content. The model uses read_file if it needs content.
 pub fn build_user_message(
     task: &str,
     prior_context: Option<&str>,
-    attached: &[(String, String)],
+    attached: &[String],
 ) -> String {
     let mut s = String::new();
     if let Some(ctx) = prior_context {
         s.push_str(ctx);
     }
     if !attached.is_empty() {
-        s.push_str("The following files have been attached for context:\n\n");
-        for (path, content) in attached {
-            s.push_str(&format!("[{path}]\n{content}\n\n"));
+        s.push_str("Relevant files (use read_file if you need content):\n");
+        for path in attached {
+            s.push_str(&format!("- {path}\n"));
         }
-        s.push_str("---\n\n");
+        s.push('\n');
     }
     s.push_str(task);
     s
@@ -1057,23 +1058,20 @@ mod tests {
 
     #[test]
     fn test_user_message_with_attached_files() {
-        let attached = vec![
-            ("src/foo.rs".to_string(), "fn foo() {}".to_string()),
-        ];
+        let attached = vec!["src/foo.rs".to_string()];
         let msg = build_user_message("fix it", None, &attached);
-        assert!(msg.contains("[src/foo.rs]"));
-        assert!(msg.contains("fn foo() {}"));
-        assert!(msg.contains("---"));
+        assert!(msg.contains("src/foo.rs"));
+        assert!(msg.contains("read_file"));
         assert!(msg.ends_with("fix it"));
     }
 
     #[test]
     fn test_user_message_ordering() {
-        // prior context → attached files → task, in that order
-        let attached = vec![("a.rs".to_string(), "content".to_string())];
+        // prior context → attached hints → task, in that order
+        let attached = vec!["a.rs".to_string()];
         let msg = build_user_message("task", Some("prior"), &attached);
         let prior_pos = msg.find("prior").unwrap();
-        let attach_pos = msg.find("[a.rs]").unwrap();
+        let attach_pos = msg.find("a.rs").unwrap();
         let task_pos = msg.rfind("task").unwrap();
         assert!(prior_pos < attach_pos);
         assert!(attach_pos < task_pos);

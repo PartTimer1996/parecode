@@ -64,46 +64,7 @@ pub fn definition() -> Value {
     })
 }
 
-/// Format file content for injection into a model context (plan step pre-loading).
-/// Small files: full content with line numbers + hashes.
-/// Large files: preamble + symbol index + tail.
-pub fn format_for_context(path: &str, content: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
-    if total <= DEFAULT_MAX_LINES {
-        format_full(&lines, path)
-    } else {
-        let preamble_end = preamble_end_line(&lines).min(total);
-        let tail_start = total.saturating_sub(TAIL_LINES).max(preamble_end);
-        let omitted = tail_start.saturating_sub(preamble_end);
 
-        let mut out = String::new();
-        out.push_str(&format!(
-            "[{path} — {total} lines total. Preamble (1–{preamble_end}), symbol index, then tail ({start}–{total}). \
-             Use line_range=[start,end] to read any section.]\n\n",
-            start = tail_start + 1,
-        ));
-        for (i, line) in lines[..preamble_end].iter().enumerate() {
-            out.push_str(&format_line(i + 1, line));
-        }
-        if omitted > 0 {
-            out.push_str(&format!("\n     ··· {omitted} lines omitted — symbol index for navigation ···\n\n"));
-            let symbols = collect_symbols(&lines[preamble_end..tail_start], preamble_end);
-            if symbols.is_empty() {
-                out.push_str("     (no top-level symbols detected in omitted section)\n");
-            } else {
-                for (line_no, hash, label) in &symbols {
-                    out.push_str(&format!("{line_no:4} [{hash}] | {label}\n"));
-                }
-            }
-            out.push('\n');
-        }
-        for (i, line) in lines[tail_start..].iter().enumerate() {
-            out.push_str(&format_line(tail_start + i + 1, line));
-        }
-        out
-    }
-}
 
 pub fn execute(args: &Value) -> Result<String> {
     let path = args["path"]

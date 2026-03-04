@@ -451,7 +451,7 @@ pub async fn generate_plan(
     task: &str,
     client: &Client,
     project: &str,
-    context_files: &[(String, String)], // (path, content) attached files as context
+    context_files: &[String], // paths hinted by the user — no content, planner uses read_symbol if needed
     graph: &ProjectGraph,
     narrative: Option<&crate::narrative::ProjectNarrative>,
     on_chunk: impl Fn(&str) + Send + Sync + 'static,
@@ -484,21 +484,11 @@ pub async fn generate_plan(
 
     if !context_files.is_empty() {
         user_content.push_str("The following files are attached:\n\n");
-        for (path, content) in context_files {
-            let total = content.lines().count();
-            let preview: String = content
-                .lines()
-                .take(300)
-                .collect::<Vec<_>>()
-                .join("\n");
-            let note = if total > 300 {
-                format!(" ({total} lines total, showing first 300)")
-            } else {
-                String::new()
-            };
-            user_content.push_str(&format!("[{path}{note}]\n{preview}\n\n"));
+        user_content.push_str("Relevant files (use read_symbol or list_symbols if you need content):\n");
+        for path in context_files {
+            user_content.push_str(&format!("- {path}\n"));
         }
-        user_content.push_str("---\n\n");
+        user_content.push('\n');
     }
 
     user_content.push_str(&format!("Generate a plan to accomplish this task:\n\n{task}"));
@@ -714,21 +704,11 @@ pub async fn execute_step(
     // treatment with line numbers — not a raw dump. This gives the model the
     // structural landmarks (exact line numbers for every function) it needs to
     // anchor edit_file calls correctly without reading the whole file again.
-    let mut attached: Vec<(String, String)> = Vec::new();
+    let mut attached: Vec<String> = Vec::new();
     for path in &step.files {
-        match std::fs::read_to_string(path) {
-            Ok(raw) => {
-                let formatted = crate::tools::read::format_for_context(path, &raw);
-                attached.push((path.clone(), formatted));
-            }
-            Err(e) => {
-                // Non-fatal — model will get an error if it tries to read the file
-                let _ = ui_tx.send(UiEvent::ToolResult {
-                    summary: format!("⚠ could not pre-load {path}: {e}"),
-                });
-            }
-        }
+        attached.push(path.clone());
     }
+    
 
     let instruction = step.effective_instruction();
 
