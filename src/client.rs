@@ -69,6 +69,109 @@ pub struct ModelResponse {
     pub tool_calls: Vec<ToolCall>,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub input_cost: f64,
+    pub output_cost: f64,
+}
+
+// ── Model pricing (per 1M tokens) ─────────────────────────────────────────────
+
+/// Pricing info for common models. Prices are in USD per 1M tokens.
+/// Format: (input_price, output_price)
+fn model_pricing(model: &str) -> Option<(f64, f64)> {
+    let model_lower = model.to_lowercase();
+    
+    // OpenAI models
+    if model_lower.contains("gpt-4.1") {
+        Some((2.0, 8.0))  // gpt-4.1
+    } else if model_lower.contains("gpt-4o") {
+        Some((2.5, 10.0)) // gpt-4o
+    } else if model_lower.contains("gpt-4-turbo") {
+        Some((10.0, 30.0))
+    } else if model_lower.contains("gpt-4") {
+        Some((30.0, 60.0))
+    } else if model_lower.contains("gpt-3.5-turbo") {
+        Some((0.5, 1.5))
+    } else if model_lower.contains("o4-mini") {
+        Some((1.1, 4.4))
+    } else if model_lower.contains("o3") {
+        Some((10.0, 40.0))
+    } else if model_lower.contains("o1-preview") {
+        Some((15.0, 60.0))
+    } else if model_lower.contains("o1-mini") {
+        Some((3.0, 12.0))
+    } else if model_lower.contains("o1") {
+        Some((15.0, 60.0))
+    // Anthropic models
+    } else if model_lower.contains("claude-4-opus") {
+        Some((15.0, 75.0))
+    } else if model_lower.contains("claude-4-sonnet") {
+        Some((3.0, 15.0))
+    } else if model_lower.contains("claude-3-opus") {
+        Some((15.0, 75.0))
+    } else if model_lower.contains("claude-3-sonnet") {
+        Some((3.0, 15.0))
+    } else if model_lower.contains("claude-3-5-sonnet") {
+        Some((3.0, 15.0))
+    } else if model_lower.contains("claude-3-haiku") {
+        Some((0.25, 1.25))
+    // Google models
+    } else if model_lower.contains("gemini-2.5-pro") {
+        Some((1.25, 5.0))
+    } else if model_lower.contains("gemini-2.0-pro") {
+        Some((1.25, 5.0))
+    } else if model_lower.contains("gemini-1.5-pro") {
+        Some((1.25, 5.0))
+    } else if model_lower.contains("gemini-1.5-flash") {
+        Some((0.075, 0.3))
+    // DeepSeek models
+    } else if model_lower.contains("deepseek-chat") || model_lower.contains("deepseek-v3") {
+        Some((0.14, 0.28))  // v3: $0.14/$2.80 per M
+    } else if model_lower.contains("deepseek-reasoner") || model_lower.contains("deepseek-r1") {
+        Some((0.14, 5.58))
+    // xAI
+    } else if model_lower.contains("grok-2") {
+        Some((2.0, 10.0))
+    } else if model_lower.contains("grok-") {
+        Some((5.0, 15.0))
+    // Meta Llama
+    } else if model_lower.contains("llama-4") {
+        Some((3.0, 12.0))
+    } else if model_lower.contains("llama-3.1-70b") {
+        Some((0.9, 0.9))
+    } else if model_lower.contains("llama-3.1-8b") {
+        Some((0.2, 0.2))
+    } else if model_lower.contains("llama-3-70b") {
+        Some((0.9, 0.9))
+    } else if model_lower.contains("llama-3-8b") {
+        Some((0.2, 0.2))
+    // Mistral
+    } else if model_lower.contains("mistral-large") {
+        Some((2.0, 6.0))
+    } else if model_lower.contains("mistral-small") {
+        Some((0.2, 0.6))
+    } else if model_lower.contains("mistral-") {
+        Some((0.25, 0.25))
+    // OpenRouter providers (fallback)
+    } else if model_lower.contains("openrouter/") {
+        // Try to extract underlying model from OpenRouter format
+        if model_lower.contains("gpt-4o") {
+            Some((2.5, 10.0))
+        } else if model_lower.contains("claude-3.5-sonnet") {
+            Some((3.0, 15.0))
+        } else {
+            None  // Unknown OpenRouter model
+        }
+    } else {
+        None  // Unknown model
+    }
+}
+
+/// Calculate cost in USD for the given token counts and model.
+pub fn calculate_cost(input_tokens: u32, output_tokens: u32, model: &str) -> (f64, f64) {
+    let (input_price, output_price) = model_pricing(model).unwrap_or((0.0, 0.0));
+    let input_cost = (input_tokens as f64 / 1_000_000.0) * input_price;
+    let output_cost = (output_tokens as f64 / 1_000_000.0) * output_price;
+    (input_cost, output_price)
 }
 
 // ── SSE delta types for accumulation ─────────────────────────────────────────
