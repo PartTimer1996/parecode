@@ -120,6 +120,11 @@ pub enum UiEvent {
         question: String,
         reply_tx: tokio::sync::oneshot::Sender<String>,
     },
+    /// Background re-index completed (triggered on /new)
+    IndexReady {
+        graph: crate::pie::ProjectGraph,
+        narrative: Option<crate::narrative::ProjectNarrative>,
+    },
 }
 
 // ── ConversationEntry — displayable items in history ─────────────────────────
@@ -871,6 +876,17 @@ impl AppState {
             }
             UiEvent::SystemMsg(msg) => {
                 self.push(ConversationEntry::SystemMsg(msg));
+            }
+            UiEvent::IndexReady { graph, narrative } => {
+                let sym_count = graph.symbols.len();
+                let file_count = graph.file_lines.len();
+                self.project_graph = Some(graph);
+                if let Some(n) = narrative {
+                    self.project_narrative = Some(n);
+                }
+                self.push(ConversationEntry::SystemMsg(
+                    format!("◈ index refreshed — {file_count} files, {sym_count} symbols"),
+                ));
             }
             UiEvent::AskUser { question, reply_tx } => {
                 self.push(ConversationEntry::AskUser(question));
@@ -2094,8 +2110,10 @@ fn handle_key(
                 state.palette_query.clear();
                 if !cmd.is_empty() {
                     let input = if cmd.starts_with('/') { cmd } else { format!("/{cmd}") };
-                    // /plan and /quick need ui_tx — handle them here before execute_command
-                    if input.starts_with("/plan ") || input == "/plan" {
+                    // /plan, /quick, /new need ui_tx — handle them here before execute_command
+                    if input == "/new" || input == "/session-new" {
+                        handle_submit(input, state, resolved, file, verbose, dry_run, ui_tx.clone())?;
+                    } else if input.starts_with("/plan ") || input == "/plan" {
                         let task = input.trim_start_matches("/plan").trim().to_string();
                         if task.is_empty() {
                             state.push(ConversationEntry::SystemMsg(
@@ -2459,6 +2477,31 @@ fn handle_submit(
         } else {
             launch_quick(task, state, resolved, verbose, dry_run, ui_tx)?;
         }
+        return Ok(true);
+    }
+
+    // /new and /session-new need ui_tx to spawn the background re-index
+    if input == "/new" || input == "/session-new" {
+        state.conversation_turns.clear();
+        state.entries.clear();
+        state.scroll = 0;
+        match sessions::open_session(&cwd_str()) {
+            Ok(s) => {
+                state.session = Some(s);
+                sessions::prune_old_sessions(10);
+                state.sidebar_entries = load_sidebar_entries(&state.session);
+                state.push(ConversationEntry::SystemMsg("new session started".to_string()));
+            }
+            Err(e) => {
+                state.push(ConversationEntry::SystemMsg(format!("session error: {e}")));
+            }
+        }
+        // Re-index in background — picks up files added/removed since last run
+        let tx = ui_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let (graph, _) = crate::pie::ProjectGraph::load_or_build(std::path::Path::new("."), 500);
+            let _ = tx.send(UiEvent::IndexReady { graph, narrative: None });
+        });
         return Ok(true);
     }
 
@@ -2827,20 +2870,8 @@ fn execute_command(
             }
         }
         "/session-new" | "/new" => {
-            state.conversation_turns.clear();
-            state.entries.clear();
-            state.scroll = 0;
-            match sessions::open_session(&cwd_str()) {
-                Ok(s) => {
-                    state.session = Some(s);
-                    sessions::prune_old_sessions(10);
-                    state.sidebar_entries = load_sidebar_entries(&state.session);
-                    state.push(ConversationEntry::SystemMsg("new session started".to_string()));
-                }
-                Err(e) => {
-                    state.push(ConversationEntry::SystemMsg(format!("session error: {e}")));
-                }
-            }
+            // Handled in handle_submit (needs ui_tx for background re-index).
+            // This arm is unreachable in normal flow but kept as a no-op safety net.
         }
         "/init" => {
             let cwd = std::path::PathBuf::from(cwd_str());

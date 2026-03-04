@@ -303,7 +303,8 @@ fn print_event_plain(ev: &tui::UiEvent, accum_input: &mut u32, accum_output: &mu
         | UiEvent::GitChanges { .. }
         | UiEvent::GitAutoCommit { .. }
         | UiEvent::GitError(_)
-        | UiEvent::AskUser { .. } => {}
+        | UiEvent::AskUser { .. }
+        | UiEvent::IndexReady { .. } => {}
         UiEvent::SystemMsg(msg) => {
             println!("  {msg}");
         }
