@@ -314,58 +314,6 @@ fn planner_tools() -> Vec<Tool> {
     ]
 }
 
-/// Parse XML tool calls emitted by models that don't use the JSON tool-call format.
-/// Handles both `<minimax:tool_call><invoke name="...">` and plain `<invoke name="...">`.
-/// Returns a list of (tool_name, args_json) pairs, or empty if no XML calls found.
-fn parse_xml_tool_calls(text: &str) -> Vec<(String, serde_json::Value)> {
-    let mut calls = Vec::new();
-    let mut remaining = text;
-    while let Some(invoke_start) = remaining.find("<invoke") {
-        remaining = &remaining[invoke_start..];
-        // Extract tool name from <invoke name="...">
-        let name = remaining
-            .find("name=\"")
-            .and_then(|i| {
-                let after = &remaining[i + 6..];
-                after.find('"').map(|j| after[..j].to_string())
-            });
-        let Some(name) = name else {
-            break;
-        };
-        // Extract parameters: <parameter name="key">value</parameter>
-        let mut args = serde_json::Map::new();
-        let mut param_search = remaining;
-        while let Some(p_start) = param_search.find("<parameter name=\"") {
-            param_search = &param_search[p_start + 17..];
-            let key_end = match param_search.find('"') {
-                Some(i) => i,
-                None => break,
-            };
-            let key = param_search[..key_end].to_string();
-            param_search = &param_search[key_end + 2..]; // skip `">`
-            let val_end = match param_search.find("</parameter>") {
-                Some(i) => i,
-                None => break,
-            };
-            let val = param_search[..val_end].trim().to_string();
-            args.insert(key, serde_json::Value::String(val));
-            param_search = &param_search[val_end + 12..];
-            // Stop at </invoke>
-            if param_search.find("<parameter").map(|i| i > param_search.find("</invoke>").unwrap_or(usize::MAX)).unwrap_or(true) {
-                break;
-            }
-        }
-        calls.push((name, serde_json::Value::Object(args)));
-        // Advance past this invoke
-        if let Some(end) = remaining.find("</invoke>") {
-            remaining = &remaining[end + 9..];
-        } else {
-            break;
-        }
-    }
-    calls
-}
-
 fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
     let args: serde_json::Value =
         serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
@@ -398,28 +346,6 @@ fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
             let name = args["name"].as_str().unwrap_or("");
             let file_hint = args["file"].as_str().unwrap_or("");
             read_symbol_impl(name, file_hint, graph)
-        }
-        // read_file: models (especially minimax via XML) may call this directly
-        "read_file" | "view_file" => {
-            let file = args["file"].as_str().or_else(|| args["path"].as_str()).unwrap_or("");
-            if file.is_empty() {
-                return "Provide file= for read_file".to_string();
-            }
-            let start = args["start_line"].as_u64().map(|n| n as usize).unwrap_or(1).saturating_sub(1);
-            let count = args["lines"].as_u64()
-                .or_else(|| args["line_count"].as_u64())
-                .map(|n| n as usize)
-                .unwrap_or(60)
-                .min(120); // cap at 120 lines for planner context
-            match std::fs::read_to_string(file) {
-                Err(_) => format!("File not found: {file}"),
-                Ok(content) => {
-                    let lines: Vec<&str> = content.lines().collect();
-                    let end = (start + count).min(lines.len());
-                    let slice = &lines[start.min(lines.len())..end];
-                    format!("// {file} lines {}-{}\n{}", start + 1, end, slice.join("\n"))
-                }
-            }
         }
         _ => format!("Unknown planner tool: {}", call.name),
     }
@@ -594,30 +520,8 @@ pub async fn generate_plan(
             .await?;
 
         if resp.tool_calls.is_empty() {
-            // Detect XML tool-call syntax (minimax emits this instead of JSON tool calls).
-            // We can't use role=tool responses because there are no matching tool_call ids.
-            // Instead: execute the calls and inject results as plain user text.
-            if resp.text.contains("<minimax:tool_call") || resp.text.contains("<invoke ") {
-                let xml_calls = parse_xml_tool_calls(&resp.text);
-                let result_text = if xml_calls.is_empty() {
-                    // Empty wrapper or unrecognised XML — just ask for the JSON plan directly
-                    "The tool call wrapper was empty. You have enough context — output the JSON plan now.".to_string()
-                } else {
-                    xml_calls
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (name, args))| {
-                            let fake_call = ToolCall {
-                                id: format!("xml_{i}"),
-                                name: name.clone(),
-                                arguments: args.to_string(),
-                            };
-                            let result = execute_planner_tool(&fake_call, graph);
-                            format!("Tool result for `{name}`:\n{result}")
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                };
+            // Detect XML <invoke> syntax — same corrective approach as agent mode.
+            if resp.text.contains("<invoke") {
                 messages.push(Message {
                     role: "assistant".to_string(),
                     content: MessageContent::Text(resp.text),
@@ -625,7 +529,12 @@ pub async fn generate_plan(
                 });
                 messages.push(Message {
                     role: "user".to_string(),
-                    content: MessageContent::Text(result_text),
+                    content: MessageContent::Text(
+                        "You used XML <invoke> tool syntax instead of JSON tool calls. \
+                         Use the JSON tool_calls format provided in the API — do not emit \
+                         XML. Retry your intended action now using the correct format."
+                            .to_string(),
+                    ),
                     tool_calls: vec![],
                 });
                 continue;
@@ -1224,33 +1133,6 @@ fn sanitize_json_strings(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── XML tool call parser ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_parse_xml_tool_calls_minimax() {
-        let xml = "<minimax:tool_call>\n<invoke name=\"read_symbol\">\n<parameter name=\"file\">src/client.rs</parameter>\n<parameter name=\"name\">UsageStats</parameter>\n</invoke>\n</minimax:tool_call>";
-        let calls = parse_xml_tool_calls(xml);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "read_symbol");
-        assert_eq!(calls[0].1["file"], "src/client.rs");
-        assert_eq!(calls[0].1["name"], "UsageStats");
-    }
-
-    #[test]
-    fn test_parse_xml_tool_calls_multiple() {
-        let xml = "<invoke name=\"list_symbols\">\n<parameter name=\"file\">src/agent.rs</parameter>\n</invoke>\n<invoke name=\"read_symbol\">\n<parameter name=\"name\">run_tui</parameter>\n</invoke>";
-        let calls = parse_xml_tool_calls(xml);
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0, "list_symbols");
-        assert_eq!(calls[1].0, "read_symbol");
-    }
-
-    #[test]
-    fn test_parse_xml_tool_calls_empty() {
-        assert!(parse_xml_tool_calls("just plain text").is_empty());
-        assert!(parse_xml_tool_calls("{ \"steps\": [] }").is_empty());
-    }
 
     // ── JSON extraction ─────────────────────────────────────────────────────
 

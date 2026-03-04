@@ -109,12 +109,26 @@ fn display_summarise(tool_name: &str, output: &str) -> String {
     }
 }
 
+/// Max lines of a read_file result kept in conversation history.
+/// The model needs enough context to write edit_file old_str anchors from the
+/// relevant region. Full content lives in the recall side-store.
+/// This cap is the primary lever preventing large reads from bloating every
+/// subsequent API call — a 1000-line file no longer costs 1000 lines of tokens
+/// on turn 2, 3, 4...
+const READ_FILE_CONTEXT_LINES: usize = 150;
+
 fn summarise(tool_name: &str, output: &str) -> String {
     match tool_name {
-        // Keep read_file content in context — the model needs it to write correct
-        // old_str values for edit_file. Budget enforcement will compress it if
-        // the context window fills up.
-        "read_file" => output.to_string(),
+        // Cap read_file in the messages array. Full content is in recall side-store.
+        "read_file" => {
+            let lines: Vec<&str> = output.lines().collect();
+            if lines.len() <= READ_FILE_CONTEXT_LINES + 1 {
+                return output.to_string();
+            }
+            let kept = lines[..READ_FILE_CONTEXT_LINES].join("\n");
+            let omitted = lines.len() - READ_FILE_CONTEXT_LINES;
+            format!("{kept}\n[+{omitted} lines omitted — re-read with line_range if needed]")
+        }
         "write_file" | "edit_file" | "patch_file" => {
             // Build check failure: keep the full output so the model sees
             // compile errors and can fix them.
@@ -384,14 +398,16 @@ mod tests {
     fn test_compressed_count() {
         let mut history = History::default();
 
-        // read_file returns full output (not compressed)
-        history.record("c1", "read_file", &"x".repeat(1000));
-        // bash with long output gets summarized (shorter than full output)
-        // The summarise_bash function keeps head+tail for long success outputs
+        // Small read_file — not compressed (under cap)
+        history.record("c1", "read_file", &"x".repeat(100));
+        // Large read_file — compressed (over READ_FILE_CONTEXT_LINES)
+        let large_read = (1..=300).map(|i| format!("line {i}\n")).collect::<String>();
+        history.record("c2", "read_file", &large_read);
+        // bash with long output gets summarized
         let long_bash = (0..50).map(|i| format!("output line {}\n", i)).collect::<String>();
-        history.record("c2", "bash", &long_bash);
+        history.record("c3", "bash", &long_bash);
 
-        assert_eq!(history.compressed_count(), 1);
+        assert_eq!(history.compressed_count(), 2); // large read + bash
     }
 
     #[test]
@@ -432,10 +448,24 @@ mod tests {
     // ── Summarisation ───────────────────────────────────────────────────────
 
     #[test]
-    fn test_summarise_read_file_keeps_content() {
+    fn test_summarise_read_file_small_keeps_full() {
         let output = "[src/lib.rs — 50 lines]\nline 1\nline 2";
         let result = summarise("read_file", output);
-        assert_eq!(result, output);
+        assert_eq!(result, output); // small file — kept in full
+    }
+
+    #[test]
+    fn test_summarise_read_file_large_caps_at_limit() {
+        let header = "[src/big.rs — 500 lines]";
+        let body: String = (1..=300).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let output = format!("{header}\n{body}");
+        let result = summarise("read_file", &output);
+        let line_count = result.lines().count();
+        // header + 150 content lines + 1 omission note = 152 lines
+        assert!(line_count <= READ_FILE_CONTEXT_LINES + 2, "got {line_count} lines");
+        assert!(result.contains("lines omitted"), "should have omission note");
+        assert!(result.contains("line 150"), "should include line 150");
+        assert!(!result.contains("line 151"), "should not include line 151");
     }
 
     #[test]
