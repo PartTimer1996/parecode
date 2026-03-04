@@ -71,12 +71,16 @@ pub async fn execute(args: &Value) -> Result<String> {
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // rg exit 2 = error (bad regex, path not found, etc.) — report it so the model
+    // doesn't mistake an error for "no matches found"
+    if output.status.code() == Some(2) || (stdout.trim().is_empty() && !stderr.trim().is_empty()) {
+        return Ok(format!("[search error: {}]", stderr.trim()));
+    }
 
     if stdout.trim().is_empty() {
-        return Ok(format!(
-            "No matches for '{pattern}' in {path}. \
-             If you were verifying a replacement is complete, it is — declare the task done."
-        ));
+        return Ok(format!("No matches for '{pattern}' in {path}."));
     }
 
     let lines: Vec<&str> = stdout.lines().collect();
