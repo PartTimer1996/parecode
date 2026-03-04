@@ -1095,6 +1095,8 @@ async fn event_loop(
     }
 
     // Open session (resumes existing or creates new) — loads turns and sets active_turn
+    // Prune before opening so a freshly created empty session isn't immediately deleted
+    sessions::prune_old_sessions(10);
     let cwd = cwd_str();
     match sessions::open_session(&cwd) {
         Ok(session) => {
@@ -1118,8 +1120,6 @@ async fn event_loop(
             }
 
             state.session = Some(session);
-            // Keep only the 10 most recent non-empty sessions; delete older ones
-            sessions::prune_old_sessions(10);
             // Reload sidebar now that state.session is set — this correctly marks is_current
             state.sidebar_entries = load_sidebar_entries(&state.session);
         }
@@ -2485,10 +2485,11 @@ fn handle_submit(
         state.conversation_turns.clear();
         state.entries.clear();
         state.scroll = 0;
-        match sessions::open_session(&cwd_str()) {
+        // Prune before creating so the new session isn't immediately deleted
+        sessions::prune_old_sessions(10);
+        match sessions::new_session(&cwd_str()) {
             Ok(s) => {
                 state.session = Some(s);
-                sessions::prune_old_sessions(10);
                 state.sidebar_entries = load_sidebar_entries(&state.session);
                 state.push(ConversationEntry::SystemMsg("new session started".to_string()));
             }
@@ -3421,8 +3422,8 @@ fn load_sidebar_entries(current_session: &Option<sessions::Session>) -> Vec<Side
     let current_id = current_session.as_ref().map(|s| s.id.as_str()).unwrap_or("");
     let all = sessions::list_sessions().unwrap_or_default();
     all.into_iter()
-        // Skip empty (zero-byte) files — sessions with no turns yet
-        .filter(|(_, path)| std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false))
+        // Always include the current session; skip empty (zero-byte) others
+        .filter(|(id, path)| id.as_str() == current_id || std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false))
         .take(10)
         .map(|(id, path)| {
             // Turn count — load cheaply by counting lines
@@ -3441,15 +3442,15 @@ fn load_sidebar_entries(current_session: &Option<sessions::Session>) -> Vec<Side
                 .unwrap_or_default();
             // Project = part after first underscore in id
             let project = id.splitn(2, '_').nth(1).unwrap_or(&id).chars().take(16).collect();
-            // Timestamp from unix prefix
-            let timestamp = id.splitn(2, '_').next()
-                .and_then(|ts| ts.parse::<i64>().ok())
-                .map(|ts| {
-                    let dt = chrono::DateTime::from_timestamp(ts, 0)
-                        .unwrap_or_default()
-                        .with_timezone(&chrono::Local);
-                    dt.format("%b %d %H:%M").to_string()
+            // Timestamp — prefer file mtime (last activity) over ID creation time
+            let timestamp = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| {
+                    let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+                    chrono::DateTime::from_timestamp(secs, 0)
                 })
+                .map(|dt| dt.with_timezone(&chrono::Local).format("%b %d %H:%M").to_string())
                 .unwrap_or_default();
             let is_current = id == current_id;
             SidebarEntry { id, path, project, turn_count, preview, timestamp, is_current }

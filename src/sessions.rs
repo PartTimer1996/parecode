@@ -182,6 +182,32 @@ pub fn prune_old_sessions(keep: usize) {
     }
 }
 
+/// Create a brand-new session for this CWD, ignoring any existing sessions.
+/// Used by `/new` to force a fresh start.
+pub fn new_session(cwd: &str) -> Result<Session> {
+    let dir = sessions_dir();
+    std::fs::create_dir_all(&dir)?;
+
+    let ts = chrono::Utc::now().timestamp();
+    let basename = cwd_basename(cwd);
+    let id = format!("{ts}_{basename}");
+    let path = dir.join(format!("{id}.jsonl"));
+
+    // Touch the file so list_sessions() can find it
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path);
+
+    Ok(Session {
+        id,
+        _cwd: cwd.to_string(),
+        _turns: Vec::new(),
+        active_turn: 0,
+        path,
+    })
+}
+
 /// Find the most recent session file whose name ends with `_{cwd_basename}`.
 /// Returns (session_id, path) if found.
 pub fn find_latest_for_cwd(cwd: &str) -> Option<(String, PathBuf)> {

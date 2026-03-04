@@ -45,6 +45,12 @@ pub fn execute(args: &Value) -> Result<String> {
         let mut content = fs::read_to_string(path)
             .with_context(|| format!("edit_file: cannot read '{path}'"))?;
 
+        // Calculate where new content will start BEFORE we modify content.
+        // This is more reliable than counting after append, because
+        // `.lines()` treats trailing empty lines from the original file
+        // as real lines (e.g. "a\nb\n\n".lines().count() == 3).
+        let append_start_line = content.lines().count() + 1;
+
         // Ensure file ends with a blank line so appended content starts cleanly
         if !content.ends_with('\n') {
             content.push('\n');
@@ -57,7 +63,6 @@ pub fn execute(args: &Value) -> Result<String> {
         if !content.ends_with('\n') {
             content.push('\n');
         }
-        let append_start_line = content.lines().count() - new_str.lines().count() + 1;
         fs::write(path, &content)
             .with_context(|| format!("edit_file: cannot write '{path}'"))?;
         let added = new_str.lines().count();
