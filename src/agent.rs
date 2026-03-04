@@ -14,53 +14,11 @@ use crate::tui::UiEvent;
 
 const MAX_TOOL_CALLS: usize = 40;
 
-const SYSTEM_PROMPT_BASE: &str = r#"You are PareCode, a focused coding assistant. Complete tasks using the available tools.
-
-# Principles
-- **Minimum tool calls.**
-- **Act, don't explore.** If you know what to change, change it. Do not read to confirm what you already know.
-- **Ask Freely** - instead of overthinking always clarify uncertainties with a question to the user.
-- **When done, stop.**
-
-# Project graph
-When a project graph appears , **it is the authoritative index of this codebase** — every cluster, file, and symbol with exact line numbers, pre-computed and injected for you.
-
-**You must use it.** instead of search or bash.
-- Symbol location → graph has the exact file and line. Go straight to `read_file(path, line_range=[N, M])`.
-- File structure → graph has every function/struct name. Do not read the file first to "see what's there".
-- **`search` is for call-site discovery and cross-file pattern matching — not for locating things already in the graph.**
-- Read only to obtain edit hashes for the lines you are about to change.
-
-If no project graph appears, use `list_files` once to orient yourself, then proceed.
-
-# Reading files
-**Small files (≤300 lines):** `read_file(path)` returns the full file with line numbers and hashes. One call is enough — edit immediately.
-
-**Large files (>300 lines):** `read_file(path)` returns preamble + symbol index + tail. The symbol index gives exact line numbers for every function and struct. Then: `read_file(path, line_range=[start, end])` to fetch only the section you need.
-
-**Do not re-read a file unless you have edited it since your last read.** Before an edit the cache returns identical content — a re-read is a wasted call. After an edit you must re-read the changed region to get fresh hashes.
-
-# Editing — the hash lifecycle
-Each line is prefixed `N [hash] | content`. The hash is the required anchor for `edit_file`.
-
-1. Read the section → get hashes.
-2. `edit_file` — `old_str` must be copied verbatim (including the `N [hash] |` prefix) from that read.
-3. The edit result returns a fresh window with **new hashes** for the changed region.
-4. Further edits to the same region: use hashes from step 3. Hashes from step 1 are stale.
-5. Edit to a different region of the same file: `read_file(path, line_range=[...])` for that location first.
-
-**Only edit one file per turn.** For 2+ non-adjacent changes in one file, use `patch_file` in a single call — never chain multiple `edit_file` calls.
-
-# Choosing the right mutation tool
-- `edit_file` — single contiguous change, insert, or append.
-- `patch_file` — 2+ non-adjacent locations in one file. Always prefer over multiple `edit_file` calls.
-- `write_file` — new files only. Never use on an existing file.
-
-# bash
-`bash` is for: compiling, running tests, git, package managers, and anything that changes external state. Use the dedicated file tools (`read_file`, `search`, `list_files`) for all code reading and exploration — they provide hashes, caching, and stale eviction that bash cannot.
-
-# search
-Use `search` for call-site discovery and cross-file pattern matching. Do not use it to locate symbols already in the project graph or to verify edits (the edit result already shows updated lines)."#;
+const SYSTEM_PROMPT_BASE: &str = "You are PareCode, a coding assistant. \
+Complete tasks using the available tools in minimum tool calls. \
+A project index is pre-loaded in your context — use it for file locations \
+and symbol line numbers before calling any other tool. \
+When done, stop.";
 
 /// Quick mode — single API call, no multi-turn loop, minimal context.
 /// Targets < 2k tokens total. No file loading, no session history.
@@ -121,7 +79,7 @@ Do not read files unless strictly necessary. Keep responses short.";
             name: tc.name.clone(),
             args_summary: format_args_summary(&args),
         });
-        let raw = dispatch_tool(&tc.name, &args, &kind, &mut cache, &history, &ui_tx, &config.mcp).await;
+        let raw = dispatch_tool(&tc.name, &args, &kind, &mut cache, &history, &ui_tx, &config.mcp, config).await;
         let _ = ui_tx.send(UiEvent::ToolResult {
             summary: raw.lines().take(30).collect::<Vec<_>>().join("\n"),
         });
@@ -214,6 +172,13 @@ pub async fn run_tui(
         None
     };
 
+    // ── PIE injection ────────────────────────────────────────────────────────
+    // Prepend a synthetic project_index tool result so the model sees the
+    // project summary as pre-executed context (high salience, sent once).
+    if let (Some(graph), Some(narrative)) = (&config.project_graph, &config.project_narrative) {
+        messages.extend(pie_injection_messages(graph, narrative));
+    }
+
     messages.push(Message {
         role: "user".to_string(),
         content: MessageContent::from(user_content),
@@ -243,8 +208,9 @@ pub async fn run_tui(
 
         // ── Phase-adaptive tool selection ────────────────────────────────────
         // Only send tools relevant to the current phase of work.
-        // Saves ~400-800 tokens/turn compared to sending all 9 tools every time.
-        let mut tools = tools::tools_for_turn(turn, history.compressed_count() > 0);
+        // project_index leads the list when the graph is available (high salience).
+        let has_graph = config.project_graph.is_some();
+        let mut tools = tools::tools_for_turn(turn, history.compressed_count() > 0, has_graph);
         tools.extend(mcp_tool_defs.iter().cloned());
 
         // ── Call the model ────────────────────────────────────────────────────
@@ -448,22 +414,21 @@ pub struct AgentConfig {
     pub auto_commit_prefix: String,
     /// Enable git integration: checkpoint before task, git status in system prompt, diff after.
     pub git_context: bool,
-    /// Pre-rendered project context (narrative + graph) for injection into the system prompt.
-    /// When None, no project structure is injected (executor plan steps).
-    pub project_context: Option<String>,
+    /// Project graph for PIE injection and graph intercept. None for executor plan steps.
+    pub project_graph: Option<std::sync::Arc<crate::pie::ProjectGraph>>,
+    /// Project narrative for PIE injection. None for executor plan steps.
+    pub project_narrative: Option<std::sync::Arc<crate::narrative::ProjectNarrative>>,
 }
 
 // ── Pure prompt-assembly helpers ──────────────────────────────────────────────
 
-/// Assemble the full system prompt from base + optional project context + conventions + git status.
+/// Assemble the full system prompt from base + conventions + git status.
+/// PIE context is no longer injected here — it goes into the message history
+/// as a synthetic tool result via `pie_injection_messages()`.
 /// `git_status` is pre-fetched by the caller so this function stays pure and testable.
 pub fn build_system_prompt(config: &AgentConfig, git_status: Option<&str>) -> String {
+    let _ = config; // config retained for future extensions (model tier, etc.)
     let mut prompt = SYSTEM_PROMPT_BASE.to_string();
-
-    if let Some(ref ctx) = config.project_context {
-        prompt.push_str("\n\n");
-        prompt.push_str(ctx);
-    }
 
     if let Some(conventions) = load_conventions() {
         prompt.push_str(&conventions);
@@ -497,6 +462,45 @@ pub fn build_user_message(
     }
     s.push_str(task);
     s
+}
+
+// ── PIE injection ─────────────────────────────────────────────────────────────
+
+/// Synthetic tool call ID for the session-start PIE injection.
+/// Must match the tool_use_id in the ToolResult below.
+const PIE_TOOL_CALL_ID: &str = "pie_ctx_0";
+
+/// Build a synthetic assistant→tool_result message pair that injects a compact
+/// PIE summary into the conversation history before the user task.
+///
+/// The model sees this as a tool that already ran — higher salience than system
+/// prompt text, sent once (not repeated every turn).
+///
+/// Returns empty vec when graph/narrative are unavailable.
+pub fn pie_injection_messages(
+    graph: &crate::pie::ProjectGraph,
+    narrative: &crate::narrative::ProjectNarrative,
+) -> Vec<Message> {
+    let summary = crate::tools::pie_tool::build_compact_summary(graph, narrative);
+    vec![
+        Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Text(String::new()),
+            tool_calls: vec![ToolCall {
+                id: PIE_TOOL_CALL_ID.to_string(),
+                name: "project_index".to_string(),
+                arguments: r#"{"kind":"summary"}"#.to_string(),
+            }],
+        },
+        Message {
+            role: "user".to_string(),
+            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                tool_use_id: PIE_TOOL_CALL_ID.to_string(),
+                content: summary,
+            }]),
+            tool_calls: vec![],
+        },
+    ]
 }
 
 // ── Think-tag streaming parser ────────────────────────────────────────────────
@@ -675,7 +679,7 @@ async fn execute_one_tool_call(
             name: tc.name.clone(),
             args_summary: format_args_summary(&args),
         });
-        let raw = dispatch_tool(&tc.name, &args, &kind, cache, history, ui_tx, &config.mcp).await;
+        let raw = dispatch_tool(&tc.name, &args, &kind, cache, history, ui_tx, &config.mcp, config).await;
 
         // ── Post-dispatch cache maintenance ───────────────────────────────────
         match &kind {
@@ -855,10 +859,48 @@ async fn dispatch_tool(
     history: &History,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     mcp: &McpClient,
+    config: &AgentConfig,
 ) -> String {
     match name {
-        "bash"     => tools::bash::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]")),
-        "search"   => tools::search::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]")),
+        "bash" => tools::bash::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]")),
+
+        // ── project_index — in-memory graph query, no disk I/O for symbol/cluster kinds
+        "project_index" => {
+            match (&config.project_graph, &config.project_narrative) {
+                (Some(g), Some(n)) => tools::pie_tool::execute(args, g, n)
+                    .unwrap_or_else(|e| format!("[project_index error: {e}]")),
+                _ => "[project_index: no project graph available for this session]".to_string(),
+            }
+        }
+
+        // ── search — intercept exact identifier lookups against the graph
+        "search" => {
+            if let Some(graph) = &config.project_graph {
+                let pattern = args["pattern"].as_str().unwrap_or("");
+                // Only intercept plain identifiers — skip regex metacharacters
+                let is_plain = !pattern.chars().any(|c| ".*+?[](){}\\^$|".contains(c));
+                if is_plain && !pattern.is_empty() {
+                    if let Some(files) = graph.by_name.get(pattern) {
+                        if !files.is_empty() {
+                            let locations: Vec<String> = files.iter().map(|f| {
+                                let line = graph.symbols.iter()
+                                    .find(|s| s.name == pattern && &s.file == f)
+                                    .map(|s| s.line)
+                                    .unwrap_or(0);
+                                format!("  {f}:{line}")
+                            }).collect();
+                            return format!(
+                                "[project_index] '{}' is already indexed — search skipped:\n{}\n\
+                                 Use read_file(path, line_range=[N, M]) to read that section.",
+                                pattern,
+                                locations.join("\n")
+                            );
+                        }
+                    }
+                }
+            }
+            tools::search::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]"))
+        }
         "recall"   => tools::recall::execute(args, history).unwrap_or_else(|e| e),
         "ask_user" => tools::ask::execute(args, ui_tx.clone()).await.unwrap_or_else(|e| e),
         "edit_file" | "write_file" | "patch_file" => {
@@ -997,7 +1039,8 @@ mod tests {
             auto_commit: false,
             auto_commit_prefix: String::new(),
             git_context: false,
-            project_context: None,
+            project_graph: None,
+            project_narrative: None,
         }
     }
 
@@ -1009,12 +1052,12 @@ mod tests {
     }
 
     #[test]
-    fn test_system_prompt_includes_project_context() {
-        let mut config = minimal_config();
-        config.project_context = Some("# Clusters\nfoo bar".to_string());
+    fn test_system_prompt_no_project_context() {
+        // PIE context is now injected via message history, not the system prompt.
+        // The system prompt should be lean — just identity + framing.
+        let config = minimal_config();
         let prompt = build_system_prompt(&config, None);
-        assert!(prompt.contains("# Clusters"));
-        assert!(prompt.contains("foo bar"));
+        assert!(prompt.contains("PareCode"));
     }
 
     #[test]
@@ -1179,7 +1222,8 @@ mod tests {
             auto_commit: false,
             auto_commit_prefix: String::new(),
             git_context: false,
-            project_context: None,
+            project_graph: None,
+            project_narrative: None,
         }
     }
 

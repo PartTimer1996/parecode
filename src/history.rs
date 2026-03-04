@@ -115,7 +115,7 @@ fn summarise(tool_name: &str, output: &str) -> String {
         // old_str values for edit_file. Budget enforcement will compress it if
         // the context window fills up.
         "read_file" => output.to_string(),
-        "write_file" | "edit_file" => {
+        "write_file" | "edit_file" | "patch_file" => {
             // Build check failure: keep the full output so the model sees
             // compile errors and can fix them.
             if output.contains("⚠ FILE WRITTEN BUT BUILD BROKEN") || output.contains("✗ build check failed") {
@@ -133,6 +133,10 @@ fn summarise(tool_name: &str, output: &str) -> String {
         "list_files" => summarise_list(output),
         "search" => summarise_search(output),
         "bash" => summarise_bash(output),
+        // Keep project_index results in full — orientation data used for the whole session.
+        // The injected summary is protected from trimming; drill-down results (cluster,
+        // symbols) are equally valuable to retain since the model queried them deliberately.
+        "project_index" => output.to_string(),
         _ => truncate_to_lines(output, 3),
     }
 }

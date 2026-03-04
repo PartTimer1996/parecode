@@ -11,7 +11,7 @@ const DEFAULT_DEPTH: usize = 3;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "list_files",
-        "description": "List directory contents as a tree. Ignores common noise dirs (node_modules, .git, target).",
+        "description": "List directory contents as a tree. Only use when no project index is available — project_index(kind=\"cluster\") covers file structure when indexed. Ignores common noise dirs (node_modules, .git, target).",
         "parameters": {
             "type": "object",
             "properties": {

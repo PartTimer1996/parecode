@@ -2989,17 +2989,8 @@ fn launch_agent(
         auto_commit: resolved.auto_commit,
         auto_commit_prefix: resolved.auto_commit_prefix.clone(),
         git_context: resolved.git_context,
-        project_context: match (&state.project_narrative, &state.project_graph) {
-            (Some(n), Some(g)) if !n.architecture_summary.is_empty() => {
-                let attached_paths: Vec<String> = state.attached_files.iter().map(|f| f.path.clone()).collect();
-                let candidate_files = g.resolve_candidate_files(&task, &attached_paths);
-                let relevant_clusters = g.clusters_for_files(&candidate_files);
-                let recent = crate::task_memory::find_relevant(&candidate_files, 3);
-                Some(n.to_context_package(g, &relevant_clusters, 8, &recent))
-            }
-            (_, Some(g)) => g.to_prompt_section(8),
-            _ => None,
-        },
+        project_graph: state.project_graph.as_ref().map(|g| std::sync::Arc::new(g.clone())),
+        project_narrative: state.project_narrative.as_ref().map(|n| std::sync::Arc::new(n.clone())),
     };
 
     let attached: Vec<(String, String)> = state.attached_files
@@ -3082,17 +3073,8 @@ fn launch_quick(
         auto_commit: false,
         auto_commit_prefix: String::new(),
         git_context: false,
-        project_context: match (&state.project_narrative, &state.project_graph) {
-            (Some(n), Some(g)) if !n.architecture_summary.is_empty() => {
-                let attached_paths: Vec<String> = state.attached_files.iter().map(|f| f.path.clone()).collect();
-                let candidate_files = g.resolve_candidate_files(&task, &attached_paths);
-                let relevant_clusters = g.clusters_for_files(&candidate_files);
-                let recent = crate::task_memory::find_relevant(&candidate_files, 3);
-                Some(n.to_context_package(g, &relevant_clusters, 8, &recent))
-            }
-            (_, Some(g)) => g.to_prompt_section(8),
-            _ => None,
-        },
+        project_graph: state.project_graph.as_ref().map(|g| std::sync::Arc::new(g.clone())),
+        project_narrative: state.project_narrative.as_ref().map(|n| std::sync::Arc::new(n.clone())),
     };
 
     state.collecting_response.clear();
@@ -3213,7 +3195,8 @@ fn launch_plan(
         auto_commit: resolved.auto_commit,
         auto_commit_prefix: resolved.auto_commit_prefix.clone(),
         git_context: resolved.git_context,
-        project_context: None, // executor steps have explicit file context — no project map needed
+        project_graph: None,     // executor steps have pre-digested instructions — no graph needed
+        project_narrative: None,
     };
 
     tokio::spawn(async move {

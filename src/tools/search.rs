@@ -8,7 +8,7 @@ const MAX_MATCHES: usize = 50;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "search",
-        "description": "Search for a pattern across files using ripgrep.\n\nUSE THIS FOR:\n- Finding all call sites of a function before renaming it\n- Checking whether a pattern exists across multiple files\n- Confirming a string was fully removed after a replacement task\n\nDO NOT USE THIS FOR:\n- Locating a function or type you want to edit — use the symbol index from read_file instead\n- Verifying an edit was applied correctly — the edit_file result already shows the updated lines\n- Understanding a file's structure — read_file gives you a symbol index",
+        "description": "Search for a pattern across files using ripgrep.\n\nCall project_index first — it has exact symbol locations with zero disk reads. Use search only for:\n- Finding all call sites of a function across multiple files\n- Confirming a pattern was fully removed after a replacement task\n- Regex patterns not covered by the project index\n\nDO NOT USE for locating symbols — project_index already has exact file and line numbers.",
         "parameters": {
             "type": "object",
             "properties": {

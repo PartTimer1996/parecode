@@ -5,7 +5,7 @@ use std::fs;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "edit_file",
-        "description": "Edit an existing file. Replace mode: provide old_str (must match exactly once) and new_str. Append mode: append=true adds new_str at end of file.\n\nRETURN VALUE: On success, returns a fresh ±15 line window centred on the edit with updated line numbers and hashes. USE THESE HASHES for any follow-up edits to the same file — do NOT use hashes from an earlier read_file call, they are now stale. Do NOT re-read the file after a successful edit.",
+        "description": "Edit an existing file. Replace mode: provide old_str (must match exactly once) and new_str. Append mode: append=true adds new_str at end of file.\n\nRETURN VALUE: On success, returns a fresh ±15 line window centred on the edit with updated line numbers and hashes. USE THESE HASHES for any follow-up edits to the same file — do NOT use hashes from an earlier read_file call, they are now stale. Do NOT re-read the file after a successful edit.\n\nHASH REQUIRED: old_str must be copied verbatim from a read_file result including the `N [hash] |` prefix. Hashes from before the most recent edit to this file are stale — use hashes from the edit result for follow-up edits.",
         "parameters": {
             "type": "object",
             "properties": {

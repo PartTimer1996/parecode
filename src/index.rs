@@ -110,90 +110,6 @@ impl SymbolIndex {
         index
     }
 
-    /// Resolve a list of names/paths to a deduplicated list of real file paths.
-    /// - If entry looks like a path (contains `/` or `.`), keep as-is
-    /// - If entry matches a symbol name, substitute the file(s) it's defined in
-    /// - Entries that don't match anything are kept (model may be right about new files)
-    pub fn resolve_files(&self, entries: &[String]) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for entry in entries {
-            if entry.contains('/') || entry.contains('.') {
-                // Looks like a path — keep it
-                if !out.contains(entry) {
-                    out.push(entry.clone());
-                }
-            } else if let Some(files) = self.by_name.get(entry.as_str()) {
-                // Symbol name — substitute file(s)
-                for f in files {
-                    if !out.contains(f) {
-                        out.push(f.clone());
-                    }
-                }
-            } else {
-                // Unknown — keep as-is
-                if !out.contains(entry) {
-                    out.push(entry.clone());
-                }
-            }
-        }
-        out
-    }
-
-    /// Produce a compact text representation for injection into a model prompt.
-    /// Groups symbols by file, capped to avoid bloating the planning context.
-    /// Format:
-    ///   src/auth.rs: fn validate_token, struct AuthError, fn verify_claims
-    ///   src/handler.rs: fn handle_request, fn handle_error
-    pub fn to_prompt_section(&self, max_lines: usize) -> Option<String> {
-        if self.symbols.is_empty() {
-            return None;
-        }
-
-        // Group by file
-        let mut by_file: Vec<(String, Vec<String>)> = Vec::new();
-        for sym in &self.symbols {
-            if let Some(last) = by_file.last_mut() {
-                if last.0 == sym.file {
-                    last.1.push(format!("{} {}", sym.kind.label(), sym.name));
-                    continue;
-                }
-            }
-            by_file.push((sym.file.clone(), vec![format!("{} {}", sym.kind.label(), sym.name)]));
-        }
-
-        let mut lines: Vec<String> = Vec::new();
-        for (file, syms) in &by_file {
-            if lines.len() >= max_lines {
-                break;
-            }
-            // Truncate symbol list if very long
-            let sym_list = if syms.len() > 12 {
-                format!("{}, … ({} total)", syms[..12].join(", "), syms.len())
-            } else {
-                syms.join(", ")
-            };
-            let line_info = self.file_lines.get(file.as_str())
-                .map(|n| format!(" ({n} lines)"))
-                .unwrap_or_default();
-            lines.push(format!("  {file}{line_info}: {sym_list}"));
-        }
-
-        if lines.is_empty() {
-            return None;
-        }
-
-        let truncation_note = if by_file.len() > max_lines {
-            format!("\n  … and {} more files", by_file.len() - max_lines)
-        } else {
-            String::new()
-        };
-
-        Some(format!(
-            "# Project symbol index\nUse these symbol names and paths in the \"files\" field of each step:\n\n{}{}\n",
-            lines.join("\n"),
-            truncation_note
-        ))
-    }
 }
 
 // ── File collection ────────────────────────────────────────────────────────────
@@ -516,36 +432,6 @@ mod tests {
             extract_python("class UserService:"),
             Some((SymbolKind::Class, "UserService".to_string()))
         );
-    }
-
-    #[test]
-    fn test_resolve_files() {
-        let mut index = SymbolIndex::default();
-        index.symbols.push(Symbol {
-            name: "validate_token".to_string(),
-            file: "src/auth.rs".to_string(),
-            line: 10,
-            kind: SymbolKind::Function,
-        });
-        index.by_name.insert(
-            "validate_token".to_string(),
-            vec!["src/auth.rs".to_string()],
-        );
-
-        // Path-like entry — kept as-is
-        let result = index.resolve_files(&["src/main.rs".to_string()]);
-        assert_eq!(result, vec!["src/main.rs"]);
-
-        // Symbol name — resolved to file
-        let result = index.resolve_files(&["validate_token".to_string()]);
-        assert_eq!(result, vec!["src/auth.rs"]);
-
-        // Mixed
-        let result = index.resolve_files(&[
-            "src/main.rs".to_string(),
-            "validate_token".to_string(),
-        ]);
-        assert_eq!(result, vec!["src/main.rs", "src/auth.rs"]);
     }
 
     #[test]

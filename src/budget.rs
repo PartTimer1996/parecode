@@ -8,7 +8,12 @@
 ///   1. Compress oldest tool results further (already summarised; now inline-only)
 ///   2. If still over: one-sentence summaries of oldest conversation turns
 ///   3. Hard floor: never drop the system prompt or the original user task
-use crate::client::{ContentPart, Message, MessageContent};
+use crate::client::{ContentPart, Message, MessageContent, ToolCall};
+
+/// Tool call ID used for the synthetic PIE session-start injection.
+/// Messages at the head of history with this ID are never dropped — they
+/// contain the project index summary that orients the model for the session.
+const PIE_INJECTION_ID: &str = "pie_ctx_0";
 
 /// Token budget split (in tokens). Proportions match the plan.
 pub struct BudgetConfig {
@@ -137,7 +142,6 @@ impl Budget {
     /// Drop the oldest assistant+tool turn pairs, keeping at least the
     /// first user message (task) and the last 2 turns intact.
     fn trim_oldest_turns(&self, messages: &mut Vec<Message>) {
-        // Never drop: index 0 (first user message = the task)
         // Never drop: the last 4 messages (last 2 turns)
         let protected_tail = 4usize;
 
@@ -145,11 +149,22 @@ impl Budget {
             return;
         }
 
-        // Find the first non-user message we can drop (index 1 onwards, not in tail)
+        // Detect the PIE injection pair at the head of history.
+        // Structure: [assistant(pie_ctx_0 tool call), user(tool result), user(task), ...]
+        // The pair must never be dropped — it orients the model for the whole session.
+        // The first *real* user task message immediately after the pair is also protected.
+        let pie_head = messages
+            .first()
+            .map(|m| m.role == "assistant" && has_tool_call_id(&m.tool_calls, PIE_INJECTION_ID))
+            .unwrap_or(false);
+        // skip_to: first index we may consider dropping (after PIE pair + task message)
+        let skip_to = if pie_head { 3 } else { 1 };
+
+        // Find the first non-user message we can drop (skip_to onwards, not in tail)
         let drop_before = messages.len() - protected_tail;
         let mut drop_idx = None;
 
-        for i in 1..drop_before {
+        for i in skip_to..drop_before {
             // Drop assistant messages and their following tool result blocks
             if messages[i].role == "assistant" {
                 drop_idx = Some(i);
@@ -192,6 +207,11 @@ fn compress_tool_content(content: &str) -> String {
 
     // Already a one-liner or unknown format — keep first line
     first.to_string()
+}
+
+/// Returns true if any tool call in the list has the given ID.
+fn has_tool_call_id(tool_calls: &[ToolCall], id: &str) -> bool {
+    tool_calls.iter().any(|tc| tc.id == id)
 }
 
 // ── Loop detection ────────────────────────────────────────────────────────────
@@ -396,6 +416,68 @@ mod tests {
         budget.enforce(&mut messages, 0);
         // First message must always remain
         assert_eq!(messages[0].role, "user");
+    }
+
+    #[test]
+    fn test_pie_injection_pair_never_trimmed() {
+        use crate::client::ToolCall;
+
+        // Build a message list that simulates PIE injection + task + many turns
+        // The budget is tiny so trim_oldest_turns will fire.
+        let budget = Budget::new(200); // very small — forces compression
+
+        let pie_assistant = Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Text(String::new()),
+            tool_calls: vec![ToolCall {
+                id: "pie_ctx_0".to_string(),
+                name: "project_index".to_string(),
+                arguments: r#"{"kind":"summary"}"#.to_string(),
+            }],
+        };
+        let pie_result = Message {
+            role: "user".to_string(),
+            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                tool_use_id: "pie_ctx_0".to_string(),
+                content: "# Project index\n## Clusters\n- tui (8 files)".to_string(),
+            }]),
+            tool_calls: vec![],
+        };
+        let task = Message {
+            role: "user".to_string(),
+            content: MessageContent::Text("Fix the bug".to_string()),
+            tool_calls: vec![],
+        };
+        // Pad with several assistant/tool turn pairs so trim fires
+        let mut messages = vec![pie_assistant, pie_result, task];
+        for _ in 0..6 {
+            messages.push(Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Text("thinking...".repeat(50)),
+                tool_calls: vec![],
+            });
+            messages.push(Message {
+                role: "user".to_string(),
+                content: MessageContent::Text("tool result".repeat(50)),
+                tool_calls: vec![],
+            });
+        }
+
+        budget.enforce(&mut messages, 0);
+
+        // PIE pair must survive
+        assert_eq!(messages[0].role, "assistant", "PIE assistant must be at index 0");
+        assert!(
+            has_tool_call_id(&messages[0].tool_calls, "pie_ctx_0"),
+            "PIE assistant must retain tool call id"
+        );
+        assert_eq!(messages[1].role, "user", "PIE tool result must be at index 1");
+
+        // Real task must survive
+        let task_present = messages.iter().any(|m| {
+            matches!(&m.content, MessageContent::Text(t) if t == "Fix the bug")
+        });
+        assert!(task_present, "User task must not be dropped");
     }
 }
 

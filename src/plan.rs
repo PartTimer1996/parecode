@@ -198,6 +198,13 @@ CRITICAL rules:
 - Each step should be independently verifiable — prefer "command:cargo test" or similar where applicable
 - DO NOT create read_file or search tool steps — they will not work in isolated execution. Instead, during planning, discover everything each step needs (file paths, function signatures, exact line numbers, struct fields, imports) and bake that information directly into the "instruction" field. Reference specific locations like "add `process_request` after the `handle_connection` function at line 45 in src/server.rs". The executor will pre-load the files listed in "files" — do not re-read them at runtime.
 
+INSTRUCTION REQUIREMENTS:
+- Every instruction MUST include exact file paths and line numbers for everything it touches
+- After calling list_symbols/read_symbol: bake the location into the instruction, e.g. "edit `fn handle_key` at line 847 in src/tui/mod.rs — add field x after line 852"
+- Do NOT say "find the X function" — you have already found it via list_symbols; include the line number
+- Include function signatures or struct field names the step needs to produce or modify
+- The executor sees ONLY its listed files — every fact it needs must be in the instruction
+
 Respond with ONLY valid JSON — no markdown fences, no explanation. Format:
 
 {
@@ -415,6 +422,26 @@ fn find_relevant_clusters(task: &str, graph: &ProjectGraph) -> Vec<String> {
 
 // ── Plan generation ───────────────────────────────────────────────────────────
 
+/// Best-effort symbol-enrichment pass: for any symbol name that appears in a
+/// step instruction but has no line number referenced, append an index hint.
+/// This ensures executors always have a concrete starting point without needing
+/// to call list_symbols themselves.
+fn enrich_step_instructions(steps: &mut Vec<PlanStep>, graph: &ProjectGraph) {
+    for step in steps.iter_mut() {
+        for sym in graph.symbols.iter() {
+            // Only enrich if the instruction mentions the symbol name but not its line
+            if step.instruction.contains(&sym.name)
+                && !step.instruction.contains(&format!("line {}", sym.line))
+            {
+                step.instruction.push_str(&format!(
+                    "\n[index: `{}` at line {} in {}]",
+                    sym.name, sym.line, sym.file
+                ));
+            }
+        }
+    }
+}
+
 /// Call the model to generate a plan for `task`.
 ///
 /// Phase 2: multi-turn loop with `list_symbols` and `read_symbol` tools.
@@ -607,6 +634,9 @@ pub async fn generate_plan(
     if steps.is_empty() {
         return Err(anyhow::anyhow!("Model returned an empty plan"));
     }
+
+    let mut steps = steps;
+    enrich_step_instructions(&mut steps, graph);
 
     Ok(Plan::new(task.to_string(), steps, project.to_string()))
 }

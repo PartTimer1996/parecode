@@ -21,17 +21,6 @@ use crate::index::{Symbol, SymbolIndex, extract_symbols};
 const SCHEMA_VERSION: u32 = 1;
 const GRAPH_PATH: &str = ".parecode/project.graph";
 
-/// Common English stop-words filtered out during keyword anchoring.
-const STOP_WORDS: &[&str] = &[
-    "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
-    "her", "was", "one", "our", "out", "day", "get", "has", "him", "his",
-    "how", "its", "may", "new", "now", "old", "see", "two", "who", "any",
-    "add", "use", "fix", "run", "set", "let", "put", "try", "via", "per",
-    "make", "that", "with", "have", "this", "from", "they", "will", "your",
-    "when", "into", "more", "also", "some", "than", "then", "what", "been",
-    "does", "were", "each", "just", "like", "time", "very", "well", "only",
-    "both", "here", "much", "need", "over", "same", "such", "take", "used",
-];
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -231,84 +220,6 @@ impl ProjectGraph {
         out
     }
 
-    /// Return the cluster name that contains `path`, if any.
-    pub fn cluster_for_file(&self, path: &str) -> Option<&str> {
-        self.clusters
-            .iter()
-            .find(|c| c.files.contains(&path.to_string()))
-            .map(|c| c.name.as_str())
-    }
-
-    /// Derive candidate files from a task description + explicitly attached files.
-    ///
-    /// Strategy (in-process, <1ms):
-    /// 1. Start with `attached` (files the user pinned with `#`)
-    /// 2. Extract word tokens from `task_text`, skip stop-words
-    /// 3. For each token, check if any cluster name or symbol name contains it
-    ///    — if so, add all files from that cluster / symbol definition
-    /// 4. Deduplicate; return up to 20 candidate paths
-    ///
-    /// This gives `find_relevant()` meaningful signal when no files are attached.
-    pub fn resolve_candidate_files(&self, task_text: &str, attached: &[String]) -> Vec<String> {
-        let mut out: Vec<String> = attached.to_vec();
-
-        let task_lower = task_text.to_lowercase();
-        let tokens: Vec<&str> = task_lower
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .filter(|t| t.len() >= 3 && !STOP_WORDS.contains(t))
-            .collect();
-
-        if tokens.is_empty() {
-            return out;
-        }
-
-        // Match cluster names
-        for cluster in &self.clusters {
-            let name_lower = cluster.name.to_lowercase();
-            if tokens.iter().any(|t| name_lower.contains(*t) || t.contains(name_lower.as_str())) {
-                for f in &cluster.entry_files {
-                    if !out.contains(f) {
-                        out.push(f.clone());
-                    }
-                }
-            }
-        }
-
-        // Match symbol names (stops when we have enough candidates)
-        if out.len() < 20 {
-            for (sym_name, files) in &self.by_name {
-                let sym_lower = sym_name.to_lowercase();
-                if tokens.iter().any(|t| sym_lower.contains(*t)) {
-                    for f in files {
-                        if !out.contains(f) {
-                            out.push(f.clone());
-                        }
-                        if out.len() >= 20 {
-                            break;
-                        }
-                    }
-                }
-                if out.len() >= 20 {
-                    break;
-                }
-            }
-        }
-
-        out
-    }
-
-    /// Return cluster names for the given file paths (deduped, preserving order).
-    pub fn clusters_for_files<'a>(&'a self, files: &[String]) -> Vec<&'a str> {
-        let mut seen: Vec<&'a str> = Vec::new();
-        for file in files {
-            if let Some(name) = self.cluster_for_file(file) {
-                if !seen.contains(&name) {
-                    seen.push(name);
-                }
-            }
-        }
-        seen
-    }
 
     /// Compact cluster-grouped text for injection into the planning prompt.
     ///
@@ -964,46 +875,4 @@ mod tests {
         assert_eq!(unique.len(), files.len(), "by_name entries should have no duplicates");
     }
 
-    // ── Test 11 ────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_resolve_candidate_files_keyword_anchoring() {
-        let tmp = TempDir::new().unwrap();
-        write(tmp.path(), "src/auth/login.rs", "pub fn login() {}\npub struct Session {}\n");
-        write(tmp.path(), "src/server.rs", "pub fn start() {}\n");
-
-        let (graph, _) = ProjectGraph::load_or_build(tmp.path(), 100);
-
-        // Task mentions "login" — should match cluster "auth" or symbol "login"
-        let candidates = graph.resolve_candidate_files("fix the login handler", &[]);
-        assert!(!candidates.is_empty(), "should find candidates from keyword 'login'");
-        // Should include file(s) containing the login symbol or auth cluster
-        assert!(
-            candidates.iter().any(|f| f.contains("auth")),
-            "expected auth-related file, got: {candidates:?}"
-        );
-    }
-
-    // ── Test 12 ────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_clusters_for_files() {
-        let tmp = TempDir::new().unwrap();
-        setup_multi_cluster(&tmp);
-
-        let (graph, _) = ProjectGraph::load_or_build(tmp.path(), 100);
-
-        // Map auth files to their cluster
-        let files = vec![
-            "src/auth/login.rs".to_string(),
-            "src/server.rs".to_string(),
-        ];
-        let clusters = graph.clusters_for_files(&files);
-
-        assert!(clusters.contains(&"auth"), "expected 'auth' cluster: {clusters:?}");
-        assert!(clusters.contains(&"src"), "expected 'src' cluster: {clusters:?}");
-        // No duplicates
-        let unique: std::collections::HashSet<&str> = clusters.iter().copied().collect();
-        assert_eq!(unique.len(), clusters.len(), "clusters_for_files should not have duplicates");
-    }
 }

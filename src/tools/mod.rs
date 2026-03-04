@@ -3,6 +3,7 @@ pub mod bash;
 pub mod edit;
 pub mod list;
 pub mod patch;
+pub mod pie_tool;
 pub mod read;
 pub mod recall;
 pub mod search;
@@ -25,6 +26,7 @@ pub const TOOL_SEARCH: &str = "search";
 pub const TOOL_LIST_FILES: &str = "list_files";
 pub const TOOL_RECALL: &str = "recall";
 pub const TOOL_ASK_USER: &str = "ask_user";
+pub const TOOL_PROJECT_INDEX: &str = "project_index";
 
 // Turn thresholds for phase-adaptive tool selection
 const TURN_EXPLORATION_END: usize = 1;
@@ -34,6 +36,7 @@ const TURN_RECALL_USEFUL: usize = 3;
 /// All tool names as a slice, useful for bulk operations.
 pub fn all_tool_names() -> &'static [&'static str] {
     &[
+        TOOL_PROJECT_INDEX,
         TOOL_READ_FILE,
         TOOL_WRITE_FILE,
         TOOL_EDIT_FILE,
@@ -67,6 +70,7 @@ impl Default for TurnThresholds {
 /// Dispatch to get a tool's definition by name.
 pub fn get_tool(name: &str) -> Option<Value> {
     match name {
+        TOOL_PROJECT_INDEX => Some(pie_tool::definition()),
         TOOL_READ_FILE => Some(read::definition()),
         TOOL_WRITE_FILE => Some(write::definition()),
         TOOL_EDIT_FILE => Some(edit::definition()),
@@ -90,27 +94,37 @@ pub fn all_definitions() -> Vec<Tool> {
 
 /// Phase-adaptive tool selection — only send tools relevant to the current turn.
 ///
-/// Core tools (always): read_file, edit_file, bash, search, ask_user  (~940 tok)
+/// When `has_graph` is true, `project_index` leads the list (models prefer earlier tools)
+/// and `list_files` is suppressed on turn 1 (graph already covers structure).
+///
+/// Core tools (always): project_index (when graph available), read_file, edit_file, bash, search, ask_user
 /// Extended (conditional):
-///   - list_files, write_file: early turns (exploration / creation)
+///   - list_files, write_file: early turns, only when no graph
 ///   - patch_file, recall: later turns (mutation / history retrieval)
 ///
-/// Saves ~400-800 tokens/turn compared to sending all 9 tools every time.
-pub fn tools_for_turn(turn: usize, history_has_summaries: bool) -> Vec<Tool> {
+/// Saves ~400-800 tokens/turn compared to sending all tools every turn.
+pub fn tools_for_turn(turn: usize, history_has_summaries: bool, has_graph: bool) -> Vec<Tool> {
     let thresholds = TurnThresholds::default();
-    let mut t = vec![
-        def(ask::definition()),    // first: clarify before spiralling into reads
-        def(read::definition()),
-        def(edit::definition()),
-        def(bash::definition()),
-        def(search::definition()),
-    ];
+    let mut t: Vec<Tool> = Vec::new();
+
+    // project_index first when available — high salience position
+    if has_graph {
+        t.push(def(pie_tool::definition()));
+    }
+
+    t.push(def(ask::definition()));    // clarify before spiralling into reads
+    t.push(def(read::definition()));
+    t.push(def(edit::definition()));
+    t.push(def(bash::definition()));
+    t.push(def(search::definition()));
 
     // Exploration phase: navigation + file creation
+    // When graph is available, list_files is redundant on early turns
     if turn <= thresholds.exploration_end {
-        t.push(def(list::definition()));
+        if !has_graph {
+            t.push(def(list::definition()));
+        }
         t.push(def(write::definition()));
-        
     }
 
     // Mutation phase: multi-hunk diffs become useful after reading files
@@ -122,9 +136,6 @@ pub fn tools_for_turn(turn: usize, history_has_summaries: bool) -> Vec<Tool> {
     if history_has_summaries || turn >= thresholds.recall_useful {
         t.push(def(recall::definition()));
     }
-
-    // write_file stays available after turn 1 if model previously used it
-    // (handled by the `extra_tools` mechanism in the agent loop)
 
     t
 }
@@ -185,7 +196,7 @@ mod tests {
         assert!(names.contains(&TOOL_LIST_FILES));
         assert!(names.contains(&TOOL_RECALL));
         assert!(names.contains(&TOOL_ASK_USER));
-        assert_eq!(names.len(), 9);
+        assert_eq!(names.len(), 10);
     }
 
     #[test]
@@ -209,7 +220,7 @@ mod tests {
     #[test]
     fn test_all_definitions() {
         let defs = all_definitions();
-        assert_eq!(defs.len(), 9);
+        assert_eq!(defs.len(), 10);
         assert!(defs.iter().any(|d| d.name == TOOL_READ_FILE));
         assert!(defs.iter().any(|d| d.name == TOOL_ASK_USER));
     }
@@ -217,7 +228,7 @@ mod tests {
     #[test]
     fn test_tools_for_turn_logic() {
         // Turn 0: Exploration (includes list and write)
-        let t0 = tools_for_turn(0, false);
+        let t0 = tools_for_turn(0, false, false);
         let names0: Vec<_> = t0.iter().map(|d| d.name.as_str()).collect();
         assert!(names0.contains(&TOOL_LIST_FILES));
         assert!(names0.contains(&TOOL_WRITE_FILE));
@@ -225,19 +236,19 @@ mod tests {
         assert!(!names0.contains(&TOOL_RECALL));
 
         // Turn 2: Mutation (includes patch)
-        let t2 = tools_for_turn(2, false);
+        let t2 = tools_for_turn(2, false, false);
         let names2: Vec<_> = t2.iter().map(|d| d.name.as_str()).collect();
         assert!(!names2.contains(&TOOL_LIST_FILES));
         assert!(names2.contains(&TOOL_PATCH_FILE));
         assert!(!names2.contains(&TOOL_RECALL));
 
         // Turn 2 with summaries: Should include recall even if turn < recall_useful
-        let t2s = tools_for_turn(2, true);
+        let t2s = tools_for_turn(2, true,false);
         let names2s: Vec<_> = t2s.iter().map(|d| d.name.as_str()).collect();
         assert!(names2s.contains(&TOOL_RECALL));
 
         // Turn 4: Recall useful
-        let t4 = tools_for_turn(4, false);
+        let t4 = tools_for_turn(4, false, false);
         let names4: Vec<_> = t4.iter().map(|d| d.name.as_str()).collect();
         assert!(names4.contains(&TOOL_RECALL));
     }

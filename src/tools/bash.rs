@@ -9,7 +9,7 @@ const MAX_OUTPUT_LINES: usize = 500;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "bash",
-        "description": "Run a shell command. Returns stdout and stderr. Avoid interactive commands.",
+        "description": "Run a shell command. Returns stdout and stderr. Avoid interactive commands.\nUse for: compiling, tests, git, package managers. Do NOT use for reading files — read_file provides hashes required for editing.",
         "parameters": {
             "type": "object",
             "properties": {
