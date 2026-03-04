@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::process::Command;
 
-/// Max lines of rg output to return inline.
-const MAX_OUTPUT_LINES: usize = 30;
+/// Max match lines to return. Each line is "file:lineno:content" — enough to act on.
+/// Use read_file with line_range if you need surrounding context.
+const MAX_OUTPUT_LINES: usize = 20;
 
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "search",
-        "description": "Search for a pattern across files using ripgrep.\n\nCall project_index first — it has exact symbol locations with zero disk reads. Use search only for:\n- Finding all call sites of a function across multiple files\n- Confirming a pattern was fully removed after a replacement task\n- Regex patterns not covered by the project index\n\nDO NOT USE for locating symbols — project_index already has exact file and line numbers.",
+        "description": "Search for a pattern across files using ripgrep. Returns file:line:match lines only.\n\nCall project_index first — it has exact symbol locations with zero disk reads. Use search only for:\n- Finding all call sites of a function across multiple files\n- Confirming a pattern was fully removed after a replacement task\n- Regex patterns not covered by the project index\n\nDO NOT USE for locating symbols — project_index already has exact file and line numbers.\nFor surrounding context: use read_file with line_range after finding the line number here.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -23,10 +24,6 @@ pub fn definition() -> Value {
                 "file_pattern": {
                     "type": "string",
                     "description": "Glob filter, e.g. '*.ts', '*.rs'"
-                },
-                "context_lines": {
-                    "type": "integer",
-                    "description": "Lines of context around each match (default: 0). Keep at 0 unless you need surrounding code — context multiplies output size."
                 }
             },
             "required": ["pattern"]
@@ -39,13 +36,11 @@ pub async fn execute(args: &Value) -> Result<String> {
         .as_str()
         .context("search: missing 'pattern'")?;
     let path = args["path"].as_str().unwrap_or(".");
-    let context_lines = args["context_lines"].as_u64().unwrap_or(0);
 
     let mut cmd = Command::new("rg");
     cmd.arg("--line-number")
         .arg("--with-filename")
         .arg("--color=never")
-        .arg(format!("--context={context_lines}"))
         .arg(pattern)
         .arg(path);
 
@@ -61,7 +56,6 @@ pub async fn execute(args: &Value) -> Result<String> {
         Err(_) => {
             Command::new("grep")
                 .arg("-rn")
-                .arg(format!("-{context_lines}"))
                 .arg(pattern)
                 .arg(path)
                 .output()

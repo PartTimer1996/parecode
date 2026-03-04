@@ -145,7 +145,6 @@ fn summarise(tool_name: &str, output: &str) -> String {
         // Keep full tree — essential for cross-file reasoning and project navigation.
         // Budget enforcement will compress it later if context gets tight.
         "list_files" => summarise_list(output),
-        "search" => summarise_search(output),
         "bash" => summarise_bash(output),
         // Keep project_index results in full — orientation data used for the whole session.
         // The injected summary is protected from trimming; drill-down results (cluster,
@@ -240,45 +239,6 @@ fn summarise_list(output: &str) -> String {
         out.push_str(&format!("[{file_count} files omitted — directories shown above. Ask to recall for full listing.]"));
     }
     out
-}
-
-/// search: keep matched lines (the actual code content is essential for
-/// cross-file reasoning). Cap at 30 match lines to stay bounded.
-fn summarise_search(output: &str) -> String {
-    if output.starts_with("No matches") {
-        return output.lines().next().unwrap_or("No matches").to_string();
-    }
-
-    let lines: Vec<&str> = output.lines().collect();
-
-    // Small results: keep everything
-    if lines.len() <= 30 {
-        return output.to_string();
-    }
-
-    // Large results: keep first 25 match lines + count footer
-    // Match lines have the format "file.rs:12:content" or "file.rs-12-content"
-    let match_lines: Vec<&str> = lines
-        .iter()
-        .filter(|l| {
-            let parts: Vec<&str> = l.splitn(3, ':').collect();
-            parts.len() >= 2 && parts[1].parse::<u32>().is_ok()
-        })
-        .copied()
-        .collect();
-
-    let total = match_lines.len();
-    if total == 0 {
-        return truncate_to_lines(output, 5);
-    }
-
-    let kept: Vec<&str> = match_lines.into_iter().take(25).collect();
-    let mut result = kept.join("\n");
-    let remaining = total.saturating_sub(25);
-    if remaining > 0 {
-        result.push_str(&format!("\n[+{remaining} matches — ask to recall for full results]"));
-    }
-    result
 }
 
 /// bash: context-aware summarisation.
@@ -504,33 +464,6 @@ mod tests {
         assert!(result.contains("src/module0/"));
         assert!(!result.contains("file1.rs"));
         assert!(result.contains("files omitted"));
-    }
-
-    #[test]
-    fn test_summarise_search_no_matches() {
-        let output = "No matches found in project";
-        let result = summarise_search(output);
-        assert_eq!(result, "No matches found in project");
-    }
-
-    #[test]
-    fn test_summarise_search_small_keeps_full() {
-        let output = "src/a.rs:1:fn foo() {}\nsrc/b.rs:2:fn bar() {}";
-        let result = summarise_search(output);
-        assert_eq!(result, output);
-    }
-
-    #[test]
-    fn test_summarise_search_large_truncates() {
-        let mut large = String::new();
-        for i in 1..=50 {
-            large.push_str(&format!("src/f{}.rs:{i}:fn test_{i}() {{\n", i));
-        }
-        
-        let result = summarise_search(&large);
-        assert!(result.contains("test_1"));
-        assert!(!result.contains("test_50")); // should be omitted
-        assert!(result.contains("matches"));
     }
 
     #[test]

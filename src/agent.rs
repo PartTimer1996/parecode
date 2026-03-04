@@ -16,13 +16,12 @@ const MAX_TOOL_CALLS: usize = 40;
 
 const SYSTEM_PROMPT_BASE: &str = "You are PareCode, a coding assistant. \
 Complete tasks using the available tools in minimum tool calls. \
-A project index is pre-loaded — use project_index for symbol locations before search or read_file. \
-If files are attached in the user message, read them directly — do not search for content already provided. \
+A project index is pre-loaded — use project_index for symbol locations before read_file. \
 When done, stop.";
 
 /// Quick mode — single API call, no multi-turn loop, minimal context.
 /// Targets < 2k tokens total. No file loading, no session history.
-/// Allows at most 1 tool call before returning (edit_file, search, bash read-only).
+/// Allows at most 1 tool call before returning (edit_file, bash read-only).
 pub async fn run_quick(
     task: &str,
     client: &Client,
@@ -35,13 +34,13 @@ pub async fn run_quick(
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "unknown".to_string());
     const QUICK_SYSTEM: &str = "You are PareCode in quick mode. Answer concisely in one response. \
-If a tool call is needed, make exactly one — prefer edit_file or search. \
+If a tool call is needed, make exactly one — prefer edit_file or bash. \
 Do not read files unless strictly necessary. Keep responses short.";
 
     // Lean tool list — only the tools that make sense for quick tasks
     let quick_tools: Vec<crate::client::Tool> = tools::all_definitions()
         .into_iter()
-        .filter(|t| matches!(t.name.as_str(), "edit_file" | "search" | "read_file" | "bash"))
+        .filter(|t| matches!(t.name.as_str(), "edit_file" | "read_file" | "bash"))
         .collect();
 
     let messages = vec![Message {
@@ -817,7 +816,7 @@ fn strip_cot_from_last_assistant(messages: &mut Vec<Message>) {
 /// the messages array. This covers:
 ///   - read_file results (full file content with now-wrong hashes/line numbers)
 ///   - edit_file post-edit echoes (±10 line excerpts with now-wrong hashes)
-///   - search results that include matches from this file
+///   - any bash output containing rg-style path:line references to this file
 ///
 /// Stale content is actively harmful: wrong hashes cause anchor mismatches,
 /// wrong line numbers cause failed edits, wrong code causes incorrect old_str.
@@ -843,8 +842,7 @@ fn evict_stale_content(messages: &mut [Message], edited_path: &str) {
                     let is_edit_echo = content.contains("✓ Edited")
                         && content.contains(" | ");
 
-                    // search results referencing this file
-                    // (rg format: "path:line:content")
+                    // bash output containing rg-style path:line references
                     let is_search = {
                         let prefix = format!("{edited_path}:");
                         content.lines().any(|l| l.starts_with(&prefix))
@@ -917,34 +915,6 @@ async fn dispatch_tool(
             }
         }
 
-        // ── search — intercept exact identifier lookups against the graph
-        "search" => {
-            if let Some(graph) = &config.project_graph {
-                let pattern = args["pattern"].as_str().unwrap_or("");
-                // Only intercept plain identifiers — skip regex metacharacters
-                let is_plain = !pattern.chars().any(|c| ".*+?[](){}\\^$|".contains(c));
-                if is_plain && !pattern.is_empty() {
-                    if let Some(files) = graph.by_name.get(pattern) {
-                        if !files.is_empty() {
-                            let locations: Vec<String> = files.iter().map(|f| {
-                                let line = graph.symbols.iter()
-                                    .find(|s| s.name == pattern && &s.file == f)
-                                    .map(|s| s.line)
-                                    .unwrap_or(0);
-                                format!("  {f}:{line}")
-                            }).collect();
-                            return format!(
-                                "[project_index] '{}' is already indexed — search skipped:\n{}\n\
-                                 Use read_file(path, line_range=[N, M]) to read that section.",
-                                pattern,
-                                locations.join("\n")
-                            );
-                        }
-                    }
-                }
-            }
-            tools::search::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]"))
-        }
         "recall"   => tools::recall::execute(args, history).unwrap_or_else(|e| e),
         "ask_user" => tools::ask::execute(args, ui_tx.clone()).await.unwrap_or_else(|e| e),
         "edit_file" | "write_file" | "patch_file" => {
@@ -1021,7 +991,7 @@ fn format_args_summary(args: &Value) -> String {
 /// - No bash or ask_user call was made (those produce output the model needs to react to)
 /// - No result contained an error or failure marker
 ///
-/// Reads (read_file, search, project_index) are safe to skip past — the model already
+/// Reads (read_file, project_index) are safe to skip past — the model already
 /// consumed them to produce the edits. Bash always needs a follow-up turn so the model
 /// can react to command output (test results, compile errors, etc.).
 ///
@@ -1437,12 +1407,6 @@ mod tests {
     fn test_skip_done_turn_read_then_edit_skips() {
         // read_file + edit_file → mutated=true, bash_or_ask=false, no errors → SKIP
         // This is the most common real-world pattern — must fire correctly.
-        assert!(should_skip_done_turn(true, false, false));
-    }
-
-    #[test]
-    fn test_skip_done_turn_search_then_edit_skips() {
-        // search + edit_file → mutated=true, bash_or_ask=false, no errors → SKIP
         assert!(should_skip_done_turn(true, false, false));
     }
 

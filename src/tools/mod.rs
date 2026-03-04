@@ -6,7 +6,6 @@ pub mod patch;
 pub mod pie_tool;
 pub mod read;
 pub mod recall;
-pub mod search;
 pub mod write;
 
 use anyhow::{anyhow, Result};
@@ -22,7 +21,6 @@ pub const TOOL_WRITE_FILE: &str = "write_file";
 pub const TOOL_EDIT_FILE: &str = "edit_file";
 pub const TOOL_PATCH_FILE: &str = "patch_file";
 pub const TOOL_BASH: &str = "bash";
-pub const TOOL_SEARCH: &str = "search";
 pub const TOOL_LIST_FILES: &str = "list_files";
 pub const TOOL_RECALL: &str = "recall";
 pub const TOOL_ASK_USER: &str = "ask_user";
@@ -42,7 +40,6 @@ pub fn all_tool_names() -> &'static [&'static str] {
         TOOL_EDIT_FILE,
         TOOL_PATCH_FILE,
         TOOL_BASH,
-        TOOL_SEARCH,
         TOOL_LIST_FILES,
         TOOL_RECALL,
         TOOL_ASK_USER,
@@ -76,7 +73,6 @@ pub fn get_tool(name: &str) -> Option<Value> {
         TOOL_EDIT_FILE => Some(edit::definition()),
         TOOL_PATCH_FILE => Some(patch::definition()),
         TOOL_BASH => Some(bash::definition()),
-        TOOL_SEARCH => Some(search::definition()),
         TOOL_LIST_FILES => Some(list::definition()),
         TOOL_RECALL => Some(recall::definition()),
         TOOL_ASK_USER => Some(ask::definition()),
@@ -97,7 +93,7 @@ pub fn all_definitions() -> Vec<Tool> {
 /// When `has_graph` is true, `project_index` leads the list (models prefer earlier tools)
 /// and `list_files` is suppressed on turn 1 (graph already covers structure).
 ///
-/// Core tools (always): project_index (when graph available), read_file, edit_file, bash, search, ask_user
+/// Core tools (always): project_index (when graph available), read_file, edit_file, bash, ask_user
 /// Extended (conditional):
 ///   - list_files, write_file: early turns, only when no graph
 ///   - patch_file, recall: later turns (mutation / history retrieval)
@@ -116,7 +112,6 @@ pub fn tools_for_turn(turn: usize, history_has_summaries: bool, has_graph: bool)
     t.push(def(read::definition()));
     t.push(def(edit::definition()));
     t.push(def(bash::definition()));
-    t.push(def(search::definition()));
 
     // Exploration phase: navigation + file creation
     // When graph is available, list_files is redundant on early turns
@@ -164,7 +159,6 @@ pub fn dispatch(name: &str, args: &Value) -> Result<String> {
         (TOOL_PATCH_FILE, patch::execute),
         (TOOL_LIST_FILES, list::execute),
         // (TOOL_BASH, bash::execute),    // async
-        // (TOOL_SEARCH, search::execute), // async
         // (TOOL_ASK_USER, ask::execute), // async
         // (TOOL_RECALL, recall::execute), // async
     ];
@@ -192,11 +186,10 @@ mod tests {
         assert!(names.contains(&TOOL_EDIT_FILE));
         assert!(names.contains(&TOOL_PATCH_FILE));
         assert!(names.contains(&TOOL_BASH));
-        assert!(names.contains(&TOOL_SEARCH));
         assert!(names.contains(&TOOL_LIST_FILES));
         assert!(names.contains(&TOOL_RECALL));
         assert!(names.contains(&TOOL_ASK_USER));
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 9);
     }
 
     #[test]
@@ -220,7 +213,7 @@ mod tests {
     #[test]
     fn test_all_definitions() {
         let defs = all_definitions();
-        assert_eq!(defs.len(), 10);
+        assert_eq!(defs.len(), 9);
         assert!(defs.iter().any(|d| d.name == TOOL_READ_FILE));
         assert!(defs.iter().any(|d| d.name == TOOL_ASK_USER));
     }
