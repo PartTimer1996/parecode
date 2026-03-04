@@ -291,7 +291,7 @@ pub async fn run_tui(
             if !is_terminal_kind {
                 all_terminal = false;
             }
-            let (part, dispatched) = execute_one_tool_call(
+            let (part, dispatched, had_error) = execute_one_tool_call(
                 tc,
                 &mut mutated_files,
                 &mut messages,
@@ -304,16 +304,10 @@ pub async fn run_tui(
             if dispatched {
                 tool_call_count += 1;
             }
+            if had_error {
+                any_error = true;
+            }
             if let Some(part) = part {
-                if let ContentPart::ToolResult { ref content, .. } = part {
-                    if content.contains("[Tool error")
-                        || content.contains("✗ build check failed")
-                        || content.contains("⚠ FILE WRITTEN BUT BUILD BROKEN")
-                        || content.contains("⚠ skipped dependent edit")
-                    {
-                        any_error = true;
-                    }
-                }
                 tool_results.push(part);
             }
         }
@@ -608,8 +602,9 @@ impl ThinkParser {
 /// Returns `None` when the result was already pushed directly into `tool_results`
 /// by an early-continue path (dependency guard stub, cache hit). Returns
 /// `Some(ContentPart)` for the caller to collect into `tool_results`.
-/// The bool indicates whether a real dispatch occurred (i.e. not a cache hit or stub) —
-/// callers use this to increment the tool call counter accurately.
+/// The second bool indicates whether a real dispatch occurred (not a cache hit or stub).
+/// The third bool indicates whether the result contains an error or hook failure —
+/// computed after on_edit hooks fire, giving the caller a complete error signal.
 async fn execute_one_tool_call(
     tc: &ToolCall,
     mutated_files: &mut std::collections::HashSet<String>,
@@ -619,7 +614,7 @@ async fn execute_one_tool_call(
     loop_detector: &mut LoopDetector,
     config: &AgentConfig,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
-) -> (Option<ContentPart>, bool) {
+) -> (Option<ContentPart>, bool, bool) {
     // ── Parse args ────────────────────────────────────────────────────────────
     let args: Value = match serde_json::from_str(&tc.arguments) {
         Ok(v) => v,
@@ -627,7 +622,7 @@ async fn execute_one_tool_call(
             return (Some(ContentPart::ToolResult {
                 tool_use_id: tc.id.clone(),
                 content: format!("[Error parsing tool arguments: {e}]"),
-            }), false);
+            }), false, true);
         }
     };
 
@@ -649,7 +644,7 @@ async fn execute_one_tool_call(
                      this batch. Re-plan this edit after seeing that result — use fresh \
                      line numbers and hashes from the post-edit context above.]"
                 ),
-            }), false);
+            }), false, true); // treat skipped edit as error — model needs to re-plan
         }
     }
 
@@ -678,7 +673,7 @@ async fn execute_one_tool_call(
                     return (Some(ContentPart::ToolResult {
                         tool_use_id: tc.id.clone(),
                         content: model_output,
-                    }), false);
+                    }), false, false);
                 }
             }
             // Ranged read hit — serve slice from cached lines
@@ -695,7 +690,7 @@ async fn execute_one_tool_call(
                         return (Some(ContentPart::ToolResult {
                             tool_use_id: tc.id.clone(),
                             content: model_output,
-                        }), false);
+                        }), false, false);
                     }
                 }
             }
@@ -777,10 +772,33 @@ async fn execute_one_tool_call(
         mutated_files.insert(path.clone());
     }
 
+    // Compute had_error after hooks have been appended — this is the authoritative signal
+    // for the early-exit logic. Catches: tool errors, build failures, hook failures (exit != 0).
+    let had_error = result_content.contains("[Tool error")
+        || result_content.contains("[Not executed")
+        || result_content.contains("✗ build check failed")
+        || result_content.contains("⚠ FILE WRITTEN BUT BUILD BROKEN")
+        || result_content.contains("⚠ skipped dependent edit")
+        || result_content.contains("[Loop detected")
+        || result_content.contains("[dry-run")
+        || (result_content.contains("(exit ") && {
+            // Hook exited non-zero: pattern is `⚙ `cmd` (exit N):` where N != 0
+            result_content.lines().any(|l| {
+                if let Some(rest) = l.strip_prefix("⚙ ") {
+                    if let Some(idx) = rest.find("(exit ") {
+                        let after = &rest[idx + 6..];
+                        let code: i32 = after.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
+                        return code != 0;
+                    }
+                }
+                false
+            })
+        });
+
     (Some(ContentPart::ToolResult {
         tool_use_id: tc.id.clone(),
         content: result_content,
-    }), dispatched)
+    }), dispatched, had_error)
 }
 
 /// Strip CoT reasoning text from the most recent assistant turn that has tool
@@ -1296,7 +1314,7 @@ mod tests {
         let config = minimal_config_async().await;
         let tc = make_tool_call("id1", "read_file", "not valid json{{");
         let (tx, mut rx) = make_channel();
-        let (result, dispatched) = execute_one_tool_call(
+        let (result, dispatched, had_error) = execute_one_tool_call(
             &tc,
             &mut Default::default(),
             &mut vec![],
@@ -1307,6 +1325,7 @@ mod tests {
             &tx,
         ).await;
         assert!(!dispatched, "parse error should not count as dispatched");
+        assert!(had_error, "parse error should signal had_error");
         let part = result.expect("should return Some on parse error");
         if let ContentPart::ToolResult { content, .. } = part {
             assert!(content.contains("Error parsing tool arguments"), "got: {content}");
@@ -1326,7 +1345,7 @@ mod tests {
         let mut mutated = std::collections::HashSet::new();
         mutated.insert("src/foo.rs".to_string());
 
-        let (result, dispatched) = execute_one_tool_call(
+        let (result, dispatched, had_error) = execute_one_tool_call(
             &tc,
             &mut mutated,
             &mut vec![],
@@ -1337,6 +1356,7 @@ mod tests {
             &tx,
         ).await;
         assert!(!dispatched, "dependency guard stub should not count as dispatched");
+        assert!(had_error, "skipped dependent edit should signal had_error");
         let part = result.expect("dependency guard returns Some stub");
         if let ContentPart::ToolResult { content, .. } = part {
             assert!(content.contains("Not executed"), "got: {content}");
@@ -1355,7 +1375,7 @@ mod tests {
         // Prime the detector with one call
         detector.record("bash", r#"{"command":"ls"}"#);
 
-        let (result, dispatched) = execute_one_tool_call(
+        let (result, dispatched, had_error) = execute_one_tool_call(
             &tc,
             &mut Default::default(),
             &mut vec![],
@@ -1366,6 +1386,7 @@ mod tests {
             &tx,
         ).await;
         assert!(!dispatched, "loop detection should not count as dispatched");
+        assert!(had_error, "loop detection should signal had_error");
         let part = result.expect("loop detection returns Some");
         if let ContentPart::ToolResult { content, .. } = part {
             assert!(content.contains("Loop detected"), "got: {content}");
@@ -1381,7 +1402,7 @@ mod tests {
         let tc = make_tool_call("id4", "bash", r#"{"command":"rm -rf /"}"#);
         let (tx, _rx) = make_channel();
 
-        let (result, dispatched) = execute_one_tool_call(
+        let (result, dispatched, had_error) = execute_one_tool_call(
             &tc,
             &mut Default::default(),
             &mut vec![],
@@ -1392,6 +1413,7 @@ mod tests {
             &tx,
         ).await;
         assert!(!dispatched, "dry-run should not count as dispatched");
+        assert!(had_error, "dry-run should signal had_error");
         let part = result.expect("dry_run returns Some");
         if let ContentPart::ToolResult { content, .. } = part {
             assert!(content.contains("dry-run"), "got: {content}");
