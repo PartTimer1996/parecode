@@ -331,15 +331,25 @@ mod tests {
 
     #[test]
     fn test_range_hit_message_prefix() {
+        // turns_ago > 0 → stub (already in context)
         let msg = RangeHit { content: "x".to_string(), turns_ago: 2, range_lines: 10 }.into_message();
-        assert!(msg.contains("cached range"));
+        assert!(msg.contains("Already in context"));
         assert!(msg.contains("2 turns ago"));
     }
 
     #[test]
     fn test_full_hit_message_prefix() {
+        // turns_ago > 0 → stub
         let msg = CacheHit { content: "x".to_string(), turns_ago: 1, total_lines: 50 }.into_message();
-        assert!(msg.contains("cached version"));
+        assert!(msg.contains("Already in context"));
         assert!(msg.contains("1 turn ago"));
+    }
+
+    #[test]
+    fn test_full_hit_same_turn_sends_content() {
+        // turns_ago == 0 → send content (first read in this turn batch)
+        let msg = CacheHit { content: "file content here".to_string(), turns_ago: 0, total_lines: 5 }.into_message();
+        assert!(msg.contains("file content here"));
+        assert!(!msg.contains("Already in context"));
     }
 }

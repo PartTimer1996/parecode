@@ -5,7 +5,6 @@ pub mod list;
 pub mod patch;
 pub mod pie_tool;
 pub mod read;
-pub mod recall;
 pub mod write;
 
 use anyhow::{anyhow, Result};
@@ -22,15 +21,13 @@ pub const TOOL_EDIT_FILE: &str = "edit_file";
 pub const TOOL_PATCH_FILE: &str = "patch_file";
 pub const TOOL_BASH: &str = "bash";
 pub const TOOL_LIST_FILES: &str = "list_files";
-pub const TOOL_RECALL: &str = "recall";
 pub const TOOL_ASK_USER: &str = "ask_user";
 pub const TOOL_PROJECT_INDEX: &str = "project_index";
 
 // Turn thresholds for phase-adaptive tool selection
 const TURN_EXPLORATION_END: usize = 1;
 const TURN_MUTATION_START: usize = 2;
-const TURN_RECALL_USEFUL: usize = 3;
-
+    
 /// All tool names as a slice, useful for bulk operations.
 pub fn all_tool_names() -> &'static [&'static str] {
     &[
@@ -41,7 +38,6 @@ pub fn all_tool_names() -> &'static [&'static str] {
         TOOL_PATCH_FILE,
         TOOL_BASH,
         TOOL_LIST_FILES,
-        TOOL_RECALL,
         TOOL_ASK_USER,
     ]
 }
@@ -51,7 +47,6 @@ pub fn all_tool_names() -> &'static [&'static str] {
 pub struct TurnThresholds {
     pub exploration_end: usize,
     pub mutation_start: usize,
-    pub recall_useful: usize,
 }
 
 impl Default for TurnThresholds {
@@ -59,7 +54,6 @@ impl Default for TurnThresholds {
         Self {
             exploration_end: TURN_EXPLORATION_END,
             mutation_start: TURN_MUTATION_START,
-            recall_useful: TURN_RECALL_USEFUL,
         }
     }
 }
@@ -74,7 +68,6 @@ pub fn get_tool(name: &str) -> Option<Value> {
         TOOL_PATCH_FILE => Some(patch::definition()),
         TOOL_BASH => Some(bash::definition()),
         TOOL_LIST_FILES => Some(list::definition()),
-        TOOL_RECALL => Some(recall::definition()),
         TOOL_ASK_USER => Some(ask::definition()),
         _ => None,
     }
@@ -99,7 +92,7 @@ pub fn all_definitions() -> Vec<Tool> {
 ///   - patch_file, recall: later turns (mutation / history retrieval)
 ///
 /// Saves ~400-800 tokens/turn compared to sending all tools every turn.
-pub fn tools_for_turn(turn: usize, history_has_summaries: bool, has_graph: bool) -> Vec<Tool> {
+pub fn tools_for_turn(turn: usize, has_graph: bool) -> Vec<Tool> {
     let thresholds = TurnThresholds::default();
     let mut t: Vec<Tool> = Vec::new();
 
@@ -125,11 +118,6 @@ pub fn tools_for_turn(turn: usize, history_has_summaries: bool, has_graph: bool)
     // Mutation phase: multi-hunk diffs become useful after reading files
     if turn >= thresholds.mutation_start {
         t.push(def(patch::definition()));
-    }
-
-    // Recall is pointless until tool outputs have been summarised in history
-    if history_has_summaries || turn >= thresholds.recall_useful {
-        t.push(def(recall::definition()));
     }
 
     t
@@ -187,9 +175,8 @@ mod tests {
         assert!(names.contains(&TOOL_PATCH_FILE));
         assert!(names.contains(&TOOL_BASH));
         assert!(names.contains(&TOOL_LIST_FILES));
-        assert!(names.contains(&TOOL_RECALL));
         assert!(names.contains(&TOOL_ASK_USER));
-        assert_eq!(names.len(), 9);
+        assert_eq!(names.len(), 8);
     }
 
     #[test]
@@ -197,7 +184,6 @@ mod tests {
         let t = TurnThresholds::default();
         assert_eq!(t.exploration_end, 1);
         assert_eq!(t.mutation_start, 2);
-        assert_eq!(t.recall_useful, 3);
     }
 
     #[test]
@@ -213,7 +199,7 @@ mod tests {
     #[test]
     fn test_all_definitions() {
         let defs = all_definitions();
-        assert_eq!(defs.len(), 9);
+        assert_eq!(defs.len(), 8);
         assert!(defs.iter().any(|d| d.name == TOOL_READ_FILE));
         assert!(defs.iter().any(|d| d.name == TOOL_ASK_USER));
     }
@@ -221,29 +207,17 @@ mod tests {
     #[test]
     fn test_tools_for_turn_logic() {
         // Turn 0: Exploration (includes list and write)
-        let t0 = tools_for_turn(0, false, false);
+        let t0 = tools_for_turn(0, false);
         let names0: Vec<_> = t0.iter().map(|d| d.name.as_str()).collect();
         assert!(names0.contains(&TOOL_LIST_FILES));
         assert!(names0.contains(&TOOL_WRITE_FILE));
         assert!(!names0.contains(&TOOL_PATCH_FILE));
-        assert!(!names0.contains(&TOOL_RECALL));
 
         // Turn 2: Mutation (includes patch)
-        let t2 = tools_for_turn(2, false, false);
+        let t2 = tools_for_turn(2, false);
         let names2: Vec<_> = t2.iter().map(|d| d.name.as_str()).collect();
         assert!(!names2.contains(&TOOL_LIST_FILES));
         assert!(names2.contains(&TOOL_PATCH_FILE));
-        assert!(!names2.contains(&TOOL_RECALL));
-
-        // Turn 2 with summaries: Should include recall even if turn < recall_useful
-        let t2s = tools_for_turn(2, true,false);
-        let names2s: Vec<_> = t2s.iter().map(|d| d.name.as_str()).collect();
-        assert!(names2s.contains(&TOOL_RECALL));
-
-        // Turn 4: Recall useful
-        let t4 = tools_for_turn(4, false, false);
-        let names4: Vec<_> = t4.iter().map(|d| d.name.as_str()).collect();
-        assert!(names4.contains(&TOOL_RECALL));
     }
 
     #[test]

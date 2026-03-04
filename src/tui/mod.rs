@@ -3298,7 +3298,6 @@ fn launch_plan(
                 &step_snapshot,
                 &client,
                 &agent_config,
-                &prior_summaries,
                 ui_tx.clone(),
             ).await;
 

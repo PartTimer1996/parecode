@@ -73,12 +73,11 @@ Do not read files unless strictly necessary. Keep responses short.";
         let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
         let kind = ToolKind::classify(&tc.name, &args);
         let mut cache = FileCache::default();
-        let history = History::default();
         let _ = ui_tx.send(UiEvent::ToolCall {
             name: tc.name.clone(),
             args_summary: format_args_summary(&args),
         });
-        let raw = dispatch_tool(&tc.name, &args, &kind, &mut cache, &history, &ui_tx, &config.mcp, config).await;
+        let raw = dispatch_tool(&tc.name, &args, &kind, &mut cache, &ui_tx, &config.mcp, config).await;
         let _ = ui_tx.send(UiEvent::ToolResult {
             summary: raw.lines().take(30).collect::<Vec<_>>().join("\n"),
         });
@@ -241,7 +240,7 @@ pub async fn run_tui(
         let tools = match &cached_tools {
             Some((key, t)) if *key == tool_key => t.clone(),
             _ => {
-                let mut t = tools::tools_for_turn(turn, has_summaries, has_graph);
+                let mut t = tools::tools_for_turn(turn, has_graph);
                 t.extend(mcp_tool_defs.iter().cloned());
                 cached_tools = Some((tool_key, t.clone()));
                 t
@@ -707,7 +706,7 @@ async fn execute_one_tool_call(
                 if let Some(hit) = cache.check(path) {
                     let _ = ui_tx.send(UiEvent::CacheHit { path: path.clone(), lines: hit.total_lines });
                     let output = hit.into_message();
-                    let (model_output, _) = history.record(&tc.id, &tc.name, &output);
+                    let (model_output, _) = history.record(&tc.name, &output);
                     return (Some(ContentPart::ToolResult {
                         tool_use_id: tc.id.clone(),
                         content: model_output,
@@ -724,7 +723,7 @@ async fn execute_one_tool_call(
                     if let Some(hit) = cache.check_range(path, start, end) {
                         let _ = ui_tx.send(UiEvent::CacheHit { path: path.clone(), lines: hit.range_lines });
                         let output = hit.into_message();
-                        let (model_output, _) = history.record(&tc.id, &tc.name, &output);
+                        let (model_output, _) = history.record( &tc.name, &output);
                         return (Some(ContentPart::ToolResult {
                             tool_use_id: tc.id.clone(),
                             content: model_output,
@@ -739,7 +738,7 @@ async fn execute_one_tool_call(
             name: tc.name.clone(),
             args_summary: format_args_summary(&args),
         });
-        let raw = dispatch_tool(&tc.name, &args, &kind, cache, history, ui_tx, &config.mcp, config).await;
+        let raw = dispatch_tool(&tc.name, &args, &kind, cache, ui_tx, &config.mcp, config).await;
 
         // ── Post-dispatch cache maintenance ───────────────────────────────────
         match &kind {
@@ -773,7 +772,7 @@ async fn execute_one_tool_call(
     };
 
     // ── History + display ─────────────────────────────────────────────────────
-    let (model_output, display_summary) = history.record(&tc.id, &tc.name, &result_content);
+    let (model_output, display_summary) = history.record(&tc.name, &result_content);
     let _ = ui_tx.send(UiEvent::ToolResult { summary: display_summary });
     if config.verbose {
         for line in model_output.lines().skip(1).take(4) {
@@ -839,19 +838,72 @@ async fn execute_one_tool_call(
     }), dispatched, had_error)
 }
 
-/// Strip CoT reasoning text from ALL intermediate assistant turns that have tool
-/// calls. Once tool results are in, that reasoning only wastes context on every
-/// subsequent API call. Final assistant turns (no tool calls) are never touched —
-/// those are the visible response the user sees.
+/// Per-turn context compression — runs after each tool round-trip, before the
+/// next API call.
+///
+/// 1. Strip CoT text from ALL intermediate assistant turns (those with tool_calls).
+///    Once results are in, the reasoning is consumed and wastes tokens forever.
+///    Final assistant turns (no tool calls) are the visible response — never touched.
+///
+/// 2. Compress ALL tool result messages except the most recent one.
+///    bash/read results are consumed the moment the model acts on them. Keeping
+///    full content in history re-pays the token cost on every subsequent API call.
+///    The last tool message is left intact — model may still need it this turn.
 fn strip_cot_from_last_assistant(messages: &mut Vec<Message>) {
-    // Find the last message index — the final assistant turn (if any) is protected.
-    // Everything before that with tool_calls is intermediate and can be stripped.
     let last_idx = messages.len().saturating_sub(1);
+
+    // Pass 1: clear CoT from intermediate assistant turns
     for (i, msg) in messages.iter_mut().enumerate() {
         if msg.role == "assistant" && !msg.tool_calls.is_empty() && i < last_idx {
             msg.content = MessageContent::from(String::new());
         }
     }
+
+    // Pass 2: compress older tool messages to one-liner stubs.
+    // The last tool message is protected — model just received it.
+    // Everything before that is consumed history.
+    let last_tool_idx = messages.iter().rposition(|m| m.role == "tool").unwrap_or(0);
+
+    for (i, msg) in messages.iter_mut().enumerate() {
+        if msg.role != "tool" || i >= last_tool_idx {
+            continue;
+        }
+        if let MessageContent::Parts(parts) = &mut msg.content {
+            for part in parts.iter_mut() {
+                if let ContentPart::ToolResult { content, .. } = part {
+                    if content.len() <= 120 {
+                        continue; // already a stub or tiny result
+                    }
+                    *content = compress_tool_result_to_stub(content);
+                }
+            }
+        }
+    }
+}
+
+/// Compress a consumed tool result to a minimal stub.
+/// Keeps enough for the model to know what ran; discards the bulk.
+fn compress_tool_result_to_stub(content: &str) -> String {
+    let first = content.lines().next().unwrap_or(content);
+
+    // read_file: "[src/foo.rs — 500 lines total...]" → keep header only
+    if first.starts_with('[') && (first.contains(" — ") || first.contains(" lines")) {
+        let inner = first.trim_matches(|c| c == '[' || c == ']');
+        let path = inner.split(" —").next().unwrap_or(inner).trim();
+        let line_count = content.lines().filter(|l| l.contains(" | ")).count();
+        if line_count > 0 {
+            return format!("[read {path} — {line_count} lines shown, consumed]");
+        }
+        return format!("[read {path} — consumed]");
+    }
+
+    // bash: keep first meaningful line as evidence of what ran
+    let summary = content.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(first);
+    format!("[bash result consumed: {}{}]",
+        &summary[..summary.len().min(80)],
+        if summary.len() > 80 { "…" } else { "" })
 }
 
 // ── Stale content eviction ────────────────────────────────────────────────────
@@ -942,7 +994,6 @@ async fn dispatch_tool(
     args: &Value,
     kind: &ToolKind,
     cache: &mut FileCache,
-    history: &History,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     mcp: &McpClient,
     config: &AgentConfig,
@@ -958,8 +1009,6 @@ async fn dispatch_tool(
                 _ => "[project_index: no project graph available for this session]".to_string(),
             }
         }
-
-        "recall"   => tools::recall::execute(args, history).unwrap_or_else(|e| e),
         "ask_user" => tools::ask::execute(args, ui_tx.clone()).await.unwrap_or_else(|e| e),
         "edit_file" | "write_file" | "patch_file" => {
             match tools::dispatch(name, args) {

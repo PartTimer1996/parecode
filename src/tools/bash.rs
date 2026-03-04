@@ -86,5 +86,21 @@ pub async fn execute(args: &Value) -> Result<String> {
         ));
     }
 
+    // When the model uses bash for navigation (pwd, ls, find, tree), nudge it
+    // toward project_index which is faster, pre-indexed, and costs fewer tokens.
+    let cmd_trim = command.trim();
+    let is_nav = cmd_trim == "pwd"
+        || cmd_trim.starts_with("ls")
+        || cmd_trim.starts_with("find ")
+        || cmd_trim.starts_with("tree")
+        || cmd_trim.contains("&& ls")
+        || cmd_trim.contains("; ls");
+    if is_nav {
+        result.push_str(
+            "\n[Use project_index(kind=\"summary\") for project structure — \
+             already indexed, zero disk reads, covers all files and clusters.]"
+        );
+    }
+
     Ok(result)
 }

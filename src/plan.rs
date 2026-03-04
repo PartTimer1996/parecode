@@ -697,7 +697,6 @@ pub async fn execute_step(
     step: &PlanStep,
     client: &Client,
     config: &crate::agent::AgentConfig,
-    prior_summaries: &[(String, String)], // (step description, what was done)
     ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
 ) -> Result<()> {
     // Load the step's files as (path, formatted_content) pairs.
@@ -712,21 +711,6 @@ pub async fn execute_step(
     
 
     let instruction = step.effective_instruction();
-
-    // Build prior-step context preamble if there are completed steps
-    let prior_context = if prior_summaries.is_empty() {
-        None
-    } else {
-        let lines: String = prior_summaries
-            .iter()
-            .enumerate()
-            .map(|(i, (desc, summary))| format!("Step {}: {}\n  → {}", i + 1, desc, summary))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Some(format!(
-            "# Completed steps so far\n{lines}\n\nThe above changes are already in place. Do not redo them.\n\n---\n\n"
-        ))
-    };
 
     // Run the agent with fresh context
     crate::agent::run_tui(

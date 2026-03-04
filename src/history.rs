@@ -8,7 +8,6 @@
 
 #[derive(Debug, Clone)]
 pub struct ToolRecord {
-    pub tool_call_id: String,
     pub tool_name: String,
     /// The full, untruncated output — stored off-context
     pub full_output: String,
@@ -30,32 +29,15 @@ impl History {
     /// Returns `(model_output, display_summary)`:
     /// - `model_output` is what goes into the conversation history sent to the model
     /// - `display_summary` is a short one-liner for the TUI sidebar
-    pub fn record(&mut self, tool_call_id: &str, tool_name: &str, full_output: &str) -> (String, String) {
+    pub fn record(&mut self, tool_name: &str, full_output: &str) -> (String, String) {
         let model_output = summarise(tool_name, full_output);
         let display_summary = display_summarise(tool_name, full_output);
         self.records.push(ToolRecord {
-            tool_call_id: tool_call_id.to_string(),
             tool_name: tool_name.to_string(),
             full_output: full_output.to_string(),
             summary: model_output.clone(),
         });
         (model_output, display_summary)
-    }
-
-    /// Recall the full output for a given tool_call_id (if it exists).
-    pub fn recall(&self, tool_call_id: &str) -> Option<&str> {
-        self.records
-            .iter()
-            .find(|r| r.tool_call_id == tool_call_id)
-            .map(|r| r.full_output.as_str())
-    }
-
-    /// Recall the most recent full output for a given tool name.
-    pub fn recall_by_name(&self, tool_name: &str) -> Option<&str> {
-        self.records
-            .iter()
-            .rfind(|r| r.tool_name == tool_name)
-            .map(|r| r.full_output.as_str())
     }
 
     /// Count records where the summary is actually shorter than the full output.
@@ -248,45 +230,57 @@ fn summarise_list(output: &str) -> String {
 }
 
 /// bash: context-aware summarisation.
-/// - Short output (≤20 lines): keep in full
-/// - Error/failure lines: keep all diagnostics (up to 30)
-/// - Success: keep first 10 + last 5 lines (captures both preamble and result summary)
+/// - Short output (≤8 lines): keep in full — pwd, echo, short commands
+/// - Compiler/test error output: keep diagnostic lines (up to 30)
+/// - Everything else: keep first 5 + last 3 lines
+///
+/// Error detection is intentionally strict — matches compiler output format only.
+/// `contains("error:")` anywhere would false-positive on Rust source code passed
+/// through grep/rg, inflating stored history dramatically.
 fn summarise_bash(output: &str) -> String {
-    const KEEP_FULL_THRESHOLD: usize = 20;
+    const KEEP_FULL_THRESHOLD: usize = 8;
     const MAX_ERROR_LINES: usize = 30;
-    const SUCCESS_HEAD: usize = 10;
-    const SUCCESS_TAIL: usize = 5;
+    const SUCCESS_HEAD: usize = 5;
+    const SUCCESS_TAIL: usize = 3;
 
     let lines: Vec<&str> = output.lines().collect();
     if lines.len() <= KEEP_FULL_THRESHOLD {
         return output.to_string();
     }
 
-    // Collect lines that indicate errors or failures
+    // Detect compiler/test diagnostic output — strict patterns that don't
+    // false-positive on Rust/JS source code piped through grep or rg.
+    // Compiler format:  "error[E0425]: ..."  "warning[..."  " --> src/foo.rs:42"
+    // Test format:      "test foo ... FAILED"  "FAILED"  "thread '...' panicked"
+    let is_compiler_line = |l: &str| -> bool {
+        let t = l.trim_start();
+        t.starts_with("error[") || t.starts_with("error: ") || t.starts_with("error:")
+            && t[6..].starts_with(' ')  // "error: " not "error_handling::"
+            || t.starts_with("warning[")
+            || t.starts_with(" --> ")   // source location pointer
+            || t.starts_with("thread '") && t.contains("panicked")
+            || t == "FAILED"
+            || t.starts_with("test ") && t.ends_with("FAILED")
+            || t.starts_with("failures:")
+    };
+
     let error_lines: Vec<&str> = lines.iter()
-        .filter(|l| {
-            let l = l.to_ascii_lowercase();
-            l.contains("error:") || l.contains("error[")
-                || l.contains("failed") || l.contains("fail:")
-                || l.contains("panic") || l.contains("warning:")
-                || l.contains("cannot") || l.contains("note:")
-        })
         .copied()
+        .filter(|l| is_compiler_line(l))
         .collect();
 
     if !error_lines.is_empty() {
-        // Error path — keep all diagnostic lines (capped)
         let kept: Vec<&str> = error_lines.into_iter().take(MAX_ERROR_LINES).collect();
         let result = kept.join("\n");
         let remaining = lines.len().saturating_sub(kept.len());
         if remaining > 0 {
-            return format!("{result}\n[+{remaining} lines — ask to recall for full output]");
+            return format!("{result}\n[+{remaining} lines omitted]");
         }
         return result;
     }
 
-    // Success path — head + tail captures command setup and result summary
-    // (e.g. cargo test: compilation at top, "test result: ok" at bottom)
+    // Success path — head + tail captures preamble and result summary.
+    // e.g. cargo test: compilation header at top, "test result: ok." at bottom.
     let head = &lines[..SUCCESS_HEAD];
     let tail_start = lines.len().saturating_sub(SUCCESS_TAIL);
     let tail = &lines[tail_start..];
@@ -326,10 +320,9 @@ mod tests {
     #[test]
     fn test_history_record_stores_and_returns_summaries() {
         let mut history = History::default();
-        let (model_out, display_out) = history.record("call-1", "read_file", "file content here");
+        let (model_out, display_out) = history.record("read_file", "file content here");
         
         assert_eq!(history.records.len(), 1);
-        assert_eq!(history.records[0].tool_call_id, "call-1");
         assert_eq!(history.records[0].tool_name, "read_file");
         assert_eq!(history.records[0].full_output, "file content here");
         // Model output for read_file is full content
@@ -338,40 +331,19 @@ mod tests {
         assert!(display_out.starts_with("✓ Read"));
     }
 
-    #[test]
-    fn test_history_recall_by_id() {
-        let mut history = History::default();
-        history.record("call-1", "bash", "full output");
-        
-        assert_eq!(history.recall("call-1"), Some("full output"));
-        assert_eq!(history.recall("nonexistent"), None);
-    }
-
-    #[test]
-    fn test_history_recall_by_name() {
-        let mut history = History::default();
-        history.record("call-1", "bash", "first output");
-        history.record("call-2", "read_file", "second output");
-        history.record("call-3", "bash", "third output");
-        
-        // Should recall most recent bash
-        assert_eq!(history.recall_by_name("bash"), Some("third output"));
-        assert_eq!(history.recall_by_name("read_file"), Some("second output"));
-        assert_eq!(history.recall_by_name("unknown"), None);
-    }
 
     #[test]
     fn test_compressed_count() {
         let mut history = History::default();
 
         // Small read_file — not compressed (under cap)
-        history.record("c1", "read_file", &"x".repeat(100));
+        history.record("read_file", &"x".repeat(100));
         // Large read_file — compressed (over READ_FILE_CONTEXT_LINES)
         let large_read = (1..=300).map(|i| format!("line {i}\n")).collect::<String>();
-        history.record("c2", "read_file", &large_read);
+        history.record("read_file", &large_read);
         // bash with long output gets summarized
         let long_bash = (0..50).map(|i| format!("output line {}\n", i)).collect::<String>();
-        history.record("c3", "bash", &long_bash);
+        history.record("bash", &long_bash);
 
         assert_eq!(history.compressed_count(), 2); // large read + bash
     }
@@ -382,7 +354,7 @@ mod tests {
 
         // Create a read_file record with long content (>200 chars summary)
         let long_output = "[src/main.rs — 100 lines]\n".to_string() + &"line x\n".repeat(50);
-        history.record("c1", "read_file", &long_output);
+        history.record("read_file", &long_output);
 
         let summary_len = history.records[0].summary.len();
         assert!(summary_len > 200, "summary should be >200 chars for this test");
@@ -480,12 +452,29 @@ mod tests {
 
     #[test]
     fn test_summarise_bash_error_keeps_diagnostics() {
-        let output = "compiling...\nwarning: unused variable\nerror[E0425]: cannot find value\nnote: help: try using\nmore output";
+        // Must be >8 lines to trigger summarisation. Uses strict compiler format.
+        let output = "   Compiling foo v0.1.0\n   Compiling bar v0.2.0\n\
+                      error[E0425]: cannot find value `x`\n \
+                       --> src/main.rs:10:5\n  |\n10 |     x\n  |     ^ not found\n\
+                      warning[unused]: variable `y`\n\
+                      error: aborting due to 1 error";
         let result = summarise_bash(output);
-        // Error keywords are kept
-        assert!(result.contains("error[E0425]"));
-        assert!(result.contains("warning:"));
-        assert!(result.contains("note:")); // note: is kept as diagnostic
+        assert!(result.contains("error[E0425]"), "should keep compiler error");
+        assert!(result.contains("warning["), "should keep compiler warning");
+        // 'note: help:' style (without bracket) is NOT kept — avoids false positives
+        // on source code containing "note:" as a string
+    }
+
+    #[test]
+    fn test_summarise_bash_grep_no_false_positive() {
+        // grep/rg across Rust source — must NOT trigger error path even though
+        // source lines contain "error:", "warning:", "cannot", "note:" as code text
+        let output = (0..20).map(|i| format!("src/foo.rs:{i}: fn handle_error() {{\n")).collect::<String>()
+            + &(0..5).map(|i| format!("src/bar.rs:{i}: // warning: this is a comment\n")).collect::<String>();
+        let result = summarise_bash(&output);
+        // Success path: 5 head + 3 tail, not 30 error lines
+        let line_count = result.lines().count();
+        assert!(line_count <= 10, "grep output should not inflate to 30 lines, got {line_count}");
     }
 
     #[test]
@@ -494,7 +483,7 @@ mod tests {
         for i in 1..=30 {
             output.push_str(&format!("output line {}\n", i));
         }
-        
+
         let result = summarise_bash(&output);
         assert!(result.contains("output line 1"));
         assert!(result.contains("output line 30"));
@@ -513,7 +502,7 @@ mod tests {
     fn test_display_summarise_other_uses_summarise() {
         let output = "some bash output";
         let result = display_summarise("bash", output);
-        // Short bash output stays full (≤20 lines), so it contains the original
+        // Short bash output stays full (≤8 lines), so it contains the original
         assert_eq!(result, output);
     }
 }
