@@ -87,7 +87,6 @@ impl FileCache {
         }
         Some(RangeHit {
             content: out,
-            turns_ago: self.current_turn.saturating_sub(e.turn),
             range_lines: end - start,
         })
     }
@@ -169,7 +168,6 @@ pub struct CacheHit {
 
 pub struct RangeHit {
     pub content: String,
-    pub turns_ago: usize,
     /// Number of lines in the served range
     pub range_lines: usize,
 }
@@ -195,19 +193,10 @@ impl CacheHit {
 
 impl RangeHit {
     pub fn into_message(self) -> String {
-        // Same logic: stub if content is already in message history.
-        if self.turns_ago > 0 {
-            let ago = age_str(self.turns_ago);
-            return format!(
-                "[Already in context — this range was read {ago} and is in your message history above. \
-                 Use read_file with a different line_range if you need another section.]"
-            );
-        }
-        format!(
-            "[Returning cached range — file was read this turn. \
-             Content is shown below.]\n\n{}",
-            self.content
-        )
+        // Always return the content — a ranged read is a specific window the model
+        // explicitly requested. Stubbing based on when the file was first cached
+        // is incorrect: a different line_range was never actually shown.
+        self.content
     }
 }
 
@@ -330,11 +319,10 @@ mod tests {
     }
 
     #[test]
-    fn test_range_hit_message_prefix() {
-        // turns_ago > 0 → stub (already in context)
-        let msg = RangeHit { content: "x".to_string(), turns_ago: 2, range_lines: 10 }.into_message();
-        assert!(msg.contains("Already in context"));
-        assert!(msg.contains("2 turns ago"));
+    fn test_range_hit_always_returns_content() {
+        // turns_ago > 0 → still returns content (different range = different window)
+        let msg = RangeHit { content: "the lines".to_string(), range_lines: 10 }.into_message();
+        assert_eq!(msg, "the lines");
     }
 
     #[test]
