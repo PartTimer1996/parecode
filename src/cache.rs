@@ -176,11 +176,18 @@ pub struct RangeHit {
 
 impl CacheHit {
     pub fn into_message(self) -> String {
-        let ago = age_str(self.turns_ago);
+        // turns_ago == 0: read in this same turn batch — content not yet in history, send it.
+        // turns_ago  > 0: content already in message history from a previous turn — stub only.
+        if self.turns_ago > 0 {
+            let ago = age_str(self.turns_ago);
+            return format!(
+                "[Already in context — file was read {ago} and is in your message history above. \
+                 Use read_file with line_range if you need a specific section, or edit_file to modify it.]"
+            );
+        }
         format!(
-            "[Returning cached version — file was read {ago}. \
-             Content is shown below. If you believe the file has changed, use edit_file \
-             or write_file to update it first.]\n\n{}",
+            "[Returning cached version — file was read this turn. \
+             Content is shown below.]\n\n{}",
             self.content
         )
     }
@@ -188,11 +195,17 @@ impl CacheHit {
 
 impl RangeHit {
     pub fn into_message(self) -> String {
-        let ago = age_str(self.turns_ago);
+        // Same logic: stub if content is already in message history.
+        if self.turns_ago > 0 {
+            let ago = age_str(self.turns_ago);
+            return format!(
+                "[Already in context — this range was read {ago} and is in your message history above. \
+                 Use read_file with a different line_range if you need another section.]"
+            );
+        }
         format!(
-            "[Returning cached range — file was read {ago}. \
-             Content is shown below. If you believe the file has changed, use edit_file \
-             or write_file to update it first.]\n\n{}",
+            "[Returning cached range — file was read this turn. \
+             Content is shown below.]\n\n{}",
             self.content
         )
     }

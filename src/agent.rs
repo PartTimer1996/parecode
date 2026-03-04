@@ -269,9 +269,20 @@ pub async fn run_tui(
             });
         }
 
+        // Strip <think>…</think> CoT blocks from the stored assistant message.
+        // response.text may contain raw <think> tags when the model emits reasoning
+        // in the content field (not reasoning_content). ThinkParser already strips
+        // these for TUI display — do the same before persisting to message history.
+        let stored_text = {
+            let mut p = ThinkParser::new();
+            let (mut normal, _) = p.push(&response.text);
+            let (n2, _) = p.finish();
+            normal.push_str(&n2);
+            normal
+        };
         messages.push(Message {
             role: "assistant".to_string(),
-            content: MessageContent::from(response.text.clone()),
+            content: MessageContent::from(stored_text),
             tool_calls: response.tool_calls.clone(),
         });
 
