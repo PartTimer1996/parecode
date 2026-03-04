@@ -1,7 +1,6 @@
 pub mod ask;
 pub mod bash;
 pub mod edit;
-pub mod list;
 pub mod patch;
 pub mod pie_tool;
 pub mod read;
@@ -20,7 +19,6 @@ pub const TOOL_WRITE_FILE: &str = "write_file";
 pub const TOOL_EDIT_FILE: &str = "edit_file";
 pub const TOOL_PATCH_FILE: &str = "patch_file";
 pub const TOOL_BASH: &str = "bash";
-pub const TOOL_LIST_FILES: &str = "list_files";
 pub const TOOL_ASK_USER: &str = "ask_user";
 pub const TOOL_PROJECT_INDEX: &str = "project_index";
 
@@ -37,7 +35,6 @@ pub fn all_tool_names() -> &'static [&'static str] {
         TOOL_EDIT_FILE,
         TOOL_PATCH_FILE,
         TOOL_BASH,
-        TOOL_LIST_FILES,
         TOOL_ASK_USER,
     ]
 }
@@ -67,7 +64,6 @@ pub fn get_tool(name: &str) -> Option<Value> {
         TOOL_EDIT_FILE => Some(edit::definition()),
         TOOL_PATCH_FILE => Some(patch::definition()),
         TOOL_BASH => Some(bash::definition()),
-        TOOL_LIST_FILES => Some(list::definition()),
         TOOL_ASK_USER => Some(ask::definition()),
         _ => None,
     }
@@ -88,7 +84,7 @@ pub fn all_definitions() -> Vec<Tool> {
 ///
 /// Core tools (always): project_index (when graph available), read_file, edit_file, bash, ask_user
 /// Extended (conditional):
-///   - list_files, write_file: early turns, only when no graph
+///   - write_file: early turns, only when no graph
 ///   - patch_file, recall: later turns (mutation / history retrieval)
 ///
 /// Saves ~400-800 tokens/turn compared to sending all tools every turn.
@@ -109,9 +105,6 @@ pub fn tools_for_turn(turn: usize, has_graph: bool) -> Vec<Tool> {
     // Exploration phase: navigation + file creation
     // When graph is available, list_files is redundant on early turns
     if turn <= thresholds.exploration_end {
-        if !has_graph {
-            t.push(def(list::definition()));
-        }
         t.push(def(write::definition()));
     }
 
@@ -145,10 +138,8 @@ pub fn dispatch(name: &str, args: &Value) -> Result<String> {
         (TOOL_WRITE_FILE, write::execute),
         (TOOL_EDIT_FILE, edit::execute),
         (TOOL_PATCH_FILE, patch::execute),
-        (TOOL_LIST_FILES, list::execute),
         // (TOOL_BASH, bash::execute),    // async
         // (TOOL_ASK_USER, ask::execute), // async
-        // (TOOL_RECALL, recall::execute), // async
     ];
 
     TOOL_DISPATCH
@@ -174,9 +165,8 @@ mod tests {
         assert!(names.contains(&TOOL_EDIT_FILE));
         assert!(names.contains(&TOOL_PATCH_FILE));
         assert!(names.contains(&TOOL_BASH));
-        assert!(names.contains(&TOOL_LIST_FILES));
         assert!(names.contains(&TOOL_ASK_USER));
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 7);
     }
 
     #[test]
@@ -199,7 +189,7 @@ mod tests {
     #[test]
     fn test_all_definitions() {
         let defs = all_definitions();
-        assert_eq!(defs.len(), 8);
+        assert_eq!(defs.len(), 7);
         assert!(defs.iter().any(|d| d.name == TOOL_READ_FILE));
         assert!(defs.iter().any(|d| d.name == TOOL_ASK_USER));
     }
@@ -209,14 +199,12 @@ mod tests {
         // Turn 0: Exploration (includes list and write)
         let t0 = tools_for_turn(0, false);
         let names0: Vec<_> = t0.iter().map(|d| d.name.as_str()).collect();
-        assert!(names0.contains(&TOOL_LIST_FILES));
         assert!(names0.contains(&TOOL_WRITE_FILE));
         assert!(!names0.contains(&TOOL_PATCH_FILE));
 
         // Turn 2: Mutation (includes patch)
         let t2 = tools_for_turn(2, false);
         let names2: Vec<_> = t2.iter().map(|d| d.name.as_str()).collect();
-        assert!(!names2.contains(&TOOL_LIST_FILES));
         assert!(names2.contains(&TOOL_PATCH_FILE));
     }
 

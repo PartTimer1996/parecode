@@ -5,7 +5,8 @@ use std::fs;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "edit_file",
-        "description": "Edit an existing file. Replace mode: provide old_str (must match exactly once) and new_str. Append mode: append=true adds new_str at end of file.\n\nRETURN VALUE: On success, returns a fresh ±15 line window centred on the edit with updated line numbers and hashes. USE THESE HASHES for any follow-up edits to the same file — do NOT use hashes from an earlier read_file call, they are now stale. Do NOT re-read the file after a successful edit.",
+        "description": "Edit a file. Replace: old_str (unique) → new_str. Append: append=true.\n\
+                        Returns ±15 lines around the edit with fresh hashes. Use those hashes for follow-up edits — do NOT re-read the file.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -14,19 +15,18 @@ pub fn definition() -> Value {
                 },
                 "old_str": {
                     "type": "string",
-                    "description": "Exact string to replace — must match exactly once in the file. Include enough surrounding context (full lines, function signatures, nearby comments) to be unique. Omit only for append mode."
+                    "description": "Must match exactly once. Include full lines + enough context to be unique."
                 },
                 "new_str": {
-                    "type": "string",
-                    "description": "Replacement text. For append mode, the text to add at end of file."
+                    "type": "string"
                 },
                 "anchor": {
                     "type": "string",
-                    "description": "Optional 4-char hash of the first line of old_str (from a read_file result). Used for stale-content detection."
+                    "description": "4-char hash of old_str's first line (from read_file). Stale-content guard."
                 },
                 "append": {
                     "type": "boolean",
-                    "description": "When true, appends new_str to end of file. old_str is ignored."
+                    "description": "Append new_str to end of file."
                 }
             },
             "required": ["path", "new_str"]

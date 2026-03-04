@@ -12,39 +12,37 @@ use crate::pie::ProjectGraph;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "project_index",
-        "description": "Query the pre-built project index. Call this BEFORE search or read_file \
-                        when you need to locate a symbol, understand a cluster, or find relevant \
-                        past tasks. Zero disk reads for symbol/cluster queries.\n\
+        "description": "Query the pre-built project index. Zero disk reads.\n\
                         \n\
-                        kind options:\n\
-                        - \"symbols\" + file: all symbols in a file with line numbers\n\
-                        - \"cluster\" + cluster: full detail on one cluster (files, symbols, summary)\n\
-                        - \"hotspots\": largest/most complex files by line count\n\
-                        - \"recent_tasks\": last N completed task summaries with files modified\n\
-                        - \"summary\": compact architecture overview (same as session-start context)\n\
+                        WORKFLOW — use in order:\n\
+                        1. cluster → files + symbols overview for a feature area\n\
+                        2. symbols(file=) → exact line numbers for every fn/struct in a file\n\
+                        3. Then read_file(line_range=) → get content+hashes → edit_file\n\
                         \n\
-                        Use kind=\"cluster\" to get the full symbol list for a cluster you saw \
-                        in the session-start summary. Use kind=\"symbols\" to get exact line \
-                        numbers for every function in a specific file.",
+                        kind values:\n\
+                        - \"cluster\" + cluster: all files and symbols in that cluster. START HERE when the session summary mentions a relevant cluster.\n\
+                        - \"symbols\" + file: every fn/struct/impl in one file with line numbers\n\
+                        - \"hotspots\": largest files by line count (complexity proxy)\n\
+                        - \"recent_tasks\": last N task summaries + files modified\n\
+                        - \"summary\": architecture overview (already shown at session start)",
         "parameters": {
             "type": "object",
             "properties": {
                 "kind": {
                     "type": "string",
-                    "enum": ["symbols", "cluster", "hotspots", "recent_tasks", "summary"],
-                    "description": "What to query"
+                    "enum": ["symbols", "cluster", "hotspots", "recent_tasks", "summary"]
                 },
                 "file": {
                     "type": "string",
-                    "description": "For kind=symbols: the relative file path"
+                    "description": "kind=symbols: relative file path"
                 },
                 "cluster": {
                     "type": "string",
-                    "description": "For kind=cluster: cluster name from the session-start summary"
+                    "description": "kind=cluster: cluster name (from session summary)"
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "For kind=recent_tasks: max results (default 5)"
+                    "description": "kind=recent_tasks: max results (default 5)"
                 }
             },
             "required": ["kind"]

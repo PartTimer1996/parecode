@@ -42,7 +42,13 @@ pub fn format_line(line_num: usize, content: &str) -> String {
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "read_file",
-        "description": "Read a file with line numbers and content hashes for editing.\n\nSMALL FILES (≤300 lines): returned in full — one call is enough to edit anywhere in the file.\n\nLARGE FILES (>300 lines): returns preamble (imports) + symbol index (function/struct names with line numbers) + tail. The symbol index gives you the exact line number of every function. Use that line number immediately with line_range — do NOT read the whole file first.\n\nWORKFLOW FOR LARGE FILES:\n1. read_file(path) → get symbol index showing `fn foo` at line 142\n2. read_file(path, line_range=[138, 165]) → get the section with hashes\n3. edit_file using old_str from step 2\n\nEach line is prefixed `N [hash] | content`. The 4-char hash is the anchor for edit_file.\n\nCACHE: Result is valid until you edit that file — call once, edit immediately from that result.\nHASHES: After editing, use hashes from the edit result for follow-up edits. Hashes from before an edit are stale.",
+        "description": "Read a file. Each line: `N [hash] | content`. Hashes are required by edit_file.\n\
+                        \n\
+                        ≤300 lines: full file returned.\n\
+                        >300 lines: preamble + symbol index (fn/struct with line numbers) + tail.\n\
+                        → Use the symbol index line number with line_range immediately — no second full read needed.\n\
+                        \n\
+                        HASHES: valid until next edit. After edit_file, use hashes from its return value — prior hashes are stale.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -52,11 +58,11 @@ pub fn definition() -> Value {
                 "line_range": {
                     "type": "array",
                     "items": { "type": "integer" },
-                    "description": "[start, end] 1-indexed inclusive. Use line numbers from the symbol index."
+                    "description": "[start, end] 1-indexed inclusive"
                 },
                 "symbols": {
                     "type": "boolean",
-                    "description": "Return symbol index only (no content). Useful for very large files when you only need to know where things are."
+                    "description": "Symbol index only (no content) — for very large files"
                 }
             },
             "required": ["path"]
