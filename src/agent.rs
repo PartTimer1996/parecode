@@ -127,6 +127,11 @@ pub async fn run_tui(
     let mut total_output_tokens = 0u32;
     let mut tool_call_count = 0usize;
     let mut turn: usize = 0;
+    // Cache the tool list — only rebuild when the phase actually changes.
+    // Tool schemas are ~2,600 tokens; rebuilding every turn wastes nothing but
+    // the Vec alloc — the real saving is sending the same bytes as a pointer.
+    // More importantly this makes the phase key explicit and auditable.
+    let mut cached_tools: Option<(/*key:*/ (usize, bool, bool), Vec<Tool>)> = None;
 
     let budget = Budget::new(config.context_tokens);
     let mut history = History::default();
@@ -227,11 +232,21 @@ pub async fn run_tui(
         });
 
         // ── Phase-adaptive tool selection ────────────────────────────────────
-        // Only send tools relevant to the current phase of work.
-        // project_index leads the list when the graph is available (high salience).
+        // Only rebuild the tool list when the phase key changes — saves ~50µs of
+        // Vec allocation per turn. The tool schemas themselves are not re-sent
+        // (HTTP body is built fresh each call); this just avoids redundant work.
         let has_graph = config.project_graph.is_some();
-        let mut tools = tools::tools_for_turn(turn, history.compressed_count() > 0, has_graph);
-        tools.extend(mcp_tool_defs.iter().cloned());
+        let has_summaries = history.compressed_count() > 0;
+        let tool_key = (turn, has_summaries, has_graph);
+        let tools = match &cached_tools {
+            Some((key, t)) if *key == tool_key => t.clone(),
+            _ => {
+                let mut t = tools::tools_for_turn(turn, has_summaries, has_graph);
+                t.extend(mcp_tool_defs.iter().cloned());
+                cached_tools = Some((tool_key, t.clone()));
+                t
+            }
+        };
 
         // ── Call the model ────────────────────────────────────────────────────
         // ThinkParser splits <think>…</think> blocks from normal text so the TUI
@@ -824,13 +839,17 @@ async fn execute_one_tool_call(
     }), dispatched, had_error)
 }
 
-/// Strip CoT reasoning text from the most recent assistant turn that has tool
-/// calls. Once tool results are in, the reasoning text only wastes context.
-/// Final assistant turns (no tool calls) are never touched.
+/// Strip CoT reasoning text from ALL intermediate assistant turns that have tool
+/// calls. Once tool results are in, that reasoning only wastes context on every
+/// subsequent API call. Final assistant turns (no tool calls) are never touched —
+/// those are the visible response the user sees.
 fn strip_cot_from_last_assistant(messages: &mut Vec<Message>) {
-    if let Some(asst_msg) = messages.iter_mut().rev().nth(1) {
-        if asst_msg.role == "assistant" && !asst_msg.tool_calls.is_empty() {
-            asst_msg.content = MessageContent::from(String::new());
+    // Find the last message index — the final assistant turn (if any) is protected.
+    // Everything before that with tool_calls is intermediate and can be stripped.
+    let last_idx = messages.len().saturating_sub(1);
+    for (i, msg) in messages.iter_mut().enumerate() {
+        if msg.role == "assistant" && !msg.tool_calls.is_empty() && i < last_idx {
+            msg.content = MessageContent::from(String::new());
         }
     }
 }

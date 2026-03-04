@@ -110,12 +110,10 @@ fn display_summarise(tool_name: &str, output: &str) -> String {
 }
 
 /// Max lines of a read_file result kept in conversation history.
-/// The model needs enough context to write edit_file old_str anchors from the
-/// relevant region. Full content lives in the recall side-store.
-/// This cap is the primary lever preventing large reads from bloating every
-/// subsequent API call — a 1000-line file no longer costs 1000 lines of tokens
-/// on turn 2, 3, 4...
-const READ_FILE_CONTEXT_LINES: usize = 150;
+/// Kept deliberately small — the model only needs enough to find its edit anchor.
+/// Full content lives in the recall side-store; use line_range for deeper reads.
+/// 50 lines ≈ 200 tokens vs 600 tokens at 150 — saves ~400 tokens per read per turn.
+const READ_FILE_CONTEXT_LINES: usize = 50;
 
 fn summarise(tool_name: &str, output: &str) -> String {
     match tool_name {
@@ -146,10 +144,18 @@ fn summarise(tool_name: &str, output: &str) -> String {
         // Budget enforcement will compress it later if context gets tight.
         "list_files" => summarise_list(output),
         "bash" => summarise_bash(output),
-        // Keep project_index results in full — orientation data used for the whole session.
-        // The injected summary is protected from trimming; drill-down results (cluster,
-        // symbols) are equally valuable to retain since the model queried them deliberately.
-        "project_index" => output.to_string(),
+        // project_index: keep summary injection in full (it's short, ~350 tokens).
+        // Drill-down results (cluster, symbols, hotspots) are capped — they can be
+        // large and the model already consumed them; recall is available if needed.
+        "project_index" => {
+            let lines: Vec<&str> = output.lines().collect();
+            if lines.len() <= READ_FILE_CONTEXT_LINES + 1 {
+                return output.to_string();
+            }
+            let kept = lines[..READ_FILE_CONTEXT_LINES].join("\n");
+            let omitted = lines.len() - READ_FILE_CONTEXT_LINES;
+            format!("{kept}\n[+{omitted} lines omitted — use project_index again or recall]")
+        }
         _ => truncate_to_lines(output, 3),
     }
 }
@@ -421,13 +427,12 @@ mod tests {
         let output = format!("{header}\n{body}");
         let result = summarise("read_file", &output);
         let line_count = result.lines().count();
-        // header + 150 content lines + 1 omission note = 152 lines
-        // header + 150 lines (indices 0..150) + omission note
+        // header + 50 content lines + 1 omission note = 52 lines
         assert!(line_count <= READ_FILE_CONTEXT_LINES + 2, "got {line_count} lines");
         assert!(result.contains("lines omitted"), "should have omission note");
-        // lines[..150]: index 0 = header, 1..150 = "line 1".."line 149"
-        assert!(result.contains("line 149"), "should include line 149");
-        assert!(!result.contains("line 151"), "should not include line 151");
+        // lines[..50]: index 0 = header, 1..50 = "line 1".."line 49"
+        assert!(result.contains("line 49"), "should include line 49");
+        assert!(!result.contains("line 51"), "should not include line 51");
     }
 
     #[test]
