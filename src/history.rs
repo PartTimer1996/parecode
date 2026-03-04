@@ -462,9 +462,11 @@ mod tests {
         let result = summarise("read_file", &output);
         let line_count = result.lines().count();
         // header + 150 content lines + 1 omission note = 152 lines
+        // header + 150 lines (indices 0..150) + omission note
         assert!(line_count <= READ_FILE_CONTEXT_LINES + 2, "got {line_count} lines");
         assert!(result.contains("lines omitted"), "should have omission note");
-        assert!(result.contains("line 150"), "should include line 150");
+        // lines[..150]: index 0 = header, 1..150 = "line 1".."line 149"
+        assert!(result.contains("line 149"), "should include line 149");
         assert!(!result.contains("line 151"), "should not include line 151");
     }
 

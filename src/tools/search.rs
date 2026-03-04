@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::process::Command;
 
-/// Max matches to return inline.
-const MAX_MATCHES: usize = 50;
+/// Max lines of rg output to return inline.
+const MAX_OUTPUT_LINES: usize = 30;
 
 pub fn definition() -> Value {
     serde_json::json!({
@@ -26,7 +26,7 @@ pub fn definition() -> Value {
                 },
                 "context_lines": {
                     "type": "integer",
-                    "description": "Lines of context around each match (default: 2)"
+                    "description": "Lines of context around each match (default: 0). Keep at 0 unless you need surrounding code — context multiplies output size."
                 }
             },
             "required": ["pattern"]
@@ -39,7 +39,7 @@ pub async fn execute(args: &Value) -> Result<String> {
         .as_str()
         .context("search: missing 'pattern'")?;
     let path = args["path"].as_str().unwrap_or(".");
-    let context_lines = args["context_lines"].as_u64().unwrap_or(2);
+    let context_lines = args["context_lines"].as_u64().unwrap_or(0);
 
     let mut cmd = Command::new("rg");
     cmd.arg("--line-number")
@@ -82,12 +82,12 @@ pub async fn execute(args: &Value) -> Result<String> {
     let lines: Vec<&str> = stdout.lines().collect();
     let total = lines.len();
 
-    if total <= MAX_MATCHES {
+    if total <= MAX_OUTPUT_LINES {
         return Ok(format!("[{total} lines matched]\n{stdout}"));
     }
 
-    let truncated: String = lines[..MAX_MATCHES].join("\n");
+    let truncated: String = lines[..MAX_OUTPUT_LINES].join("\n");
     Ok(format!(
-        "[Showing {MAX_MATCHES} of {total} result lines — refine pattern or path to narrow results]\n{truncated}"
+        "[Showing {MAX_OUTPUT_LINES} of {total} result lines — use file_pattern or path to narrow]\n{truncated}"
     ))
 }
