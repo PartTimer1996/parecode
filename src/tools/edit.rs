@@ -5,7 +5,7 @@ use std::fs;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "edit_file",
-        "description": "Edit an existing file. Replace mode: provide old_str (must match exactly once) and new_str. Append mode: append=true adds new_str at end of file.\n\nRETURN VALUE: On success, returns a fresh ±15 line window centred on the edit with updated line numbers and hashes. USE THESE HASHES for any follow-up edits to the same file — do NOT use hashes from an earlier read_file call, they are now stale. Do NOT re-read the file after a successful edit.\n\nHASH REQUIRED: old_str must be copied verbatim from a read_file result including the `N [hash] |` prefix. Hashes from before the most recent edit to this file are stale — use hashes from the edit result for follow-up edits.",
+        "description": "Edit an existing file. Replace mode: provide old_str (must match exactly once) and new_str. Append mode: append=true adds new_str at end of file.\n\nRETURN VALUE: On success, returns a fresh ±15 line window centred on the edit with updated line numbers and hashes. USE THESE HASHES for any follow-up edits to the same file — do NOT use hashes from an earlier read_file call, they are now stale. Do NOT re-read the file after a successful edit.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -57,18 +57,7 @@ pub fn execute(args: &Value) -> Result<String> {
         if !content.ends_with('\n') {
             content.push('\n');
         }
-
-        // Find the actual last line with content in the original file
-        // (not just trailing newlines), so we can report accurate context.
-        // The .lines() iterator skips trailing empty lines, so we need this
-        // to handle files that end with \n\n or more.
-        let last_content_line = content
-            .lines()
-            .rposition(|l| !l.is_empty())
-            .map(|i| i + 1)
-            .unwrap_or(1);
-        let append_start_line = last_content_line + 1;
-
+        let append_start_line = content.lines().count() - new_str.lines().count() + 1;
         fs::write(path, &content)
             .with_context(|| format!("edit_file: cannot write '{path}'"))?;
         let added = new_str.lines().count();
