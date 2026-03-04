@@ -268,4 +268,3 @@ impl Aggregate {
         self.total_tokens() / self.tasks as u32
     }
 }
-
