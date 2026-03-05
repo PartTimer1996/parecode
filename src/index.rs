@@ -23,6 +23,13 @@ pub struct Symbol {
     #[serde(default)]
     pub end_line: usize,
     pub kind: SymbolKind,
+    /// Compact interface summary extracted at index time:
+    /// - fn: "(param: Type, ...) -> RetType" (signature, truncated at 120 chars)
+    /// - struct: "field: Type, field: Type, ..." (pub fields, truncated at 120 chars)
+    /// - enum: "Variant, Variant, ..." (variant names, truncated)
+    /// None for impl blocks, traits, constants, and other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -166,21 +173,119 @@ pub(crate) fn extract_symbols(content: &str, file: &str, out: &mut Vec<Symbol>) 
         .map(|e| e.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    for (line_no, line) in content.lines().enumerate() {
+    let lines: Vec<&str> = content.lines().collect();
+
+    for (i, line) in lines.iter().enumerate() {
         // Only index top-level symbols — lines that start at column 0 (no indentation).
         // Indented lines are inside function/impl bodies and must not create false
         // symbol boundaries (which would truncate end_line for the enclosing symbol).
-        // Allow `#[` for attribute lines that precede top-level definitions.
         let first = line.chars().next();
         let is_top_level = matches!(first, Some(c) if !c.is_whitespace());
         if !is_top_level {
             continue;
         }
         let trimmed = line.trim();
-        if let Some(sym) = extract_symbol_from_line(trimmed, &ext, line_no + 1, file) {
+        if let Some(mut sym) = extract_symbol_from_line(trimmed, &ext, i + 1, file) {
+            sym.signature = extract_signature(&sym.kind, &ext, &lines, i);
             out.push(sym);
         }
     }
+}
+
+/// Extract a compact interface summary for a symbol using lookahead from its definition line.
+fn extract_signature(kind: &SymbolKind, ext: &str, lines: &[&str], start: usize) -> Option<String> {
+    if ext != "rs" {
+        return None; // Only Rust for now
+    }
+    match kind {
+        SymbolKind::Function => extract_fn_signature(lines, start),
+        SymbolKind::Struct   => extract_struct_fields(lines, start),
+        SymbolKind::Enum     => extract_enum_variants(lines, start),
+        _ => None,
+    }
+}
+
+/// Extract `(params) -> RetType` from a fn definition (may span multiple lines).
+fn extract_fn_signature(lines: &[&str], start: usize) -> Option<String> {
+    // Collect lines from start until we hit the opening `{` or a `;`
+    let mut sig = String::new();
+    for line in lines.iter().skip(start) {
+        let t = line.trim();
+        sig.push(' ');
+        sig.push_str(t);
+        if t.ends_with('{') || t.ends_with(';') {
+            break;
+        }
+        if sig.len() > 300 { break; }
+    }
+    // Extract the part between the first `(` and the `{`
+    let paren_start = sig.find('(')?;
+    let brace = sig.rfind(" {")?;
+    let inner = sig[paren_start..brace].trim().to_string();
+    // Trim to 120 chars at a clean boundary
+    Some(truncate_at_word(&inner, 120))
+}
+
+/// Extract pub fields from a struct body: `field: Type, field: Type, ...`
+fn extract_struct_fields(lines: &[&str], start: usize) -> Option<String> {
+    // Skip past the opening `{` of the struct
+    let mut in_body = false;
+    let mut fields: Vec<String> = Vec::new();
+
+    for line in lines.iter().skip(start) {
+        let t = line.trim();
+        if !in_body {
+            if t.contains('{') { in_body = true; }
+            continue;
+        }
+        // Closing brace at col 0 = end of struct
+        if t == "}" { break; }
+        // Only pub fields (skip doc comments, attributes, private fields)
+        if t.starts_with("pub ") && t.contains(':') && !t.starts_with("pub fn") {
+            let field = t.trim_start_matches("pub(crate) ")
+                         .trim_start_matches("pub ");
+            // Strip trailing comma and any inline comment
+            let field = field.split("//").next().unwrap_or(field).trim().trim_end_matches(',');
+            if !field.is_empty() {
+                fields.push(field.to_string());
+            }
+        }
+        if fields.len() >= 12 { break; }
+    }
+    if fields.is_empty() { return None; }
+    Some(truncate_at_word(&fields.join(", "), 120))
+}
+
+/// Extract variant names from an enum body.
+fn extract_enum_variants(lines: &[&str], start: usize) -> Option<String> {
+    let mut in_body = false;
+    let mut variants: Vec<&str> = Vec::new();
+
+    for line in lines.iter().skip(start) {
+        let t = line.trim();
+        if !in_body {
+            if t.contains('{') { in_body = true; }
+            continue;
+        }
+        if t == "}" { break; }
+        // Skip doc comments and attributes
+        if t.starts_with("//") || t.starts_with('#') { continue; }
+        // Variant name is the first identifier on the line
+        let name = t.split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("").trim();
+        if !name.is_empty() && is_ident(name) {
+            variants.push(name);
+        }
+        if variants.len() >= 12 { break; }
+    }
+    if variants.is_empty() { return None; }
+    Some(truncate_at_word(&variants.join(", "), 120))
+}
+
+/// Truncate a string at a word boundary to fit within `max` chars.
+fn truncate_at_word(s: &str, max: usize) -> String {
+    if s.len() <= max { return s.to_string(); }
+    let cut = s[..max].rfind(|c: char| c == ',' || c == ' ').unwrap_or(max);
+    format!("{}…", &s[..cut])
 }
 
 fn extract_symbol_from_line(line: &str, ext: &str, line_no: usize, file: &str) -> Option<Symbol> {
@@ -199,6 +304,7 @@ fn extract_symbol_from_line(line: &str, ext: &str, line_no: usize, file: &str) -
         line: line_no,
         end_line: line_no, // placeholder — overwritten by compute_end_lines after sort
         kind,
+        signature: None,  // filled by extract_symbols after kind is known
     })
 }
 

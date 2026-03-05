@@ -46,15 +46,18 @@ pub fn execute(args: &Value, graph: &ProjectGraph) -> String {
         return find_file(name, graph);
     }
 
-    // Exact symbol match — include exact line_range for the full body
+    // Exact symbol match — include exact line_range and signature if available
     let matches: Vec<String> = graph.symbols.iter()
         .filter(|s| s.name == name)
         .map(|s| {
             let start = s.line.saturating_sub(1).max(1);
             let end = s.end_line;
+            let sig_part = s.signature.as_deref()
+                .map(|sig| format!("\n    {}: {}", s.kind.label(), sig))
+                .unwrap_or_default();
             format!(
-                "  {}:{} ({}) → read_file(path=\"{}\", line_range=[{}, {}])",
-                s.file, s.line, s.kind.label(), s.file, start, end
+                "  {}:{} ({}) → read_file(path=\"{}\", line_range=[{}, {}]){}",
+                s.file, s.line, s.kind.label(), s.file, start, end, sig_part
             )
         })
         .collect();
@@ -306,6 +309,7 @@ mod tests {
                 line: 42,
                 end_line: 200,
                 kind: SymbolKind::Function,
+                signature: Some("(task: &str, client: &Client) -> Result<AgentDone>".to_string()),
             },
             Symbol {
                 name: "AppState".to_string(),
@@ -313,6 +317,7 @@ mod tests {
                 line: 100,
                 end_line: 150,
                 kind: SymbolKind::Struct,
+                signature: Some("mode: AppMode, input: String, messages: Vec<ChatMessage>".to_string()),
             },
         ];
 

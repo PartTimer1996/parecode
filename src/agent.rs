@@ -864,21 +864,56 @@ fn strip_cot_from_last_assistant(messages: &mut Vec<Message>) {
     // Everything before that is consumed history.
     let last_tool_idx = messages.iter().rposition(|m| m.role == "tool").unwrap_or(0);
 
+    // Build tool_use_id → tool_name map from all assistant messages so we can
+    // make compression decisions based on which tool produced a result.
+    // Use owned Strings to avoid borrowing messages across the mutable loop below.
+    let id_to_name: std::collections::HashMap<String, String> = messages.iter()
+        .filter(|m| m.role == "assistant")
+        .flat_map(|m| m.tool_calls.iter().map(|tc| (tc.id.clone(), tc.name.clone())))
+        .collect();
+
     for (i, msg) in messages.iter_mut().enumerate() {
         if msg.role != "tool" || i >= last_tool_idx {
             continue;
         }
         if let MessageContent::Parts(parts) = &mut msg.content {
             for part in parts.iter_mut() {
-                if let ContentPart::ToolResult { content, .. } = part {
-                    if content.len() <= 120 {
-                        continue; // already a stub or tiny result
+                if let ContentPart::ToolResult { tool_use_id, content } = part {
+                    let tool_name = id_to_name.get(tool_use_id.as_str()).map(|s| s.as_str()).unwrap_or("");
+                    if should_protect_tool_result(tool_name, content) {
+                        continue;
                     }
                     *content = compress_tool_result_to_stub(content);
                 }
             }
         }
     }
+}
+
+/// Returns true if this tool result should be kept verbatim in history.
+/// Navigation results (find_symbol, graph intercepts) are tiny and permanently
+/// valid — compressing them causes re-lookups. Small ranged reads are kept
+/// because the model explicitly requested that window and likely still needs it.
+fn should_protect_tool_result(tool_name: &str, content: &str) -> bool {
+    // find_symbol results — always tiny (~15-80 tokens), always valid navigation data
+    if tool_name == "find_symbol" {
+        return true;
+    }
+    // Ranged read_file results — model requested a specific window, keep it.
+    // Detected by header: "[path — lines N-M of T...]"
+    // Large ranged reads (>60 lines) are still compressed — they've been consumed.
+    if tool_name == "read_file" {
+        let first = content.lines().next().unwrap_or("");
+        let is_ranged = first.contains("— lines ") && first.contains(" of ");
+        if is_ranged && content.lines().count() <= 60 {
+            return true;
+        }
+    }
+    // Already a stub or tiny result — no-op
+    if content.len() <= 120 {
+        return true;
+    }
+    false
 }
 
 /// Compress a consumed tool result to a minimal stub.
@@ -1076,20 +1111,20 @@ fn bash_graph_intercept(args: &Value, config: &AgentConfig) -> Option<String> {
     }
 
     let locations: Vec<String> = files.iter().map(|f| {
-        let line = graph.symbols.iter()
-            .find(|s| s.name == pattern && &s.file == f)
-            .map(|s| s.line)
-            .unwrap_or(0);
-        if line > 0 {
-            format!("  {f}:{line}")
-        } else {
-            format!("  {f}")
+        match graph.symbols.iter().find(|s| s.name == pattern && &s.file == f) {
+            Some(s) if s.line > 0 => {
+                let start = s.line.saturating_sub(1).max(1);
+                format!(
+                    "  {f}:{} ({}) → read_file(path=\"{f}\", line_range=[{start}, {}])",
+                    s.line, s.kind.label(), s.end_line
+                )
+            }
+            _ => format!("  {f}"),
         }
     }).collect();
 
     Some(format!(
-        "[graph intercept] '{}' found in index — no grep needed:\n{}\n\
-         Use read_file(path, line_range=[N-2, N+150]) to read the full function body.",
+        "[graph intercept] '{}' found in index — no grep needed:\n{}",
         pattern,
         locations.join("\n")
     ))
