@@ -324,17 +324,17 @@ pub async fn run_tui(
         // returned together (required by the OpenAI API spec).
         let mut tool_results: Vec<ContentPart> = Vec::new();
         let mut mutated_files: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut any_bash_or_ask = false; // bash or ask_user ran → model needs to see output
-        let mut any_error = false;       // any result contained an error/failure marker
+        // let mut any_bash_or_ask = false; // bash or ask_user ran → model needs to see output
+        // let mut any_error = false;       // any result contained an error/failure marker
 
         for tc in &response.tool_calls {
             let parsed_args = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
             let kind = ToolKind::classify(&tc.name, &parsed_args);
-            let is_observe_kind = matches!(kind, ToolKind::Other { .. }) || tc.name == "ask_user";
-            if is_observe_kind {
-                any_bash_or_ask = true;
-            }
-            let (part, dispatched, had_error) = execute_one_tool_call(
+            let _is_observe_kind = matches!(kind, ToolKind::Other { .. }) || tc.name == "ask_user";
+            // if is_observe_kind {
+            //     any_bash_or_ask = true;
+            // }
+            let (part, dispatched, _had_error) = execute_one_tool_call(
                 tc,
                 &mut mutated_files,
                 &mut messages,
@@ -347,9 +347,9 @@ pub async fn run_tui(
             if dispatched {
                 tool_call_count += 1;
             }
-            if had_error {
-                any_error = true;
-            }
+            // if had_error {
+            //     any_error = true;
+            // }
             if let Some(part) = part {
                 tool_results.push(part);
             }
@@ -1257,7 +1257,7 @@ fn format_args_summary(args: &Value) -> String {
 ///
 /// When `true`, the agent has verifiably completed the task and the next API call
 /// would only produce a summary message, wasting the full accumulated context as input.
-pub fn should_skip_done_turn(
+pub fn _should_skip_done_turn(
     mutated_files_nonempty: bool,
     any_bash_or_ask: bool,
     any_error: bool,
@@ -1651,63 +1651,63 @@ mod tests {
     #[test]
     fn test_skip_done_turn_pure_edit_skips() {
         // Only edit_file calls, no bash, no errors → skip the "I'm done" round-trip
-        assert!(should_skip_done_turn(true, false, false));
+        assert!(_should_skip_done_turn(true, false, false));
     }
 
     #[test]
     fn test_skip_done_turn_read_then_edit_skips() {
         // read_file + edit_file → mutated=true, bash_or_ask=false, no errors → SKIP
         // This is the most common real-world pattern — must fire correctly.
-        assert!(should_skip_done_turn(true, false, false));
+        assert!(_should_skip_done_turn(true, false, false));
     }
 
     #[test]
     fn test_skip_done_turn_no_mutation_no_skip() {
         // No files mutated at all → must NOT skip
-        assert!(!should_skip_done_turn(false, false, false));
+        assert!(!_should_skip_done_turn(false, false, false));
     }
 
     #[test]
     fn test_skip_done_turn_bash_only_no_skip() {
         // Bash ran (e.g. `cargo test`) but no files mutated → model needs results
-        assert!(!should_skip_done_turn(false, true, false));
+        assert!(!_should_skip_done_turn(false, true, false));
     }
 
     #[test]
     fn test_skip_done_turn_bash_with_mutation_no_skip() {
         // edit_file + bash in same turn → bash output needs a follow-up reaction
         // Must NOT skip — model needs to see test/build output
-        assert!(!should_skip_done_turn(true, true, false));
+        assert!(!_should_skip_done_turn(true, true, false));
     }
 
     #[test]
     fn test_skip_done_turn_ask_user_no_skip() {
         // ask_user was called → human hasn't responded yet, must not skip
-        assert!(!should_skip_done_turn(true, true, false));
+        assert!(!_should_skip_done_turn(true, true, false));
     }
 
     #[test]
     fn test_skip_done_turn_error_no_skip() {
         // Mutation happened but build check failed → any_error=true
         // Must NOT skip — model needs to see and fix the error
-        assert!(!should_skip_done_turn(true, false, true));
+        assert!(!_should_skip_done_turn(true, false, true));
     }
 
     #[test]
     fn test_skip_done_turn_hook_failure_no_skip() {
         // Hook exited non-zero — model needs to react to the failure
-        assert!(!should_skip_done_turn(true, false, true));
+        assert!(!_should_skip_done_turn(true, false, true));
     }
 
     #[test]
     fn test_skip_done_turn_mutation_with_error_and_bash_no_skip() {
         // All flags set — most constrained case: must NOT skip
-        assert!(!should_skip_done_turn(true, true, true));
+        assert!(!_should_skip_done_turn(true, true, true));
     }
 
     #[test]
     fn test_skip_done_turn_all_false_no_skip() {
         // Nothing happened — clearly don't skip
-        assert!(!should_skip_done_turn(false, false, false));
+        assert!(!_should_skip_done_turn(false, false, false));
     }
 }
