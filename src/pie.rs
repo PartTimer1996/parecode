@@ -67,6 +67,10 @@ impl ProjectGraph {
         if let Ok(content) = std::fs::read_to_string(&graph_path) {
             if let Ok(mut g) = serde_json::from_str::<ProjectGraph>(&content) {
                 if g.schema_version == SCHEMA_VERSION {
+                    // Migrate graphs persisted before end_line was added (all zeros)
+                    if g.symbols.iter().any(|s| s.end_line == 0) {
+                        compute_end_lines(&mut g.symbols, &g.file_lines);
+                    }
                     // Incremental update
                     g.incremental_update(root, max_files);
                     g.save(root);
