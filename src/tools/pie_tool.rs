@@ -63,7 +63,10 @@ pub fn execute(args: &Value, graph: &ProjectGraph) -> String {
         .collect();
 
     if !matches.is_empty() {
-        return format!("'{}' defined at:\n{}", name, matches.join("\n"));
+        return format!(
+            "'{}' defined at:\n{}\nUse the EXACT line_range shown — it covers the complete body.",
+            name, matches.join("\n")
+        );
     }
 
     // No exact symbol match — try partial symbol match

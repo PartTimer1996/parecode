@@ -1149,7 +1149,7 @@ fn bash_graph_intercept(args: &Value, config: &AgentConfig) -> Option<String> {
     }).collect();
 
     Some(format!(
-        "[graph intercept] '{}' found in index — no grep needed:\n{}",
+        "[graph intercept] '{}' found in index — no grep needed:\n{}\nUse the EXACT line_range shown — it covers the complete body.",
         pattern,
         locations.join("\n")
     ))
