@@ -167,6 +167,15 @@ pub(crate) fn extract_symbols(content: &str, file: &str, out: &mut Vec<Symbol>) 
         .unwrap_or_default();
 
     for (line_no, line) in content.lines().enumerate() {
+        // Only index top-level symbols — lines that start at column 0 (no indentation).
+        // Indented lines are inside function/impl bodies and must not create false
+        // symbol boundaries (which would truncate end_line for the enclosing symbol).
+        // Allow `#[` for attribute lines that precede top-level definitions.
+        let first = line.chars().next();
+        let is_top_level = matches!(first, Some(c) if !c.is_whitespace());
+        if !is_top_level {
+            continue;
+        }
         let trimmed = line.trim();
         if let Some(sym) = extract_symbol_from_line(trimmed, &ext, line_no + 1, file) {
             out.push(sym);
