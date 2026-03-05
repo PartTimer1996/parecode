@@ -99,10 +99,22 @@ const READ_FILE_CONTEXT_LINES: usize = 50;
 
 fn summarise(tool_name: &str, output: &str) -> String {
     match tool_name {
-        // Cap read_file in the messages array. Full content is in recall side-store.
+        // Cap read_file in the messages array.
+        // Ranged reads (line_range=[N,M]) are never truncated — the model explicitly
+        // requested that window and may need any line in it for editing. Truncating
+        // causes re-reads and grep spirals.
+        // Full-file reads of large files are capped — the symbol index in the header
+        // is the useful part; the model should use line_range for depth.
         "read_file" => {
             let lines: Vec<&str> = output.lines().collect();
             if lines.len() <= READ_FILE_CONTEXT_LINES + 1 {
+                return output.to_string();
+            }
+            // Detect ranged read by header: "[path — lines N-M of T...]"
+            let is_ranged = lines.first()
+                .map(|h| h.contains("— lines ") && h.contains(" of "))
+                .unwrap_or(false);
+            if is_ranged {
                 return output.to_string();
             }
             let kept = lines[..READ_FILE_CONTEXT_LINES].join("\n");

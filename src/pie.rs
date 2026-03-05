@@ -16,7 +16,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::index::{Symbol, SymbolIndex, extract_symbols};
+use crate::index::{Symbol, SymbolIndex, compute_end_lines, extract_symbols};
 
 const SCHEMA_VERSION: u32 = 1;
 const GRAPH_PATH: &str = ".parecode/project.graph";
@@ -179,9 +179,10 @@ impl ProjectGraph {
             self.symbols.extend(new_syms);
         }
 
-        // Re-sort by file + line
+        // Re-sort by file + line, then recompute end lines
         self.symbols
             .sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+        compute_end_lines(&mut self.symbols, &self.file_lines);
     }
 
     /// Save graph to `.parecode/project.graph` (JSON).

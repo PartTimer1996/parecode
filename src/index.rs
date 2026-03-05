@@ -18,6 +18,10 @@ pub struct Symbol {
     pub name: String,
     pub file: String,
     pub line: usize,
+    /// Last line of this symbol's body (inclusive). Computed post-sort as the
+    /// line before the next symbol in the same file, or the file's total line count.
+    #[serde(default)]
+    pub end_line: usize,
     pub kind: SymbolKind,
 }
 
@@ -92,6 +96,9 @@ impl SymbolIndex {
 
         // Sort by file, then line
         index.symbols.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+
+        // Compute end lines: next symbol's start - 1, or file's total line count
+        compute_end_lines(&mut index.symbols, &index.file_lines);
 
         // Build name → files map
         for sym in &index.symbols {
@@ -181,6 +188,7 @@ fn extract_symbol_from_line(line: &str, ext: &str, line_no: usize, file: &str) -
         name,
         file: file.to_string(),
         line: line_no,
+        end_line: line_no, // placeholder — overwritten by compute_end_lines after sort
         kind,
     })
 }
@@ -372,6 +380,21 @@ fn is_ident(s: &str) -> bool {
     !s.is_empty()
         && s.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
         && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Fill `end_line` for every symbol. Must be called after symbols are sorted by file+line.
+/// End = next symbol's start line - 1 within the same file, or the file's total line count.
+pub fn compute_end_lines(symbols: &mut Vec<Symbol>, file_lines: &HashMap<String, usize>) {
+    let n = symbols.len();
+    for i in 0..n {
+        let file_total = *file_lines.get(&symbols[i].file).unwrap_or(&symbols[i].line);
+        let end = if i + 1 < n && symbols[i + 1].file == symbols[i].file {
+            symbols[i + 1].line.saturating_sub(1)
+        } else {
+            file_total
+        };
+        symbols[i].end_line = end.max(symbols[i].line);
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

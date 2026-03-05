@@ -1088,7 +1088,7 @@ fn bash_graph_intercept(args: &Value, config: &AgentConfig) -> Option<String> {
 
     Some(format!(
         "[graph intercept] '{}' found in index — no grep needed:\n{}\n\
-         Use read_file(path, line_range=[N-2, N+20]) to read that section.",
+         Use read_file(path, line_range=[N-2, N+150]) to read the full function body.",
         pattern,
         locations.join("\n")
     ))

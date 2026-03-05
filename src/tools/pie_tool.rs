@@ -46,25 +46,28 @@ pub fn execute(args: &Value, graph: &ProjectGraph) -> String {
         return find_file(name, graph);
     }
 
-    // Exact symbol match
+    // Exact symbol match — include exact line_range for the full body
     let matches: Vec<String> = graph.symbols.iter()
         .filter(|s| s.name == name)
-        .map(|s| format!("  {}:{} ({})", s.file, s.line, s.kind.label()))
+        .map(|s| {
+            let start = s.line.saturating_sub(1).max(1);
+            let end = s.end_line;
+            format!(
+                "  {}:{} ({}) → read_file(path=\"{}\", line_range=[{}, {}])",
+                s.file, s.line, s.kind.label(), s.file, start, end
+            )
+        })
         .collect();
 
     if !matches.is_empty() {
-        return format!(
-            "'{}' defined at:\n{}\nUse read_file(path, line_range=[N-2, N+20]) to read it.",
-            name,
-            matches.join("\n")
-        );
+        return format!("'{}' defined at:\n{}", name, matches.join("\n"));
     }
 
     // No exact symbol match — try partial symbol match
     let sym_partial: Vec<String> = graph.symbols.iter()
         .filter(|s| s.name.to_lowercase().contains(&name.to_lowercase()))
         .take(5)
-        .map(|s| format!("  {}:{} — {} ({})", s.file, s.line, s.name, s.kind.label()))
+        .map(|s| format!("  {}:{}-{} — {} ({})", s.file, s.line, s.end_line, s.name, s.kind.label()))
         .collect();
 
     // Also try file match as fallback (user may have omitted the extension)
@@ -301,12 +304,14 @@ mod tests {
                 name: "run_tui".to_string(),
                 file: "src/agent.rs".to_string(),
                 line: 42,
+                end_line: 200,
                 kind: SymbolKind::Function,
             },
             Symbol {
                 name: "AppState".to_string(),
                 file: "src/tui/mod.rs".to_string(),
                 line: 100,
+                end_line: 150,
                 kind: SymbolKind::Struct,
             },
         ];
