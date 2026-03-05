@@ -366,13 +366,14 @@ pub async fn run_tui(
         // (no tool calls) are never touched — they're the visible response.
         strip_cot_from_last_assistant(&mut messages);
 
-        // **MASSIVELY IMPORTANT TO TEST** If we end early when we shouldn't we ruin workflows
+        // Below is still not working really - the aim is to just skip the conclusion, maybe they're valuable 
+        // Potentially we could check for the "stop" mechanism and trim it down instead - basically reduce tokens for this procedure? 
         // ── Early-exit: skip the "I'm done" round-trip ────────────────────────
         // Mutations succeeded, no bash/ask_user that needs a follow-up response.
         // Reads are fine — the model already consumed them to make the edits.
-        if should_skip_done_turn(!mutated_files.is_empty(), any_bash_or_ask, any_error) {
-            break;
-        }
+        // if should_skip_done_turn(!mutated_files.is_empty(), any_bash_or_ask, any_error) {
+        //     break;
+        // }
 
         // Update inflight tool count immediately after execution so the TUI
         // shows the correct count while the next API call streams.
