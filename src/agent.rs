@@ -899,13 +899,13 @@ fn should_protect_tool_result(tool_name: &str, content: &str) -> bool {
     if tool_name == "find_symbol" {
         return true;
     }
-    // Ranged read_file results — model requested a specific window, keep it.
-    // Detected by header: "[path — lines N-M of T...]"
-    // Large ranged reads (>60 lines) are still compressed — they've been consumed.
+    // Ranged read_file results — always retain verbatim.
+    // The model explicitly requested this window (via find_symbol → line_range).
+    // Compressing it forces a re-read at higher total token cost than retention.
+    // Stale content after edits is handled separately by evict_stale_content().
     if tool_name == "read_file" {
         let first = content.lines().next().unwrap_or("");
-        let is_ranged = first.contains("— lines ") && first.contains(" of ");
-        if is_ranged && content.lines().count() <= 60 {
+        if first.contains("— lines ") && first.contains(" of ") {
             return true;
         }
     }
@@ -1099,12 +1099,37 @@ fn bash_graph_intercept(args: &Value, config: &AgentConfig) -> Option<String> {
     //   grep -n "Foo" src/...    rg "Foo"    grep -rn 'Foo'
     let pattern = extract_grep_pattern(command)?;
 
-    // Only intercept plain identifiers — skip if it contains regex metacharacters
+    // Only intercept plain words — skip regex metacharacters
     let is_plain = !pattern.chars().any(|c| ".*+?[](){}\\^$|:".contains(c));
     if !is_plain || pattern.len() < 2 {
         return None;
     }
 
+    // Check if grep targets a specific file that's already in the project index.
+    // e.g. grep -n "token" src/agent.rs — model is searching a file it likely already read.
+    // Run a lightweight in-memory grep against the file content and return results directly,
+    // avoiding a subprocess and making the content immediately available without a round-trip.
+    if let Some(target_file) = extract_grep_target_file(command) {
+        if graph.file_lines.contains_key(target_file) {
+            if let Ok(content) = std::fs::read_to_string(target_file) {
+                let hits: Vec<String> = content.lines()
+                    .enumerate()
+                    .filter(|(_, line)| line.to_lowercase().contains(&pattern.to_lowercase()))
+                    .take(30)
+                    .map(|(i, line)| format!("{}:{}", i + 1, line.trim()))
+                    .collect();
+                if !hits.is_empty() {
+                    return Some(format!(
+                        "[graph intercept — searched {target_file} in-memory]\n{}\n\
+                         Use read_file(path=\"{target_file}\", line_range=[N-5, N+30]) to read context.",
+                        hits.join("\n")
+                    ));
+                }
+            }
+        }
+    }
+
+    // Symbol name lookup — exact match in the index
     let files = graph.by_name.get(pattern)?;
     if files.is_empty() {
         return None;
@@ -1128,6 +1153,32 @@ fn bash_graph_intercept(args: &Value, config: &AgentConfig) -> Option<String> {
         pattern,
         locations.join("\n")
     ))
+}
+
+/// Extract a specific file path argument from a grep command, if present.
+/// e.g. `grep -n "token" src/agent.rs` → Some("src/agent.rs")
+/// Returns None for recursive/wildcard searches (src/*.rs, src/).
+fn extract_grep_target_file(command: &str) -> Option<&str> {
+    // Last non-flag, non-pattern token that looks like a file path (contains '/')
+    // or ends in a known source extension.
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    // Skip the command itself and quoted pattern (first non-flag after command)
+    let mut saw_pattern = false;
+    for tok in tokens.iter().skip(1) {
+        if tok.starts_with('-') { continue; }
+        if !saw_pattern {
+            saw_pattern = true; // this is the pattern
+            continue;
+        }
+        // This is a path argument — check it's a specific file, not a glob/dir
+        if tok.contains('*') || tok.ends_with('/') { return None; }
+        let has_src_ext = ["rs", "ts", "tsx", "js", "py", "go"].iter()
+            .any(|e| tok.ends_with(&format!(".{e}")));
+        if has_src_ext || tok.contains('/') {
+            return Some(tok);
+        }
+    }
+    None
 }
 
 /// Extract the grep/rg search pattern from a command string.
