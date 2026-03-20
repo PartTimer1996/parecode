@@ -285,25 +285,20 @@ fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
     match call.name.as_str() {
         "find_symbol" => crate::tools::pie_tool::execute(&args, graph),
         "read_file" => {
-            let result = crate::tools::read::execute(&args)
-                .unwrap_or_else(|e| format!("[read_file error: {e}]"));
-            // Planner needs struct/enum definitions only — cap at 30 lines.
-            // If you need more than 30 lines to write a plan step, you are reading too much.
-            let lines: Vec<&str> = result.lines().collect();
-            if lines.len() > 60 {
-                format!(
-                    "{}\n[capped at 60 lines — use find_symbol for exact symbol locations]",
-                    lines[..60].join("\n")
-                )
-            } else {
-                result
-            }
+            // read.rs already handles this correctly:
+            //   - ranged reads → exact range returned
+            //   - full file ≤300 lines → full content
+            //   - full file >300 lines → preamble + symbol index + tail
+            // No cap needed — trust the tool.
+            crate::tools::read::execute(&args)
+                .unwrap_or_else(|e| format!("[read_file error: {e}]"))
         }
         other => format!("[unknown planner tool: {other}]"),
     }
 }
 
 // ── Plan generation ───────────────────────────────────────────────────────────
+
 
 /// Write the full planner prompt to `.parecode/last_plan_prompt.txt` for inspection.
 /// Best-effort — silently ignored on any I/O error.
@@ -378,12 +373,18 @@ pub async fn generate_plan(
     let mut tool_call_count: usize = 0;
 
     let mut messages: Vec<Message> = Vec::new();
-    messages.extend(crate::pie::pie_injection_messages(task, graph, narrative, &context_files));
+    messages.extend(crate::pie::pie_injection_messages(task, graph, narrative, context_files));
 
-    // Task message
+    // Task message — compact symbol reminder immediately before the task for maximum salience.
+    // The PIE injection has the full symbol map in a synthetic tool result, but models often
+    // ignore it when planning. Repeating the key locations here means the model reads them
+    // at the exact moment it decides what to do first.
+    let focus_files = crate::pie::focus_files_for_task(task, context_files, graph);
+    let mut task_content = crate::pie::build_known_locations(&focus_files, graph);
+    task_content.push_str(&format!("Task: {task}"));
     messages.push(Message {
         role: "user".to_string(),
-        content: MessageContent::Text(format!("Task: {task}")),
+        content: MessageContent::Text(task_content),
         tool_calls: vec![],
     });
 
@@ -518,9 +519,17 @@ pub async fn generate_plan(
             tool_calls: tool_call_count,
         });
 
+        // Prepend a compact reminder so the model never re-calls find_symbol for
+        // symbols it already had at turn 0 — context decay kills salience by turn 5+.
+        let reminder = crate::pie::build_known_locations_reminder(&focus_files, graph);
+        let mut parts: Vec<ContentPart> = Vec::new();
+        if !reminder.is_empty() {
+            parts.push(ContentPart::Text { text: reminder });
+        }
+        parts.extend(tool_results);
         messages.push(Message {
             role: "user".to_string(),
-            content: MessageContent::Parts(tool_results),
+            content: MessageContent::Parts(parts),
             tool_calls: vec![],
         });
     }

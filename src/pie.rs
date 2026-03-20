@@ -565,12 +565,9 @@ pub fn pie_injection_messages(
     attached_files: &[String],
 ) -> Vec<Message> {
     const PIE_TOOL_CALL_ID: &str = "pie_ctx_0";
-    // focus = attached files (explicit) + anchored files (implicit from task keywords)
-    let anchored = anchor_files_from_task(task, attached_files, graph);
-    let focus_files: Vec<String> = attached_files.iter().chain(anchored.iter()).cloned().collect();
     let default_narrative = crate::narrative::ProjectNarrative::default();
     let narrative = narrative.unwrap_or(&default_narrative);
-    let summary = crate::tools::pie_tool::build_compact_summary(graph, narrative, &focus_files);
+    let summary = crate::tools::pie_tool::build_compact_summary(graph, narrative);
     vec![
         Message {
             role: "assistant".to_string(),
@@ -646,6 +643,98 @@ fn anchor_files_from_task(task: &str, context_files: &[String], graph: &ProjectG
         .filter(|f| !context_files.contains(f))
         .take(5)
         .collect()
+}
+
+/// Build a "Known locations" block for the task message.
+///
+/// Lists every fn/struct/enum/trait symbol from focus files with start:end line and
+/// the exact read_file invocation the model can copy verbatim — placed immediately
+/// before "Task:" in both agent and plan mode for maximum attention.
+pub fn build_known_locations(focus_files: &[String], graph: &ProjectGraph) -> String {
+    use crate::index::SymbolKind;
+    let mut lines: Vec<String> = Vec::new();
+    for path in focus_files {
+        let mut syms: Vec<&crate::index::Symbol> = graph.symbols.iter()
+            .filter(|s| &s.file == path)
+            .filter(|s| matches!(
+                s.kind,
+                SymbolKind::Function | SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait
+            ))
+            .collect();
+        syms.sort_by_key(|s| s.line);
+        for s in syms.iter().take(20) {
+            if s.end_line > s.line {
+                lines.push(format!(
+                    "  {} {} → {}:{}-{}  →  read_file(path=\"{}\", line_range=[{}, {}])",
+                    s.kind.label(), s.name, path, s.line, s.end_line,
+                    path, s.line, s.end_line
+                ));
+            } else {
+                lines.push(format!(
+                    "  {} {} → {}:{}",
+                    s.kind.label(), s.name, path, s.line
+                ));
+            }
+        }
+        if syms.len() > 20 {
+            lines.push(format!("  … {} more in {path}", syms.len() - 20));
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Known locations — do NOT call find_symbol for these:\n{}\n\n",
+        lines.join("\n")
+    )
+}
+
+/// Build a compact single-line reminder of known symbol locations.
+///
+/// Injected into every tool-results batch so the model always has the key locations
+/// in recent context — prevents re-calling find_symbol for symbols it was told at
+/// the start of the conversation but has since "forgotten" due to context decay.
+///
+/// Format: `Known (skip find_symbol): fn run_tui@agent.rs:102-430, struct Profile@config.rs:24-62`
+/// Capped at 10 symbols to stay within ~60 tokens.
+pub fn build_known_locations_reminder(focus_files: &[String], graph: &ProjectGraph) -> String {
+    use crate::index::SymbolKind;
+    let mut entries: Vec<String> = Vec::new();
+    'outer: for path in focus_files {
+        let display = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path.as_str());
+        let mut syms: Vec<&crate::index::Symbol> = graph.symbols.iter()
+            .filter(|s| &s.file == path)
+            .filter(|s| matches!(
+                s.kind,
+                SymbolKind::Function | SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait
+            ))
+            .collect();
+        syms.sort_by_key(|s| s.line);
+        for s in &syms {
+            if entries.len() >= 10 { break 'outer; }
+            if s.end_line > s.line {
+                entries.push(format!("{} {}@{}:{}-{}", s.kind.label(), s.name, display, s.line, s.end_line));
+            } else {
+                entries.push(format!("{} {}@{}:{}", s.kind.label(), s.name, display, s.line));
+            }
+        }
+    }
+    if entries.is_empty() {
+        return String::new();
+    }
+    format!("Known (skip find_symbol): {}", entries.join(", "))
+}
+
+/// Return the combined focus file list for a task: attached files + keyword-anchored files.
+///
+/// Exposed so callers (e.g. `plan.rs`) can build inline symbol reminders in the task
+/// message without duplicating the anchoring logic.
+pub fn focus_files_for_task(task: &str, attached: &[String], graph: &ProjectGraph) -> Vec<String> {
+    let anchored = anchor_files_from_task(task, attached, graph);
+    attached.iter().chain(anchored.iter()).cloned().collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

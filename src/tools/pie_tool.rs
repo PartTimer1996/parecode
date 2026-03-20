@@ -177,16 +177,13 @@ fn find_file(name: &str, graph: &ProjectGraph) -> String {
     format!("File '{name}' not found in project index.")
 }
 
-/// Build a compact PIE summary for session-start injection and the synthetic tool result.
-/// Target: ~300-400 tokens base + ~500 tokens per focus file — enough to orient without
-/// requiring discovery scans. Called by pie_injection_messages() in agent.rs.
-///
-/// `focus_files` — paths of attached/anchored files whose full symbol maps are injected.
-/// These are listed with exact line numbers so the model can jump straight to targeted reads.
+/// Build a compact PIE summary for session-start injection.
+/// Target: ~300-400 tokens — project orientation only (architecture, clusters, key files,
+/// key symbols). Per-file symbol maps with line ranges live in the task message instead,
+/// where they are at the model's highest-attention point.
 pub fn build_compact_summary(
     graph: &ProjectGraph,
     narrative: &ProjectNarrative,
-    focus_files: &[String],
 ) -> String {
     let mut out = String::new();
 
@@ -242,38 +239,6 @@ pub fn build_compact_summary(
                 file_names.join(", "),
                 summary_part
             ));
-        }
-        out.push('\n');
-    }
-
-    // Context file symbol maps — injected when the user attaches files or when
-    // keyword anchoring identifies relevant files. Provides exact line numbers so
-    // the model can formulate targeted reads/edits without any discovery calls.
-    if !focus_files.is_empty() {
-        use crate::index::SymbolKind;
-        out.push_str("## Context file symbols\n");
-        for path in focus_files {
-            let mut syms: Vec<&crate::index::Symbol> = graph.symbols.iter()
-                .filter(|s| &s.file == path)
-                .filter(|s| matches!(
-                    s.kind,
-                    SymbolKind::Function | SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait
-                ))
-                .collect();
-            syms.sort_by_key(|s| s.line);
-            if !syms.is_empty() {
-                let display = std::path::Path::new(path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(path.as_str());
-                out.push_str(&format!("### {display} ({path})\n"));
-                for s in syms.iter().take(80) {
-                    out.push_str(&format!("- {} {} [line {}]\n", s.kind.label(), s.name, s.line));
-                }
-                if syms.len() > 80 {
-                    out.push_str(&format!("- … {} more\n", syms.len() - 80));
-                }
-            }
         }
         out.push('\n');
     }
@@ -498,7 +463,7 @@ mod tests {
     fn test_build_compact_summary() {
         let graph = make_graph();
         let narrative = make_narrative();
-        let summary = build_compact_summary(&graph, &narrative, &[]);
+        let summary = build_compact_summary(&graph, &narrative);
         assert!(summary.contains("# Project index"));
         assert!(summary.contains("## Architecture"));
         assert!(summary.contains("## Clusters"));
@@ -511,8 +476,7 @@ mod tests {
     fn test_build_compact_summary_includes_known_symbols() {
         let graph = make_graph();
         let narrative = make_narrative();
-        let summary = build_compact_summary(&graph, &narrative, &[]);
-        // AppState (struct in tui cluster) and run_tui (fn in agent cluster) should appear
+        let summary = build_compact_summary(&graph, &narrative);
         assert!(summary.contains("AppState"), "should include AppState struct: {summary}");
         assert!(summary.contains("run_tui"), "should include run_tui fn: {summary}");
     }
@@ -521,31 +485,10 @@ mod tests {
     fn test_build_compact_summary_empty_narrative() {
         let graph = make_graph();
         let narrative = ProjectNarrative::default();
-        let summary = build_compact_summary(&graph, &narrative, &[]);
+        let summary = build_compact_summary(&graph, &narrative);
         assert!(summary.contains("# Project index"));
         assert!(!summary.contains("## Architecture"));
         assert!(summary.contains("## Clusters"));
         assert!(summary.contains("## Key symbols"));
-    }
-
-    #[test]
-    fn test_build_compact_summary_focus_files_injects_symbols() {
-        let graph = make_graph();
-        let narrative = make_narrative();
-        let focus = vec!["src/agent.rs".to_string()];
-        let summary = build_compact_summary(&graph, &narrative, &focus);
-        assert!(summary.contains("## Context file symbols"), "should have context section: {summary}");
-        assert!(summary.contains("src/agent.rs"), "should include the focus file path: {summary}");
-        // run_tui is a fn in src/agent.rs — should appear with its line number
-        assert!(summary.contains("run_tui"), "should list run_tui: {summary}");
-        assert!(summary.contains("line 42"), "should include line number: {summary}");
-    }
-
-    #[test]
-    fn test_build_compact_summary_no_focus_files_no_section() {
-        let graph = make_graph();
-        let narrative = make_narrative();
-        let summary = build_compact_summary(&graph, &narrative, &[]);
-        assert!(!summary.contains("## Context file symbols"), "should not have context section when no focus files: {summary}");
     }
 }

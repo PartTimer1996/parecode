@@ -152,7 +152,13 @@ pub async fn run_tui(
     let system_prompt = system_prompt.as_str();
     let system_tokens = crate::budget::estimate_tokens(system_prompt);
 
-    let user_content = build_user_message(task, &attached);
+    let known_locations = if let Some(graph) = &config.project_graph {
+        let focus = crate::pie::focus_files_for_task(task, &attached, graph);
+        crate::pie::build_known_locations(&focus, graph)
+    } else {
+        String::new()
+    };
+    let user_content = format!("{}{}", known_locations, build_user_message(task, &attached));
 
     // ── Git checkpoint ────────────────────────────────────────────────────────
     // Create a checkpoint before the task starts. If the tree is dirty, this
