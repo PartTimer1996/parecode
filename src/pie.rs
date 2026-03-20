@@ -16,9 +16,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{client::{ContentPart, Message, MessageContent, ToolCall}, index::{Symbol, SymbolIndex, compute_end_lines, extract_symbols}};
+use crate::{client::{ContentPart, Message, MessageContent, ToolCall}, index::{CallEdge, Symbol, SymbolIndex, compute_end_lines, extract_symbols}};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const GRAPH_PATH: &str = ".parecode/project.graph";
 
 
@@ -39,6 +39,12 @@ pub struct ProjectGraph {
     pub clusters: Vec<Cluster>,
     /// Unix timestamp of the last index pass
     pub last_indexed: i64,
+    /// Outgoing call edges extracted via tree-sitter.
+    /// Key: `"src/file.rs::symbol_name"` — Value: project-internal calls made
+    /// by that symbol, one entry per unique callee (first call site).
+    /// Only populated for `.rs` files; other languages have no entries yet.
+    #[serde(default)]
+    pub call_edges: HashMap<String, Vec<CallEdge>>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -98,8 +104,10 @@ impl ProjectGraph {
             by_name: idx.by_name,
             clusters: Vec::new(),
             last_indexed: chrono::Utc::now().timestamp(),
+            call_edges: HashMap::new(),
         };
         g.clusters = build_clusters(&g.symbols, &g.file_lines);
+        g.rebuild_call_edges(root);
         g
     }
 
@@ -129,6 +137,8 @@ impl ProjectGraph {
 
         if !changed.is_empty() {
             self.reindex_files(&changed, root);
+            // Call edges must be updated AFTER reindex so by_name is current.
+            self.update_call_edges(&changed, root);
         }
 
         // Update hashes map to current state
@@ -150,6 +160,75 @@ impl ProjectGraph {
             files.retain(|f| f != path);
         }
         self.by_name.retain(|_, files| !files.is_empty());
+
+        // Remove call edges originating from this file.
+        let prefix = format!("{}::", path);
+        self.call_edges.retain(|k, _| !k.starts_with(&prefix));
+    }
+
+    /// (Re)build call edges for all Rust files from scratch.
+    /// Called after a cold build; `by_name` must be fully populated first.
+    fn rebuild_call_edges(&mut self, root: &Path) {
+        self.call_edges.clear();
+        let mut extractor = match crate::callgraph::CallExtractor::new() {
+            Ok(e) => e,
+            Err(_) => return, // grammar ABI mismatch — skip silently
+        };
+        let rust_files: Vec<String> = self
+            .file_lines
+            .keys()
+            .filter(|f| f.ends_with(".rs"))
+            .cloned()
+            .collect();
+        for file in &rust_files {
+            let abs = root.join(file);
+            let Ok(content) = std::fs::read_to_string(&abs) else { continue };
+            let edges = extractor.extract_file(&content, file, &self.symbols, &self.by_name);
+            self.call_edges.extend(edges);
+        }
+    }
+
+    /// Update call edges for a set of changed files.
+    /// Must be called after `reindex_files` so `by_name` reflects the new symbols.
+    fn update_call_edges(&mut self, changed: &[String], root: &Path) {
+        // Drop stale edges for changed files.
+        for file in changed {
+            let prefix = format!("{}::", file);
+            self.call_edges.retain(|k, _| !k.starts_with(&prefix));
+        }
+        let mut extractor = match crate::callgraph::CallExtractor::new() {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for file in changed {
+            if !file.ends_with(".rs") {
+                continue;
+            }
+            let abs = root.join(file);
+            let Ok(content) = std::fs::read_to_string(&abs) else { continue };
+            let edges = extractor.extract_file(&content, file, &self.symbols, &self.by_name);
+            self.call_edges.extend(edges);
+        }
+    }
+
+    /// Look up all project symbols that call `callee_name`.
+    /// Returns a list of caller keys (`"file::symbol_name"`).
+    pub fn callers_of(&self, callee_name: &str) -> Vec<&str> {
+        self.call_edges
+            .iter()
+            .filter_map(|(caller_key, edges)| {
+                if edges.iter().any(|e| e.callee == callee_name) {
+                    Some(caller_key.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Look up all callees of a symbol identified by its key (`"file::name"`).
+    pub fn callees_of(&self, caller_key: &str) -> &[CallEdge] {
+        self.call_edges.get(caller_key).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Re-extract symbols for `paths`, replacing stale entries.

@@ -32,6 +32,8 @@ flate2 = "1"
 tar = "0.4"
 zip = "8.1.0"
 xz2 = "0.1"
+tree-sitter = "0.22"
+tree-sitter-rust = "0.21"
 
 [dev-dependencies]
 filetime = "0.2"

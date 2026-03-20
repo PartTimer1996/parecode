@@ -12,6 +12,16 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// A single outgoing call edge from a symbol to a callee by name.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CallEdge {
+    /// Name of the called function or method.
+    pub callee: String,
+    /// Line number (1-indexed) in the source file where this call occurs.
+    /// When a callee is called multiple times, this is the first occurrence.
+    pub call_line: usize,
+}
+
 /// A single indexed symbol.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {

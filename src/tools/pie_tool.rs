@@ -363,6 +363,7 @@ mod tests {
             by_name,
             file_lines,
             last_indexed: 0,
+            call_edges: HashMap::new(),
         }
     }
 

@@ -1,6 +1,7 @@
 mod agent;
 mod budget;
 mod cache;
+mod callgraph;
 mod client;
 mod config;
 mod context_weights;
