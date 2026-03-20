@@ -55,7 +55,7 @@ impl ContextWeights {
     }
 
     /// Get weight for a file (defaults to 1.0 if not tracked).
-    pub fn get(&self, file: &str) -> f32 {
+    pub fn _get(&self, file: &str) -> f32 {
         self.file_weights.get(file).copied().unwrap_or(WEIGHT_DEFAULT)
     }
 
@@ -80,11 +80,11 @@ impl ContextWeights {
     }
 
     /// Mean weight of the given files. Returns 1.0 for empty input.
-    pub fn mean_weight(&self, files: &[String]) -> f32 {
+    pub fn _mean_weight(&self, files: &[String]) -> f32 {
         if files.is_empty() {
             return WEIGHT_DEFAULT;
         }
-        let sum: f32 = files.iter().map(|f| self.get(f)).sum();
+        let sum: f32 = files.iter().map(|f| self._get(f)).sum();
         sum / files.len() as f32
     }
 }
@@ -104,9 +104,9 @@ mod tests {
         w.adjust(&["src/plan.rs".to_string()], &["src/plan.rs".to_string(), "src/config.rs".to_string()]);
 
         // Modified file should increase
-        assert!(w.get("src/plan.rs") > WEIGHT_DEFAULT, "modified file should be > 1.0");
+        assert!(w._get("src/plan.rs") > WEIGHT_DEFAULT, "modified file should be > 1.0");
         // Context-only file should decrease
-        assert!(w.get("src/config.rs") < WEIGHT_DEFAULT, "wasted file should be < 1.0");
+        assert!(w._get("src/config.rs") < WEIGHT_DEFAULT, "wasted file should be < 1.0");
     }
 
     // ── Test 2 ─────────────────────────────────────────────────────────────────
@@ -120,14 +120,14 @@ mod tests {
         for _ in 0..50 {
             w.adjust(&[file.clone()], &[file.clone()]);
         }
-        assert!(w.get(&file) <= WEIGHT_MAX, "weight should not exceed max");
+        assert!(w._get(&file) <= WEIGHT_MAX, "weight should not exceed max");
 
         // Drive weight to floor with wasted-only adjustments
         let mut w2 = ContextWeights::default();
         for _ in 0..50 {
             w2.adjust(&[], &[file.clone()]);
         }
-        assert!(w2.get(&file) >= WEIGHT_MIN, "weight should not go below min");
+        assert!(w2._get(&file) >= WEIGHT_MIN, "weight should not go below min");
     }
 
     // ── Test 3 ─────────────────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ mod tests {
         w.save_to(&path).unwrap();
 
         let loaded = ContextWeights::load_from(&path);
-        let delta = (loaded.get("src/plan.rs") - w.get("src/plan.rs")).abs();
+        let delta = (loaded._get("src/plan.rs") - w._get("src/plan.rs")).abs();
         assert!(delta < 0.001, "round-trip weight should match");
     }
 
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn test_mean_weight_empty() {
         let w = ContextWeights::default();
-        assert!((w.mean_weight(&[]) - 1.0).abs() < 0.001);
+        assert!((w._mean_weight(&[]) - 1.0).abs() < 0.001);
     }
 
     #[test]
@@ -162,7 +162,7 @@ mod tests {
             w.adjust(&["src/plan.rs".to_string()], &["src/plan.rs".to_string()]);
         }
         let files = vec!["src/plan.rs".to_string(), "src/config.rs".to_string()];
-        let mean = w.mean_weight(&files);
+        let mean = w._mean_weight(&files);
         // mean should be > default (one file is high, one is default 1.0)
         assert!(mean > WEIGHT_DEFAULT, "mean should be > 1.0 when one file is elevated");
     }
@@ -175,6 +175,6 @@ mod tests {
         let path = tmp.path().join("nonexistent.json");
         let w = ContextWeights::load_from(&path);
         assert!(w.file_weights.is_empty());
-        assert!((w.get("anything") - WEIGHT_DEFAULT).abs() < 0.001);
+        assert!((w._get("anything") - WEIGHT_DEFAULT).abs() < 0.001);
     }
 }

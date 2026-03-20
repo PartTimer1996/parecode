@@ -219,8 +219,8 @@ impl ProjectNarrative {
             let weights = crate::context_weights::ContextWeights::load();
             let mut sorted_clusters: Vec<&crate::pie::Cluster> = all_clusters.iter().collect();
             sorted_clusters.sort_by(|a, b| {
-                let wa = weights.mean_weight(&a.entry_files);
-                let wb = weights.mean_weight(&b.entry_files);
+                let wa = weights._mean_weight(&a.entry_files);
+                let wb = weights._mean_weight(&b.entry_files);
                 wb.partial_cmp(&wa).unwrap_or(std::cmp::Ordering::Equal)
             });
             out.push_str("\n## Clusters\n");

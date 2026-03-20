@@ -187,20 +187,24 @@ pub fn save_plan(plan: &Plan) -> Result<PathBuf> {
 /// No phase switch — the model explores with tools, then outputs JSON when done.
 /// Keeping one consistent prompt avoids models getting confused by a system-prompt
 /// change mid-conversation (the root cause of XML tool call fallback on phase 2).
-const PLANNER_PROMPT: &str = r#"You are PareCode, a coding assistant. Plan a coding task in two phases.
+const PLANNER_PROMPT: &str = r#"You are PareCode, a coding assistant. Your job is to produce a structured edit plan — NOT to understand or explain the codebase.
 
-PHASE 1 — EXPLORE: Use find_symbol and read_file to understand what needs to change.
-find_symbol returns exact line ranges — use those exact ranges with read_file.
-Do NOT output the plan during this phase.
+ORIENTATION: The project index and context file symbols are pre-loaded in your context. You already have file names, cluster membership, and (for attached files) exact symbol line numbers. Use them.
 
-PHASE 2 — PLAN: When you have gathered all file paths, line numbers, and signatures,
-output the plan as JSON (no markdown fences, no prose outside the JSON):
+EXPLORATION RULES — STRICTLY ENFORCED:
+- Use find_symbol ONLY to get a file:line anchor for a symbol not already in your context.
+- Do NOT read function bodies. Struct/enum definitions only if you must — ≤30 lines.
+- Maximum 7 tool calls total. Stop as soon as you have file:line refs for everything the plan touches.
+- If a symbol is listed in "Context file symbols" above, you already have its line number — do NOT call find_symbol for it.
+- You do NOT need to trace data flow end-to-end or find exact call sites. Identify the files and approximate function locations — the executor reads full context and handles the details.
+
+OUTPUT: When you have all locations, immediately output the JSON plan (no markdown fences, no prose):
 
 {
   "steps": [
     {
       "description": "human-readable one-liner shown to user",
-      "instruction": "precise instruction with every file:line ref you discovered",
+      "instruction": "precise instruction with EVERY file:line ref — never say 'find X' or 'locate Y'",
       "files": ["src/foo.rs", "src/bar.rs"],
       "verify": "none",
       "tool_budget": 15
@@ -211,7 +215,7 @@ output the plan as JSON (no markdown fences, no prose outside the JSON):
 STEP RULES:
 - Each step runs in TOTAL ISOLATION — the executor sees ONLY files listed in "files"
 - List EVERY file the step needs to read OR modify (max 10 per step)
-- Every instruction MUST contain exact file paths and line numbers — do not say "find X"
+- Every instruction MUST contain exact file paths and line numbers
 - Prefer 4–8 steps; do not split naturally-coupled changes into micro-steps
 - verify: "none" | "command:CMD" | "changed:FILE" | "absent:FILE:PATTERN""#;
 
@@ -280,13 +284,53 @@ fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
         serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
     match call.name.as_str() {
         "find_symbol" => crate::tools::pie_tool::execute(&args, graph),
-        "read_file" => crate::tools::read::execute(&args)
-            .unwrap_or_else(|e| format!("[read_file error: {e}]")),
+        "read_file" => {
+            let result = crate::tools::read::execute(&args)
+                .unwrap_or_else(|e| format!("[read_file error: {e}]"));
+            // Planner needs struct/enum definitions only — cap at 30 lines.
+            // If you need more than 30 lines to write a plan step, you are reading too much.
+            let lines: Vec<&str> = result.lines().collect();
+            if lines.len() > 60 {
+                format!(
+                    "{}\n[capped at 60 lines — use find_symbol for exact symbol locations]",
+                    lines[..60].join("\n")
+                )
+            } else {
+                result
+            }
+        }
         other => format!("[unknown planner tool: {other}]"),
     }
 }
 
 // ── Plan generation ───────────────────────────────────────────────────────────
+
+/// Write the full planner prompt to `.parecode/last_plan_prompt.txt` for inspection.
+/// Best-effort — silently ignored on any I/O error.
+fn dump_plan_prompt(system_prompt: &str, messages: &[Message]) {
+    use std::fmt::Write as FmtWrite;
+    let mut out = String::new();
+    let _ = writeln!(out, "=== SYSTEM PROMPT ===\n{system_prompt}\n");
+    for (i, msg) in messages.iter().enumerate() {
+        let content_str = match &msg.content {
+            MessageContent::Text(t) => t.clone(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .map(|p| match p {
+                    ContentPart::ToolResult { tool_use_id, content } => {
+                        format!("[ToolResult id={tool_use_id}]\n{content}")
+                    }
+                    _ => format!("{p:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        };
+        let _ = writeln!(out, "\n--- MESSAGE {i} ({}) ---\n{content_str}", msg.role);
+    }
+    let _ = std::fs::write(".parecode/last_plan_prompt.txt", out);
+}
+
+
 
 /// Best-effort symbol-enrichment pass: for any symbol name that appears in a
 /// step instruction but has no line number referenced, append an index hint.
@@ -333,78 +377,41 @@ pub async fn generate_plan(
     let mut total_output: u32 = 0;
     let mut tool_call_count: usize = 0;
 
-    // ── PIE injection (same as agent mode) ────────────────────────────────────
     let mut messages: Vec<Message> = Vec::new();
-    if let Some(n) = narrative {
-        messages.extend(crate::agent::pie_injection_messages(graph, n));
-    } else if let Some(section) = graph.to_prompt_section(8) {
-        messages.push(Message {
-            role: "user".to_string(),
-            content: MessageContent::Text(section),
-            tool_calls: vec![],
-        });
-    }
+    messages.extend(crate::pie::pie_injection_messages(task, graph, narrative, &context_files));
 
-    // Initial task message — always inject cluster→file map from graph so the model
-    // knows every file in the project without needing find_symbol for discovery.
-    // This is the key orientation advantage agent mode has: it arrives knowing
-    // which files live in which cluster before making a single tool call.
-    let mut task_content = String::new();
-    if !graph.clusters.is_empty() {
-        task_content.push_str("## Project files by cluster\n");
-        for cluster in &graph.clusters {
-            let file_list: Vec<&str> = cluster.files.iter().map(|f| f.as_str()).collect();
-            task_content.push_str(&format!("- **{}**: {}\n", cluster.name, file_list.join(", ")));
-        }
-        task_content.push('\n');
-    }
-
-    if !context_files.is_empty() {
-        task_content.push_str("Attached files with their symbols:\n");
-        for path in context_files {
-            task_content.push_str(&format!("\n{path}:\n"));
-            let mut syms: Vec<&crate::index::Symbol> = graph.symbols.iter()
-                .filter(|s| &s.file == path)
-                .collect();
-            syms.sort_by_key(|s| s.line);
-            if syms.is_empty() {
-                task_content.push_str("  (no indexed symbols)\n");
-            } else {
-                for s in syms.iter().take(20) {
-                    let range = if s.end_line > s.line {
-                        format!("lines {}–{}", s.line, s.end_line)
-                    } else {
-                        format!("line {}", s.line)
-                    };
-                    let sig = s.signature.as_deref()
-                        .map(|sig| format!(" — {}", &sig[..sig.len().min(60)]))
-                        .unwrap_or_default();
-                    task_content.push_str(&format!(
-                        "  {} {} ({range}){sig}\n",
-                        s.kind.label(), s.name
-                    ));
-                }
-                if syms.len() > 20 {
-                    task_content.push_str(&format!("  … {} more symbols\n", syms.len() - 20));
-                }
-            }
-        }
-        task_content.push('\n');
-    }
-    task_content.push_str(&format!("Task: {task}"));
+    // Task message
     messages.push(Message {
         role: "user".to_string(),
-        content: MessageContent::Text(task_content),
+        content: MessageContent::Text(format!("Task: {task}")),
         tool_calls: vec![],
     });
+
+    // ── Debug prompt dump ─────────────────────────────────────────────────────
+    // Write the full prompt to .parecode/last_plan_prompt.txt for tuning/inspection.
+    dump_plan_prompt(PLANNER_PROMPT, &messages);
 
     // ── Unified exploration + output loop ─────────────────────────────────────
     let tools = planner_tools();
     const MAX_TURNS: usize = 20;
+    const TOOL_CAP: usize = 10; // hard cap — enforced in code, not just in the prompt
     let mut output_mode = false; // true = no tools, model must output JSON this turn
     let mut json_text_raw = String::new();
 
     for _ in 0..MAX_TURNS {
+        // Enforce hard tool cap: once hit, strip tools and demand JSON regardless of model intent
+        if tool_call_count >= TOOL_CAP && !output_mode {
+            messages.push(Message {
+                role: "user".to_string(),
+                content: MessageContent::Text(
+                    "Tool budget reached (10/10). Output the JSON plan now using what you \
+                     have found. Approximate locations are fine — the executor reads full \
+                     context. Do NOT explore further.".to_string(),
+                ),
+                tool_calls: vec![],
+            });
+            output_mode = true;
+        }
         let current_tools: &[Tool] = if output_mode { &[] } else { &tools };
         let resp = client
             .chat(PLANNER_PROMPT, &messages, current_tools, &on_chunk)

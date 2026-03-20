@@ -178,8 +178,13 @@ pub async fn run_tui(
     // ── PIE injection ────────────────────────────────────────────────────────
     // Prepend a synthetic project_index tool result so the model sees the
     // project summary as pre-executed context (high salience, sent once).
-    if let (Some(graph), Some(narrative)) = (&config.project_graph, &config.project_narrative) {
-        messages.extend(pie_injection_messages(graph, narrative));
+    if let Some(graph) = &config.project_graph {
+        messages.extend(crate::pie::pie_injection_messages(
+            task,
+            graph,
+            config.project_narrative.as_deref(),
+            &attached,
+        ));
     }
 
     // ── Prior turn pairs ─────────────────────────────────────────────────────
@@ -522,44 +527,7 @@ pub fn build_user_message(task: &str, attached: &[String]) -> String {
     s
 }
 
-// ── PIE injection ─────────────────────────────────────────────────────────────
 
-/// Synthetic tool call ID for the session-start PIE injection.
-/// Must match the tool_use_id in the ToolResult below.
-const PIE_TOOL_CALL_ID: &str = "pie_ctx_0";
-
-/// Build a synthetic assistant→tool_result message pair that injects a compact
-/// PIE summary into the conversation history before the user task.
-///
-/// The model sees this as a tool that already ran — higher salience than system
-/// prompt text, sent once (not repeated every turn).
-///
-/// Returns empty vec when graph/narrative are unavailable.
-pub fn pie_injection_messages(
-    graph: &crate::pie::ProjectGraph,
-    narrative: &crate::narrative::ProjectNarrative,
-) -> Vec<Message> {
-    let summary = crate::tools::pie_tool::build_compact_summary(graph, narrative);
-    vec![
-        Message {
-            role: "assistant".to_string(),
-            content: MessageContent::Text(String::new()),
-            tool_calls: vec![ToolCall {
-                id: PIE_TOOL_CALL_ID.to_string(),
-                name: "find_symbol".to_string(),
-                arguments: r#"{"name":"__summary__"}"#.to_string(),
-            }],
-        },
-        Message {
-            role: "user".to_string(),
-            content: MessageContent::Parts(vec![ContentPart::ToolResult {
-                tool_use_id: PIE_TOOL_CALL_ID.to_string(),
-                content: summary,
-            }]),
-            tool_calls: vec![],
-        },
-    ]
-}
 
 // ── Think-tag streaming parser ────────────────────────────────────────────────
 

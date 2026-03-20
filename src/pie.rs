@@ -16,7 +16,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::index::{Symbol, SymbolIndex, compute_end_lines, extract_symbols};
+use crate::{client::{ContentPart, Message, MessageContent, ToolCall}, index::{Symbol, SymbolIndex, compute_end_lines, extract_symbols}};
 
 const SCHEMA_VERSION: u32 = 1;
 const GRAPH_PATH: &str = ".parecode/project.graph";
@@ -542,6 +542,110 @@ fn append_gitignore_if_needed(root: &Path) {
     } else {
         // No .gitignore or unreadable — don't create one unprompted
     }
+}
+
+
+// ── PIE injection ─────────────────────────────────────────────────────────────
+
+/// Synthetic tool call ID for the session-start PIE injection.
+/// Must match the tool_use_id in the ToolResult below.
+
+
+/// Build a synthetic assistant→tool_result message pair that injects a compact
+/// PIE summary into the conversation history before the user task.
+///
+/// The model sees this as a tool that already ran — higher salience than system
+/// prompt text, sent once (not repeated every turn).
+///
+/// Returns empty vec when graph/narrative are unavailable.
+pub fn pie_injection_messages(
+    task: &str,
+    graph: &crate::pie::ProjectGraph,
+    narrative: Option<&crate::narrative::ProjectNarrative>,
+    attached_files: &[String],
+) -> Vec<Message> {
+    const PIE_TOOL_CALL_ID: &str = "pie_ctx_0";
+    // focus = attached files (explicit) + anchored files (implicit from task keywords)
+    let anchored = anchor_files_from_task(task, attached_files, graph);
+    let focus_files: Vec<String> = attached_files.iter().chain(anchored.iter()).cloned().collect();
+    let default_narrative = crate::narrative::ProjectNarrative::default();
+    let narrative = narrative.unwrap_or(&default_narrative);
+    let summary = crate::tools::pie_tool::build_compact_summary(graph, narrative, &focus_files);
+    vec![
+        Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Text(String::new()),
+            tool_calls: vec![ToolCall {
+                id: PIE_TOOL_CALL_ID.to_string(),
+                name: "find_symbol".to_string(),
+                arguments: r#"{"name":"__summary__"}"#.to_string(),
+            }],
+        },
+        Message {
+            role: "user".to_string(),
+            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                tool_use_id: PIE_TOOL_CALL_ID.to_string(),
+                content: summary,
+            }]),
+            tool_calls: vec![],
+        },
+    ]
+}
+
+/// Derive up to 5 additional focus files from the task text via keyword anchoring.
+///
+/// Matches task tokens (≥4 chars) against:
+///   - File stems (e.g. "stats" → stats_view.rs)
+///   - Symbol names (e.g. "token" → TokenStats → src/tui/mod.rs)
+///
+/// Returns files not already in `context_files`, sorted by score descending.
+/// These are merged with the user-attached files before PIE injection so the
+/// model arrives with symbol maps for files the task implicitly references.
+fn anchor_files_from_task(task: &str, context_files: &[String], graph: &ProjectGraph) -> Vec<String> {
+    let tokens: Vec<String> = task
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| w.len() >= 4)
+        .map(|w| w.to_lowercase())
+        .collect();
+
+    if tokens.is_empty() {
+        return vec![];
+    }
+
+    let mut scores: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    // File stem matching — bidirectional substring
+    for file in graph.file_lines.keys() {
+        let stem = std::path::Path::new(file.as_str())
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        for token in &tokens {
+            if stem.contains(token.as_str()) || token.contains(stem.as_str()) {
+                *scores.entry(file.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Symbol name matching — task token contained in symbol name (weight 2×)
+    for sym in &graph.symbols {
+        let sym_lower = sym.name.to_lowercase();
+        for token in &tokens {
+            if sym_lower.contains(token.as_str()) {
+                *scores.entry(sym.file.clone()).or_insert(0) += 2;
+            }
+        }
+    }
+
+    let mut ranked: Vec<(String, usize)> = scores.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+    ranked.into_iter()
+        .map(|(f, _)| f)
+        .filter(|f| !context_files.contains(f))
+        .take(5)
+        .collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
