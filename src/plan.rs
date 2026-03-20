@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use tokio::sync::mpsc;
+
 use crate::client::{Client, ContentPart, Message, MessageContent, Tool, ToolCall};
 use crate::pie::ProjectGraph;
 use crate::tui::UiEvent;
@@ -181,49 +183,37 @@ pub fn save_plan(plan: &Plan) -> Result<PathBuf> {
 
 // ── Plan generation ───────────────────────────────────────────────────────────
 
-/// The system prompt used specifically for plan generation.
-/// Tighter than the regular agent prompt — focused on producing structured output.
-const PLAN_SYSTEM_PROMPT: &str = r#"You are PareCode, a coding assistant. Your task is to produce a structured execution plan as JSON.
+/// Single system prompt covering both exploration and output.
+/// No phase switch — the model explores with tools, then outputs JSON when done.
+/// Keeping one consistent prompt avoids models getting confused by a system-prompt
+/// change mid-conversation (the root cause of XML tool call fallback on phase 2).
+const PLANNER_PROMPT: &str = r#"You are PareCode, a coding assistant. Plan a coding task in two phases.
 
-The plan breaks a coding task into discrete, independently executable steps.
+PHASE 1 — EXPLORE: Use find_symbol and read_file to understand what needs to change.
+find_symbol returns exact line ranges — use those exact ranges with read_file.
+Do NOT output the plan during this phase.
 
-CRITICAL rules:
-- Each step runs in TOTAL ISOLATION with ONLY the files listed in its "files" array visible — it cannot see any other files or conversation history
-- List EVERY file the step needs to read OR modify, including files that define types, interfaces, or modules it depends on
-- Maximum 10 files per step (steps with more than 10 files will be rejected — split into smaller steps instead)
-- Minimum 1 file per step (steps with no files are useless)
-- The "instruction" field is the model's ONLY context — be precise about what to change, where, and why. Include specifics like function signatures, struct field names, or API shapes the step needs to produce. Do NOT say "look at file X" — describe what the step will find there
-- After each step completes, subsequent steps receive a summary of what changed (modified files, symbols added, structural notes) — but NOT the actual file contents from that step, so instructions should be self-contained
-- Prefer 4-8 steps; do not create micro-steps that split naturally-coupled changes
-- Each step should be independently verifiable — prefer "command:cargo test" or similar where applicable
-- DO NOT create read_file or search tool steps — they will not work in isolated execution. Instead, during planning, discover everything each step needs (file paths, function signatures, exact line numbers, struct fields, imports) and bake that information directly into the "instruction" field. Reference specific locations like "add `process_request` after the `handle_connection` function at line 45 in src/server.rs". The executor will pre-load the files listed in "files" — do not re-read them at runtime.
-
-INSTRUCTION REQUIREMENTS:
-- Every instruction MUST include exact file paths and line numbers for everything it touches
-- After calling list_symbols/read_symbol: bake the location into the instruction, e.g. "edit `fn handle_key` at line 847 in src/tui/mod.rs — add field x after line 852"
-- Do NOT say "find the X function" — you have already found it via list_symbols; include the line number
-- Include function signatures or struct field names the step needs to produce or modify
-- The executor sees ONLY its listed files — every fact it needs must be in the instruction
-
-Respond with ONLY valid JSON — no markdown fences, no explanation. Format:
+PHASE 2 — PLAN: When you have gathered all file paths, line numbers, and signatures,
+output the plan as JSON (no markdown fences, no prose outside the JSON):
 
 {
   "steps": [
     {
       "description": "human-readable one-liner shown to user",
-      "instruction": "precise model-facing instruction — include enough detail that the step can execute without seeing other steps",
-      "files": ["src/foo.rs", "src/types.rs", "src/bar.rs"],
+      "instruction": "precise instruction with every file:line ref you discovered",
+      "files": ["src/foo.rs", "src/bar.rs"],
       "verify": "none",
       "tool_budget": 15
     }
   ]
 }
 
-For "verify", use one of:
-- "none" — no automated verification
-- "command:some command" — run a specific command, expect exit 0
-- "absent:file.ts:old_pattern" — check pattern no longer exists in file
-- "changed:file.ts" — check file was modified"#;
+STEP RULES:
+- Each step runs in TOTAL ISOLATION — the executor sees ONLY files listed in "files"
+- List EVERY file the step needs to read OR modify (max 10 per step)
+- Every instruction MUST contain exact file paths and line numbers — do not say "find X"
+- Prefer 4–8 steps; do not split naturally-coupled changes into micro-steps
+- verify: "none" | "command:CMD" | "changed:FILE" | "absent:FILE:PATTERN""#;
 
 /// Response from the model during plan generation.
 #[derive(Debug, Deserialize)]
@@ -271,153 +261,29 @@ fn parse_verification(s: &str) -> Verification {
 
 // ── Planner tools ─────────────────────────────────────────────────────────────
 
-/// Tools available to the planner during plan generation.
-/// `list_symbols` is free (graph-only). `read_symbol` reads ~30 lines from disk.
+/// Exploration tools for the planner — find_symbol + read_file from the shared registry.
+/// Same tools the agent uses, so the model gets the same enriched definitions.
 fn planner_tools() -> Vec<Tool> {
-    vec![
-        Tool {
-            name: "list_symbols".to_string(),
-            description: "List all symbols defined in a file with their line numbers. \
-                          Free — uses graph data only, no disk read. \
-                          Use this to orient yourself before calling read_symbol.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "file": {
-                        "type": "string",
-                        "description": "Relative file path, e.g. src/plan.rs"
-                    }
-                },
-                "required": ["file"]
-            }),
-        },
-        Tool {
-            name: "read_symbol".to_string(),
-            description: "Read ~35 lines of source code around a named symbol. \
-                          Use after list_symbols when you need the actual implementation. \
-                          When a symbol exists in multiple files, provide the 'file' hint.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Symbol name to read"
-                    },
-                    "file": {
-                        "type": "string",
-                        "description": "File hint — required when the symbol exists in multiple files"
-                    }
-                },
-                "required": ["name"]
-            }),
-        },
-    ]
+    [crate::tools::TOOL_FIND_SYMBOL, crate::tools::TOOL_READ_FILE]
+        .iter()
+        .filter_map(|name| crate::tools::get_tool(name))
+        .map(|v| Tool {
+            name: v["name"].as_str().unwrap_or("").to_string(),
+            description: v["description"].as_str().unwrap_or("").to_string(),
+            parameters: v["parameters"].clone(),
+        })
+        .collect()
 }
 
 fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
     let args: serde_json::Value =
         serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
-
     match call.name.as_str() {
-        "list_symbols" => {
-            let file = args["file"].as_str().unwrap_or("");
-            let syms: Vec<String> = graph
-                .symbols
-                .iter()
-                .filter(|s| s.file == file)
-                .map(|s| format!("line {:4}: {} {}", s.line, s.kind.label(), s.name))
-                .collect();
-            if syms.is_empty() {
-                if graph.file_lines.contains_key(file) {
-                    format!("No symbols found in {file} (file exists but has no indexed symbols)")
-                } else {
-                    format!("File not found in graph: {file}\nAvailable files:\n{}",
-                        graph.file_lines.keys()
-                            .take(20)
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join("\n"))
-                }
-            } else {
-                format!("// {file}\n{}", syms.join("\n"))
-            }
-        }
-        "read_symbol" => {
-            let name = args["name"].as_str().unwrap_or("");
-            let file_hint = args["file"].as_str().unwrap_or("");
-            read_symbol_impl(name, file_hint, graph)
-        }
-        _ => format!("Unknown planner tool: {}", call.name),
+        "find_symbol" => crate::tools::pie_tool::execute(&args, graph),
+        "read_file" => crate::tools::read::execute(&args)
+            .unwrap_or_else(|e| format!("[read_file error: {e}]")),
+        other => format!("[unknown planner tool: {other}]"),
     }
-}
-
-fn read_symbol_impl(name: &str, file_hint: &str, graph: &ProjectGraph) -> String {
-    let files = graph.by_name.get(name);
-    let matches = match files {
-        None => return format!("Symbol '{name}' not found in graph index"),
-        Some(v) if v.is_empty() => return format!("Symbol '{name}' not found"),
-        Some(v) => v,
-    };
-
-    // Pick file: use hint if it matches, else use sole match, else ambiguous
-    let file: &str = if !file_hint.is_empty() && matches.contains(&file_hint.to_string()) {
-        file_hint
-    } else if matches.len() == 1 {
-        &matches[0]
-    } else {
-        // Ambiguous — return structural summary without a disk read
-        let locations: Vec<String> = matches
-            .iter()
-            .map(|f| {
-                let line = graph
-                    .symbols
-                    .iter()
-                    .find(|s| s.name == name && &s.file == f)
-                    .map(|s| s.line)
-                    .unwrap_or(0);
-                format!("  {f}  (line {line})")
-            })
-            .collect();
-        return format!(
-            "'{name}' is defined in multiple files — provide 'file' hint:\n{}",
-            locations.join("\n")
-        );
-    };
-
-    // Find the symbol's start line
-    let sym_line = graph
-        .symbols
-        .iter()
-        .find(|s| s.name == name && s.file == file)
-        .map(|s| s.line)
-        .unwrap_or(1);
-
-    // Read ~35 lines starting 2 lines before the symbol
-    let Ok(content) = std::fs::read_to_string(file) else {
-        return format!("Could not read {file}");
-    };
-    let lines: Vec<&str> = content.lines().collect();
-    let start = sym_line.saturating_sub(1).saturating_sub(2);
-    let end = (start + 35).min(lines.len());
-    let excerpt: String = lines[start..end]
-        .iter()
-        .enumerate()
-        .map(|(i, l)| format!("{:4}: {l}", start + i + 1))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("// {file} (lines {}–{})\n{}", start + 1, end, excerpt)
-}
-
-/// Simple keyword-to-cluster matching for Phase 2.
-/// Returns cluster names whose name appears in the task text.
-fn find_relevant_clusters(task: &str, graph: &ProjectGraph) -> Vec<String> {
-    let task_lower = task.to_lowercase();
-    graph
-        .clusters
-        .iter()
-        .filter(|c| task_lower.contains(&c.name.to_lowercase()))
-        .map(|c| c.name.clone())
-        .collect()
 }
 
 // ── Plan generation ───────────────────────────────────────────────────────────
@@ -444,112 +310,207 @@ fn enrich_step_instructions(steps: &mut Vec<PlanStep>, graph: &ProjectGraph) {
 
 /// Call the model to generate a plan for `task`.
 ///
-/// Phase 2: multi-turn loop with `list_symbols` and `read_symbol` tools.
-/// The planner can explore the graph surgically before committing to a JSON plan.
-/// Loop cap: 6 turns. After exhaustion, a final tool-free call forces JSON output.
+/// Unified loop: one system prompt, model explores freely with find_symbol + read_file,
+/// then outputs JSON when done. No phase switch — avoids model confusion from a
+/// mid-conversation system-prompt change (the root cause of XML tool call fallback).
+///
+/// When the model stops calling tools:
+///   - If its output is parseable JSON → that IS the plan, done.
+///   - If it's prose (exploration notes) → push "now output JSON" and loop once more
+///     with no tools so the model can commit.
 pub async fn generate_plan(
     task: &str,
     client: &Client,
     project: &str,
-    context_files: &[String], // paths hinted by the user — no content, planner uses read_symbol if needed
+    context_files: &[String],
     graph: &ProjectGraph,
     narrative: Option<&crate::narrative::ProjectNarrative>,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
     on_chunk: impl Fn(&str) + Send + Sync + 'static,
 ) -> Result<Plan> {
-    // Build the initial user message
-    let mut user_content = String::new();
+    let task_start = std::time::Instant::now();
+    let mut total_input: u32 = 0;
+    let mut total_output: u32 = 0;
+    let mut tool_call_count: usize = 0;
 
-    // Inject narrative-enriched context if available, else fall back to graph section
+    // ── PIE injection (same as agent mode) ────────────────────────────────────
+    let mut messages: Vec<Message> = Vec::new();
     if let Some(n) = narrative {
-        if !n.architecture_summary.is_empty() {
-            let relevant = find_relevant_clusters(task, graph);
-            let relevant_refs: Vec<&str> = relevant.iter().map(|s| s.as_str()).collect();
-            // Find relevant past tasks by file overlap with relevant clusters' entry files
-            let candidate_files: Vec<String> = graph.clusters.iter()
-                .filter(|c| relevant_refs.contains(&c.name.as_str()))
-                .flat_map(|c| c.entry_files.iter().cloned())
-                .collect();
-            let recent_tasks = crate::task_memory::find_relevant(&candidate_files, 3);
-            let ctx = n.to_context_package(graph, &relevant_refs, 8, &recent_tasks);
-            user_content.push_str(&ctx);
-            user_content.push('\n');
-        } else if let Some(index_section) = graph.to_prompt_section(8) {
-            user_content.push_str(&index_section);
-            user_content.push('\n');
+        messages.extend(crate::agent::pie_injection_messages(graph, n));
+    } else if let Some(section) = graph.to_prompt_section(8) {
+        messages.push(Message {
+            role: "user".to_string(),
+            content: MessageContent::Text(section),
+            tool_calls: vec![],
+        });
+    }
+
+    // Initial task message — always inject cluster→file map from graph so the model
+    // knows every file in the project without needing find_symbol for discovery.
+    // This is the key orientation advantage agent mode has: it arrives knowing
+    // which files live in which cluster before making a single tool call.
+    let mut task_content = String::new();
+    if !graph.clusters.is_empty() {
+        task_content.push_str("## Project files by cluster\n");
+        for cluster in &graph.clusters {
+            let file_list: Vec<&str> = cluster.files.iter().map(|f| f.as_str()).collect();
+            task_content.push_str(&format!("- **{}**: {}\n", cluster.name, file_list.join(", ")));
         }
-    } else if let Some(index_section) = graph.to_prompt_section(8) {
-        user_content.push_str(&index_section);
-        user_content.push('\n');
+        task_content.push('\n');
     }
 
     if !context_files.is_empty() {
-        user_content.push_str("The following files are attached:\n\n");
-        user_content.push_str("Relevant files (use read_symbol or list_symbols if you need content):\n");
+        task_content.push_str("Attached files with their symbols:\n");
         for path in context_files {
-            user_content.push_str(&format!("- {path}\n"));
+            task_content.push_str(&format!("\n{path}:\n"));
+            let mut syms: Vec<&crate::index::Symbol> = graph.symbols.iter()
+                .filter(|s| &s.file == path)
+                .collect();
+            syms.sort_by_key(|s| s.line);
+            if syms.is_empty() {
+                task_content.push_str("  (no indexed symbols)\n");
+            } else {
+                for s in syms.iter().take(20) {
+                    let range = if s.end_line > s.line {
+                        format!("lines {}–{}", s.line, s.end_line)
+                    } else {
+                        format!("line {}", s.line)
+                    };
+                    let sig = s.signature.as_deref()
+                        .map(|sig| format!(" — {}", &sig[..sig.len().min(60)]))
+                        .unwrap_or_default();
+                    task_content.push_str(&format!(
+                        "  {} {} ({range}){sig}\n",
+                        s.kind.label(), s.name
+                    ));
+                }
+                if syms.len() > 20 {
+                    task_content.push_str(&format!("  … {} more symbols\n", syms.len() - 20));
+                }
+            }
         }
-        user_content.push('\n');
+        task_content.push('\n');
     }
-
-    user_content.push_str(&format!("Generate a plan to accomplish this task:\n\n{task}"));
-
-    let tools = planner_tools();
-    let mut messages: Vec<Message> = vec![Message {
+    task_content.push_str(&format!("Task: {task}"));
+    messages.push(Message {
         role: "user".to_string(),
-        content: MessageContent::Text(user_content),
+        content: MessageContent::Text(task_content),
         tool_calls: vec![],
-    }];
+    });
 
-    // Multi-turn tool loop — planner can call list_symbols / read_symbol
-    const MAX_PLANNER_TURNS: usize = 6;
-    let mut final_text: Option<String> = None;
+    // ── Unified exploration + output loop ─────────────────────────────────────
+    let tools = planner_tools();
+    const MAX_TURNS: usize = 20;
+    let mut output_mode = false; // true = no tools, model must output JSON this turn
+    let mut json_text_raw = String::new();
 
-    for _ in 0..MAX_PLANNER_TURNS {
+    for _ in 0..MAX_TURNS {
+        let current_tools: &[Tool] = if output_mode { &[] } else { &tools };
         let resp = client
-            .chat(PLAN_SYSTEM_PROMPT, &messages, &tools, &on_chunk)
+            .chat(PLANNER_PROMPT, &messages, current_tools, &on_chunk)
             .await?;
 
+        total_input += resp.input_tokens;
+        total_output += resp.output_tokens;
+
+        if resp.input_tokens > 0 || resp.output_tokens > 0 {
+            let _ = ui_tx.send(UiEvent::TokenStats {
+                _input: resp.input_tokens,
+                _output: resp.output_tokens,
+                total_input,
+                total_output,
+                tool_calls: tool_call_count,
+            });
+        }
+
+        messages.push(Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Text(resp.text.clone()),
+            tool_calls: resp.tool_calls.clone(),
+        });
+
         if resp.tool_calls.is_empty() {
-            // Detect XML <invoke> syntax — same corrective approach as agent mode.
-            if resp.text.contains("<invoke") {
-                messages.push(Message {
-                    role: "assistant".to_string(),
-                    content: MessageContent::Text(resp.text),
-                    tool_calls: vec![],
-                });
+            // XML tool call syntax (some models use proprietary formats)
+            if resp.text.contains("<invoke") && resp.text.contains("</invoke>") {
                 messages.push(Message {
                     role: "user".to_string(),
                     content: MessageContent::Text(
-                        "You used XML <invoke> tool syntax instead of JSON tool calls. \
-                         Use the JSON tool_calls format provided in the API — do not emit \
-                         XML. Retry your intended action now using the correct format."
+                        "Use the JSON tool_calls format — do not emit XML. \
+                         Call find_symbol or read_file using the API tool_calls mechanism."
                             .to_string(),
                     ),
                     tool_calls: vec![],
                 });
                 continue;
             }
-            // Model produced the plan JSON directly — done
-            final_text = Some(resp.text);
-            break;
+
+            // Try to parse as JSON plan — if it works, we're done
+            if extract_json(&resp.text).is_some() {
+                json_text_raw = resp.text;
+                break;
+            }
+
+            if output_mode {
+                // Already asked for JSON and still didn't get it
+                return Err(anyhow::anyhow!(
+                    "Plan parse error: model was asked to output JSON but did not.\n\nModel response:\n{}",
+                    resp.text
+                ));
+            }
+
+            // Model output prose (exploration notes) — ask for JSON now
+            messages.push(Message {
+                role: "user".to_string(),
+                content: MessageContent::Text(
+                    "You have finished exploring. Now output the JSON plan.".to_string(),
+                ),
+                tool_calls: vec![],
+            });
+            output_mode = true;
+            continue;
         }
 
-        // Execute tool calls in-process (graph lookups + disk reads)
-        let tool_results: Vec<ContentPart> = resp
-            .tool_calls
-            .iter()
-            .map(|c| ContentPart::ToolResult {
-                tool_use_id: c.id.clone(),
-                content: execute_planner_tool(c, graph),
-            })
-            .collect();
+        // Execute tool calls — emit ToolCall/ToolResult events for TUI visibility
+        let mut tool_results: Vec<ContentPart> = Vec::new();
+        for tc in &resp.tool_calls {
+            let args: serde_json::Value =
+                serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+            let args_summary = match tc.name.as_str() {
+                "find_symbol" => args["name"].as_str().unwrap_or("?").to_string(),
+                "read_file" => {
+                    let path = args["path"].as_str().unwrap_or("?");
+                    if let (Some(s), Some(e)) = (args["line_range"].get(0), args["line_range"].get(1)) {
+                        format!("{path} [{s}–{e}]")
+                    } else {
+                        path.to_string()
+                    }
+                }
+                _ => tc.arguments.chars().take(40).collect(),
+            };
+            let _ = ui_tx.send(UiEvent::ToolCall {
+                name: tc.name.clone(),
+                args_summary: args_summary.clone(),
+            });
 
-        // Append assistant turn (with tool_calls) + tool results turn
-        messages.push(Message {
-            role: "assistant".to_string(),
-            content: MessageContent::Text(resp.text),
-            tool_calls: resp.tool_calls,
+            let result = execute_planner_tool(tc, graph);
+            let result_summary: String = result.lines().next().unwrap_or("").chars().take(80).collect();
+            let _ = ui_tx.send(UiEvent::ToolResult { summary: result_summary });
+
+            tool_results.push(ContentPart::ToolResult {
+                tool_use_id: tc.id.clone(),
+                content: result,
+            });
+            tool_call_count += 1;
+        }
+
+        let _ = ui_tx.send(UiEvent::TokenStats {
+            _input: 0,
+            _output: 0,
+            total_input,
+            total_output,
+            tool_calls: tool_call_count,
         });
+
         messages.push(Message {
             role: "user".to_string(),
             content: MessageContent::Parts(tool_results),
@@ -557,16 +518,18 @@ pub async fn generate_plan(
         });
     }
 
-    // If loop exhausted without a plan, force a plain response with no tools
-    let json_text_raw = match final_text {
-        Some(t) => t,
-        None => {
-            let resp = client
-                .chat(PLAN_SYSTEM_PROMPT, &messages, &[], &on_chunk)
-                .await?;
-            resp.text
-        }
-    };
+    if json_text_raw.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Plan generation exhausted {MAX_TURNS} turns without producing a plan. \
+             Try simplifying the task or using a different model."
+        ));
+    }
+
+    let elapsed = task_start.elapsed().as_secs() as u32;
+    let _ = ui_tx.send(UiEvent::SystemMsg(format!(
+        "⚙ plan generated — {tool_call_count} explore calls · {}→+{} tokens · {elapsed}s",
+        total_input, total_output
+    )));
 
     // ── Parse JSON response ────────────────────────────────────────────────────
     let json_text_raw = json_text_raw.trim();

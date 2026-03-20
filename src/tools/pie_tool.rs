@@ -88,6 +88,11 @@ pub fn execute(args: &Value, graph: &ProjectGraph) -> String {
         .map(|f| format!("  {f} ({} lines)", graph.file_lines[f]))
         .collect();
 
+    // File match with no ambiguous symbol hits → clean file response (same as dot-query)
+    if !file_matches.is_empty() && sym_partial.is_empty() {
+        return find_file(name, graph);
+    }
+
     if !sym_partial.is_empty() || !file_matches.is_empty() {
         let mut out = format!("'{name}' not found as exact symbol.");
         if !file_matches.is_empty() {
@@ -220,10 +225,14 @@ pub fn build_compact_summary(graph: &ProjectGraph, narrative: &ProjectNarrative)
             } else {
                 format!(" — {summary}")
             };
+            // List file names so models can navigate directly without a discovery scan
+            let file_names: Vec<&str> = cluster.files.iter()
+                .filter_map(|f| std::path::Path::new(f).file_name()?.to_str())
+                .collect();
             out.push_str(&format!(
-                "- **{}** ({} files){}\n",
+                "- **{}** [{}]{}\n",
                 cluster.name,
-                cluster.files.len(),
+                file_names.join(", "),
                 summary_part
             ));
         }
