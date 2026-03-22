@@ -191,12 +191,16 @@ const PLANNER_PROMPT: &str = r#"You are PareCode, a coding assistant. Your job i
 
 ORIENTATION: The project index and context file symbols are pre-loaded in your context. You already have file names, cluster membership, and (for attached files) exact symbol line numbers. Use them.
 
+TOOL ORDER — follow this sequence, do not skip steps:
+1. find_symbol(name="X") — get the file:line for any symbol not already in your context. Zero disk reads.
+2. trace_calls(name="X") — see what X calls and what calls X, with file:line for each. Zero disk reads.
+   Use this to understand call structure BEFORE reading any file body.
+3. read_file(path, line_range=[N,M]) — read a body ONLY when you need to understand exact logic to write the instruction. Struct/enum definitions only if you must — ≤30 lines.
+
 EXPLORATION RULES — STRICTLY ENFORCED:
-- Use find_symbol ONLY to get a file:line anchor for a symbol not already in your context.
-- Do NOT read function bodies. Struct/enum definitions only if you must — ≤30 lines.
-- Maximum 7 tool calls total. Stop as soon as you have file:line refs for everything the plan touches.
 - If a symbol is listed in "Context file symbols" above, you already have its line number — do NOT call find_symbol for it.
-- You do NOT need to trace data flow end-to-end or find exact call sites. Identify the files and approximate function locations — the executor reads full context and handles the details.
+- Use trace_calls before read_file — it shows the full call structure at zero cost.
+- Maximum 10 tool calls total. Stop as soon as you have file:line refs for everything the plan touches.
 
 OUTPUT: When you have all locations, immediately output the JSON plan (no markdown fences, no prose):
 
@@ -268,7 +272,7 @@ fn parse_verification(s: &str) -> Verification {
 /// Exploration tools for the planner — find_symbol + read_file from the shared registry.
 /// Same tools the agent uses, so the model gets the same enriched definitions.
 fn planner_tools() -> Vec<Tool> {
-    [crate::tools::TOOL_FIND_SYMBOL, crate::tools::TOOL_READ_FILE]
+    [crate::tools::TOOL_FIND_SYMBOL, crate::tools::TOOL_TRACE_CALLS, crate::tools::TOOL_READ_FILE]
         .iter()
         .filter_map(|name| crate::tools::get_tool(name))
         .map(|v| Tool {
@@ -284,6 +288,7 @@ fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
         serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
     match call.name.as_str() {
         "find_symbol" => crate::tools::pie_tool::execute(&args, graph),
+        "trace_calls" => crate::tools::pie_tool::trace_calls_execute(&args, graph),
         "read_file" => {
             // read.rs already handles this correctly:
             //   - ranged reads → exact range returned
@@ -364,6 +369,7 @@ pub async fn generate_plan(
     context_files: &[String],
     graph: &ProjectGraph,
     narrative: Option<&crate::narrative::ProjectNarrative>,
+    flow_paths: Option<&crate::flowpaths::FlowPathIndex>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     on_chunk: impl Fn(&str) + Send + Sync + 'static,
 ) -> Result<Plan> {
@@ -372,15 +378,15 @@ pub async fn generate_plan(
     let mut total_output: u32 = 0;
     let mut tool_call_count: usize = 0;
 
-    let mut messages: Vec<Message> = Vec::new();
-    messages.extend(crate::pie::pie_injection_messages(task, graph, narrative, context_files));
+    // ── PIE context assembly — same path as run_tui ───────────────────────────
+    let pie_ctx = crate::pie::build_pie_context(task, context_files, graph, narrative, flow_paths);
 
-    // Task message — compact symbol reminder immediately before the task for maximum salience.
-    // The PIE injection has the full symbol map in a synthetic tool result, but models often
-    // ignore it when planning. Repeating the key locations here means the model reads them
-    // at the exact moment it decides what to do first.
-    let focus_files = crate::pie::focus_files_for_task(task, context_files, graph);
-    let mut task_content = crate::pie::build_known_locations(&focus_files, graph);
+    let mut messages: Vec<Message> = Vec::new();
+    messages.extend(pie_ctx.injection_messages);
+
+    // Task message — symbol locations immediately before the task for maximum salience.
+    let focus_files = pie_ctx.focus_files;
+    let mut task_content = pie_ctx.user_prefix;
     task_content.push_str(&format!("Task: {task}"));
     messages.push(Message {
         role: "user".to_string(),
@@ -405,7 +411,7 @@ pub async fn generate_plan(
             messages.push(Message {
                 role: "user".to_string(),
                 content: MessageContent::Text(
-                    "Tool budget reached (10/10). Output the JSON plan now using what you \
+                    "Tool budget reached (20/20). Output the JSON plan now using what you \
                      have found. Approximate locations are fine — the executor reads full \
                      context. Do NOT explore further.".to_string(),
                 ),

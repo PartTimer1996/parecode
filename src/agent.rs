@@ -16,7 +16,9 @@ const MAX_TOOL_CALLS: usize = 40;
 
 const SYSTEM_PROMPT_BASE: &str = "You are PareCode, a coding assistant. \
 Complete tasks using the available tools in minimum tool calls. \
-A project index is pre-loaded — use project_index for symbol locations before read_file. \
+A project index is pre-loaded. Tool order for any symbol you need to understand: \
+(1) find_symbol to get file:line, (2) trace_calls to see its call structure, \
+(3) read_file only for the exact body you must modify. \
 When done, stop.";
 
 /// Quick mode — single API call, no multi-turn loop, minimal context.
@@ -152,13 +154,21 @@ pub async fn run_tui(
     let system_prompt = system_prompt.as_str();
     let system_tokens = crate::budget::estimate_tokens(system_prompt);
 
-    let known_locations = if let Some(graph) = &config.project_graph {
-        let focus = crate::pie::focus_files_for_task(task, &attached, graph);
-        crate::pie::build_known_locations(&focus, graph)
-    } else {
-        String::new()
-    };
-    let user_content = format!("{}{}", known_locations, build_user_message(task, &attached));
+    // ── PIE context assembly ─────────────────────────────────────────────────
+    // One call builds everything: injection messages, user-message symbol prefix,
+    // flow-path match flag, and focus files. Consistent with the planner path.
+    let pie_ctx = config.project_graph.as_ref()
+        .map(|graph| crate::pie::build_pie_context(
+            task,
+            &attached,
+            graph,
+            config.project_narrative.as_deref(),
+            config.flow_paths.as_deref(),
+        ))
+        .unwrap_or_else(crate::pie::PieContext::empty);
+
+    let user_content = format!("{}{}", pie_ctx.user_prefix, build_user_message(task, &attached));
+    messages.extend(pie_ctx.injection_messages);
 
     // ── Git checkpoint ────────────────────────────────────────────────────────
     // Create a checkpoint before the task starts. If the tree is dirty, this
@@ -180,18 +190,6 @@ pub async fn run_tui(
     } else {
         None
     };
-
-    // ── PIE injection ────────────────────────────────────────────────────────
-    // Prepend a synthetic project_index tool result so the model sees the
-    // project summary as pre-executed context (high salience, sent once).
-    if let Some(graph) = &config.project_graph {
-        messages.extend(crate::pie::pie_injection_messages(
-            task,
-            graph,
-            config.project_narrative.as_deref(),
-            &attached,
-        ));
-    }
 
     // ── Prior turn pairs ─────────────────────────────────────────────────────
     // Inject the last few turns as lean user/assistant pairs so the model has
@@ -250,7 +248,7 @@ pub async fn run_tui(
         let tools = match &cached_tools {
             Some((key, t)) if *key == tool_key => t.clone(),
             _ => {
-                let mut t = tools::tools_for_turn(turn, has_graph);
+                let mut t = tools::tools_for_turn(turn, has_graph, pie_ctx.path_matched);
                 t.extend(mcp_tool_defs.iter().cloned());
                 cached_tools = Some((tool_key, t.clone()));
                 t
@@ -493,6 +491,8 @@ pub struct AgentConfig {
     pub project_graph: Option<std::sync::Arc<crate::pie::ProjectGraph>>,
     /// Project narrative for PIE injection. None for executor plan steps.
     pub project_narrative: Option<std::sync::Arc<crate::narrative::ProjectNarrative>>,
+    /// Pre-computed flow paths for proactive context delivery. None for executor plan steps.
+    pub flow_paths: Option<std::sync::Arc<crate::flowpaths::FlowPathIndex>>,
 }
 
 // ── Pure prompt-assembly helpers ──────────────────────────────────────────────
@@ -869,8 +869,8 @@ fn strip_cot_from_last_assistant(messages: &mut Vec<Message>) {
 /// valid — compressing them causes re-lookups. Small ranged reads are kept
 /// because the model explicitly requested that window and likely still needs it.
 fn should_protect_tool_result(tool_name: &str, content: &str) -> bool {
-    // find_symbol results — always tiny (~15-80 tokens), always valid navigation data
-    if tool_name == "find_symbol" {
+    // Graph navigation results — tiny, always valid, never need re-fetching
+    if tool_name == "find_symbol" || tool_name == "trace_calls" {
         return true;
     }
     // Ranged read_file results — always retain verbatim.
@@ -1018,11 +1018,17 @@ async fn dispatch_tool(
             }
         }
 
-        // ── find_symbol — in-memory graph lookup, zero disk reads
+        // ── find_symbol / trace_calls — in-memory graph lookups, zero disk reads
         "find_symbol" => {
             match &config.project_graph {
                 Some(g) => tools::pie_tool::execute(args, g),
                 None => "[find_symbol: no project graph available for this session]".to_string(),
+            }
+        }
+        "trace_calls" => {
+            match &config.project_graph {
+                Some(g) => tools::pie_tool::trace_calls_execute(args, g),
+                None => "[trace_calls: no project graph available for this session]".to_string(),
             }
         }
         "ask_user" => tools::ask::execute(args, ui_tx.clone()).await.unwrap_or_else(|e| e),
@@ -1298,6 +1304,7 @@ mod tests {
             git_context: false,
             project_graph: None,
             project_narrative: None,
+            flow_paths: None,
         }
     }
 
@@ -1481,6 +1488,7 @@ mod tests {
             git_context: false,
             project_graph: None,
             project_narrative: None,
+            flow_paths: None,
         }
     }
 

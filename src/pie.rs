@@ -166,7 +166,8 @@ impl ProjectGraph {
         self.call_edges.retain(|k, _| !k.starts_with(&prefix));
     }
 
-    /// (Re)build call edges for all Rust files from scratch.
+    /// (Re)build call edges for all Rust files from scratch, then rebuild
+    /// flow paths from the updated edge data.
     /// Called after a cold build; `by_name` must be fully populated first.
     fn rebuild_call_edges(&mut self, root: &Path) {
         self.call_edges.clear();
@@ -186,9 +187,10 @@ impl ProjectGraph {
             let edges = extractor.extract_file(&content, file, &self.symbols, &self.by_name);
             self.call_edges.extend(edges);
         }
+        crate::flowpaths::FlowPathIndex::build_and_save(self, root);
     }
 
-    /// Update call edges for a set of changed files.
+    /// Update call edges for a set of changed files, then rebuild flow paths.
     /// Must be called after `reindex_files` so `by_name` reflects the new symbols.
     fn update_call_edges(&mut self, changed: &[String], root: &Path) {
         // Drop stale edges for changed files.
@@ -209,6 +211,7 @@ impl ProjectGraph {
             let edges = extractor.extract_file(&content, file, &self.symbols, &self.by_name);
             self.call_edges.extend(edges);
         }
+        crate::flowpaths::FlowPathIndex::build_and_save(self, root);
     }
 
     /// Look up all project symbols that call `callee_name`.
@@ -624,29 +627,87 @@ fn append_gitignore_if_needed(root: &Path) {
 }
 
 
-// ── PIE injection ─────────────────────────────────────────────────────────────
+// ── PIE context assembly ──────────────────────────────────────────────────────
 
-/// Synthetic tool call ID for the session-start PIE injection.
-/// Must match the tool_use_id in the ToolResult below.
+/// All PIE context assembled for one agent or planner call.
+pub struct PieContext {
+    /// Synthetic assistant→tool_result pair prepended to the message history.
+    pub injection_messages: Vec<Message>,
+    /// Symbol map to prepend to the user task message (known file:line locations).
+    pub user_prefix: String,
+    /// True when a clear flow-path match was found — used to suppress find_symbol
+    /// on turn 1 since the relevant code is already in the injection.
+    pub path_matched: bool,
+    /// Focus files derived from task keywords + attached files.
+    /// Kept for callers that need per-turn location reminders (e.g. planner loop).
+    pub focus_files: Vec<String>,
+}
 
+impl PieContext {
+    pub fn empty() -> Self {
+        Self {
+            injection_messages: vec![],
+            user_prefix: String::new(),
+            path_matched: false,
+            focus_files: vec![],
+        }
+    }
+}
 
-/// Build a synthetic assistant→tool_result message pair that injects a compact
-/// PIE summary into the conversation history before the user task.
+/// Single entry point for all PIE context assembly.
 ///
-/// The model sees this as a tool that already ran — higher salience than system
-/// prompt text, sent once (not repeated every turn).
+/// Given a task and project state, returns everything needed to set up a
+/// model call: the injection messages, the user-message prefix, a flag for
+/// tool suppression, and the focus file list for per-turn reminders.
 ///
-/// Returns empty vec when graph/narrative are unavailable.
-pub fn pie_injection_messages(
+/// Both `run_tui` (agent.rs) and `generate_plan` (plan.rs) call this so
+/// context quality is identical and tuning happens in one place.
+pub fn build_pie_context(
     task: &str,
-    graph: &crate::pie::ProjectGraph,
+    attached: &[String],
+    graph: &ProjectGraph,
     narrative: Option<&crate::narrative::ProjectNarrative>,
-    attached_files: &[String],
+    flow_paths: Option<&crate::flowpaths::FlowPathIndex>,
+) -> PieContext {
+    // Flow path match — check before building messages so we can branch on it.
+    let matched_path = flow_paths.and_then(|fp| {
+        match fp.match_task(task, attached) {
+            crate::flowpaths::PathMatch::Clear(i) => fp.paths.get(i),
+            _ => None,
+        }
+    });
+    let path_matched = matched_path.is_some();
+
+    let injection_messages = pie_injection_messages(graph, narrative, matched_path);
+
+    let focus_files = focus_files_for_task(task, attached, graph);
+    let user_prefix = build_known_locations(&focus_files, graph);
+
+    PieContext { injection_messages, user_prefix, path_matched, focus_files }
+}
+
+/// Build the synthetic assistant→tool_result injection pair.
+/// Private — callers should use `build_pie_context` instead.
+fn pie_injection_messages(
+    graph: &ProjectGraph,
+    narrative: Option<&crate::narrative::ProjectNarrative>,
+    matched_path: Option<&crate::flowpaths::FlowPath>,
 ) -> Vec<Message> {
     const PIE_TOOL_CALL_ID: &str = "pie_ctx_0";
     let default_narrative = crate::narrative::ProjectNarrative::default();
     let narrative = narrative.unwrap_or(&default_narrative);
-    let summary = crate::tools::pie_tool::build_compact_summary(graph, narrative);
+
+    // When a flow path clearly matches, inject the actual call chain code so the
+    // model arrives with the relevant functions already in context.
+    let content = if let Some(path) = matched_path {
+        let root = std::path::Path::new(".");
+        let path_ctx = crate::flowpaths::build_path_context(path, graph, root);
+        let summary = crate::tools::pie_tool::build_compact_summary(graph, narrative);
+        format!("{}\n---\n{}", path_ctx, summary)
+    } else {
+        crate::tools::pie_tool::build_compact_summary(graph, narrative)
+    };
+
     vec![
         Message {
             role: "assistant".to_string(),
@@ -661,7 +722,7 @@ pub fn pie_injection_messages(
             role: "user".to_string(),
             content: MessageContent::Parts(vec![ContentPart::ToolResult {
                 tool_use_id: PIE_TOOL_CALL_ID.to_string(),
-                content: summary,
+                content,
             }]),
             tool_calls: vec![],
         },
@@ -727,8 +788,9 @@ fn anchor_files_from_task(task: &str, context_files: &[String], graph: &ProjectG
 /// Build a "Known locations" block for the task message.
 ///
 /// Lists every fn/struct/enum/trait symbol from focus files with start:end line and
-/// the exact read_file invocation the model can copy verbatim — placed immediately
-/// before "Task:" in both agent and plan mode for maximum attention.
+/// Symbol map placed immediately before "Task:" in both agent and plan mode.
+/// Lists file:line for every symbol in the focused files — gives the model
+/// precise anchors without inviting unnecessary reads.
 pub fn build_known_locations(focus_files: &[String], graph: &ProjectGraph) -> String {
     use crate::index::SymbolKind;
     let mut lines: Vec<String> = Vec::new();
@@ -744,13 +806,12 @@ pub fn build_known_locations(focus_files: &[String], graph: &ProjectGraph) -> St
         for s in syms.iter().take(20) {
             if s.end_line > s.line {
                 lines.push(format!(
-                    "  {} {} → {}:{}-{}  →  read_file(path=\"{}\", line_range=[{}, {}])",
-                    s.kind.label(), s.name, path, s.line, s.end_line,
-                    path, s.line, s.end_line
+                    "  {} {} — {}:{}-{}",
+                    s.kind.label(), s.name, path, s.line, s.end_line
                 ));
             } else {
                 lines.push(format!(
-                    "  {} {} → {}:{}",
+                    "  {} {} — {}:{}",
                     s.kind.label(), s.name, path, s.line
                 ));
             }
@@ -763,7 +824,7 @@ pub fn build_known_locations(focus_files: &[String], graph: &ProjectGraph) -> St
         return String::new();
     }
     format!(
-        "Known locations — do NOT call find_symbol for these:\n{}\n\n",
+        "Known locations — use find_symbol/trace_calls; read_file only to modify:\n{}\n\n",
         lines.join("\n")
     )
 }

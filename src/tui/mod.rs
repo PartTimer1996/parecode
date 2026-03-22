@@ -493,6 +493,9 @@ pub struct AppState {
     /// PIE Phase 2 narrative — architecture summary + cluster summaries + conventions.
     /// Generated once on cold startup via one model call; warm runs load instantly from disk.
     pub project_narrative: Option<crate::narrative::ProjectNarrative>,
+    /// PIE Phase 3 flow paths — pre-computed call chains for proactive context delivery.
+    /// Loaded from `.parecode/paths.json` after graph is ready. None before first index build.
+    pub flow_paths: Option<crate::flowpaths::FlowPathIndex>,
     /// PIE Phase 3 context weights — tracks which files are useful vs wasted per task.
     pub context_weights: crate::context_weights::ContextWeights,
     /// File read cache — persists across tasks in the same session so repeat reads
@@ -574,6 +577,7 @@ impl AppState {
             hook_wizard: None,
             project_graph: None,     // populated during splash in event_loop
             project_narrative: None, // populated during splash in event_loop
+            flow_paths: None,        // loaded from .parecode/paths.json after graph ready
             context_weights: crate::context_weights::ContextWeights::load(),
             file_cache: std::sync::Arc::new(tokio::sync::Mutex::new(crate::cache::FileCache::default())),
         }
@@ -1241,6 +1245,9 @@ async fn event_loop(
         };
 
         state.project_narrative = narrative;
+        // Load pre-built flow paths (zero cost — instant JSON read).
+        // Built by rebuild_call_edges whenever graph is refreshed.
+        state.flow_paths = crate::flowpaths::FlowPathIndex::load(std::path::Path::new("."));
         state.project_graph = Some(graph);
     }
 
@@ -3021,6 +3028,7 @@ fn launch_agent(
         git_context: resolved.git_context,
         project_graph: state.project_graph.as_ref().map(|g| std::sync::Arc::new(g.clone())),
         project_narrative: state.project_narrative.as_ref().map(|n| std::sync::Arc::new(n.clone())),
+        flow_paths: state.flow_paths.as_ref().map(|fp| std::sync::Arc::new(fp.clone())),
     };
 
     let attached: Vec<String> = state.attached_files
@@ -3101,6 +3109,7 @@ fn launch_quick(
         git_context: false,
         project_graph: state.project_graph.as_ref().map(|g| std::sync::Arc::new(g.clone())),
         project_narrative: state.project_narrative.as_ref().map(|n| std::sync::Arc::new(n.clone())),
+        flow_paths: None, // quick mode: single shot, no path preloading
     };
 
     state.collecting_response.clear();
@@ -3173,6 +3182,7 @@ fn generate_and_show_plan(
         crate::pie::ProjectGraph::build_fresh(std::path::Path::new("."), 500)
     });
     let narrative = state.project_narrative.clone();
+    let flow_paths = state.flow_paths.clone();
 
     tokio::spawn(async move {
         let tx_plan = ui_tx.clone();
@@ -3180,7 +3190,7 @@ fn generate_and_show_plan(
         let on_chunk = move |chunk: &str| {
             let _ = tx_chunk.send(UiEvent::ThinkingChunk(chunk.to_string()));
         };
-        match plan::generate_plan(&task, &client, &project, &context_files, &graph, narrative.as_ref(), tx_plan, on_chunk).await {
+        match plan::generate_plan(&task, &client, &project, &context_files, &graph, narrative.as_ref(), flow_paths.as_ref(), tx_plan, on_chunk).await {
             Ok(generated_plan) => {
                 // Save plan to disk: JSON for machine use, Markdown for human reading
                 let _ = plan::save_plan(&generated_plan);
@@ -3227,6 +3237,7 @@ fn launch_plan(
         git_context: resolved.git_context,
         project_graph: None,     // executor steps have pre-digested instructions — no graph needed
         project_narrative: None,
+        flow_paths: None,
     };
 
     tokio::spawn(async move {

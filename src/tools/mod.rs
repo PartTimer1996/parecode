@@ -21,6 +21,7 @@ pub const TOOL_PATCH_FILE: &str = "patch_file";
 pub const TOOL_BASH: &str = "bash";
 pub const TOOL_ASK_USER: &str = "ask_user";
 pub const TOOL_FIND_SYMBOL: &str = "find_symbol";
+pub const TOOL_TRACE_CALLS: &str = "trace_calls";
 
 // Turn thresholds for phase-adaptive tool selection
 const TURN_EXPLORATION_END: usize = 1;
@@ -30,6 +31,7 @@ const TURN_MUTATION_START: usize = 2;
 pub fn all_tool_names() -> &'static [&'static str] {
     &[
         TOOL_FIND_SYMBOL,
+        TOOL_TRACE_CALLS,
         TOOL_READ_FILE,
         TOOL_WRITE_FILE,
         TOOL_EDIT_FILE,
@@ -59,6 +61,7 @@ impl Default for TurnThresholds {
 pub fn get_tool(name: &str) -> Option<Value> {
     match name {
         TOOL_FIND_SYMBOL => Some(pie_tool::definition()),
+        TOOL_TRACE_CALLS => Some(pie_tool::trace_calls_definition()),
         TOOL_READ_FILE => Some(read::definition()),
         TOOL_WRITE_FILE => Some(write::definition()),
         TOOL_EDIT_FILE => Some(edit::definition()),
@@ -79,22 +82,28 @@ pub fn all_definitions() -> Vec<Tool> {
 
 /// Phase-adaptive tool selection — only send tools relevant to the current turn.
 ///
-/// When `has_graph` is true, `project_index` leads the list (models prefer earlier tools)
-/// and `list_files` is suppressed on turn 1 (graph already covers structure).
+/// When `has_graph` is true, `find_symbol` leads the list (models prefer earlier tools).
+/// When `path_matched` is true on turn 1, `find_symbol` is suppressed — the path context
+/// already contains everything the model needs, so offering it only wastes tokens.
 ///
-/// Core tools (always): project_index (when graph available), read_file, edit_file, bash, ask_user
-/// Extended (conditional):
-///   - write_file: early turns, only when no graph
-///   - patch_file, recall: later turns (mutation / history retrieval)
+/// Core tools (always): read_file, edit_file, bash, ask_user
+/// Conditional: find_symbol (graph + !path_matched on t1), write_file (early), patch_file (late)
 ///
 /// Saves ~400-800 tokens/turn compared to sending all tools every turn.
-pub fn tools_for_turn(turn: usize, has_graph: bool) -> Vec<Tool> {
+pub fn tools_for_turn(turn: usize, has_graph: bool, path_matched: bool) -> Vec<Tool> {
     let thresholds = TurnThresholds::default();
     let mut t: Vec<Tool> = Vec::new();
 
-    // find_symbol first when available — high salience position
-    if has_graph {
+    // Graph tools first when available — high salience position drives usage.
+    // find_symbol suppressed on turn 1 when a path was pre-loaded (already have locations).
+    // trace_calls always offered when graph exists — it's the missing middle between
+    // find_symbol (where?) and read_file (what does it say?).
+    let suppress_find = path_matched && turn <= 1;
+    if has_graph && !suppress_find {
         t.push(def(pie_tool::definition()));
+    }
+    if has_graph {
+        t.push(def(pie_tool::trace_calls_definition()));
     }
 
     t.push(def(ask::definition()));    // clarify before spiralling into reads
@@ -167,7 +176,8 @@ mod tests {
         assert!(names.contains(&TOOL_BASH));
         assert!(names.contains(&TOOL_ASK_USER));
         assert!(names.contains(&TOOL_FIND_SYMBOL));
-        assert_eq!(names.len(), 7);
+        assert!(names.contains(&TOOL_TRACE_CALLS));
+        assert_eq!(names.len(), 8);
     }
 
     #[test]
@@ -191,7 +201,7 @@ mod tests {
     #[test]
     fn test_all_definitions() {
         let defs = all_definitions();
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 8);
         assert!(defs.iter().any(|d| d.name == TOOL_READ_FILE));
         assert!(defs.iter().any(|d| d.name == TOOL_ASK_USER));
     }
@@ -199,13 +209,13 @@ mod tests {
     #[test]
     fn test_tools_for_turn_logic() {
         // Turn 0: Exploration (includes list and write)
-        let t0 = tools_for_turn(0, false);
+        let t0 = tools_for_turn(0, false, false);
         let names0: Vec<_> = t0.iter().map(|d| d.name.as_str()).collect();
         assert!(names0.contains(&TOOL_WRITE_FILE));
         assert!(!names0.contains(&TOOL_PATCH_FILE));
 
         // Turn 2: Mutation (includes patch)
-        let t2 = tools_for_turn(2, false);
+        let t2 = tools_for_turn(2, false, false);
         let names2: Vec<_> = t2.iter().map(|d| d.name.as_str()).collect();
         assert!(names2.contains(&TOOL_PATCH_FILE));
     }

@@ -2,6 +2,7 @@ mod agent;
 mod budget;
 mod cache;
 mod callgraph;
+mod flowpaths;
 mod client;
 mod config;
 mod context_weights;
@@ -219,6 +220,8 @@ async fn run_single_shot(
         git_context: false,
         project_graph: Some(project_graph),
         project_narrative: None,
+        flow_paths: crate::flowpaths::FlowPathIndex::load(std::path::Path::new("."))
+            .map(std::sync::Arc::new),
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<tui::UiEvent>();
@@ -355,6 +358,7 @@ async fn run_single_shot_quick(
         git_context: false,
         project_graph: Some(project_graph),
         project_narrative: None,
+        flow_paths: None, // quick/headless mode: no path preloading
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<tui::UiEvent>();

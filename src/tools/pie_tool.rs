@@ -1,15 +1,22 @@
-/// PIE `find_symbol` tool — locate any symbol by name in the project graph.
+/// PIE graph query tools — `find_symbol` and `trace_calls`.
 ///
-/// The injection pipeline (pie_injection_messages + to_context_package) delivers
-/// cluster/architecture context before the agent starts. This tool fills the one
-/// gap the injection can't cover: cold-start lookup of a symbol by name.
+/// Two distinct questions, two tools:
+///   find_symbol  — WHERE is a symbol defined? (file + line)
+///   trace_calls  — WHAT does it connect to? (call chain, zero disk reads)
 ///
-/// All other project_index kinds (cluster, hotspots, recent_tasks, summary) have
-/// been removed — they are redundant with the pre-delivered injection context.
+/// Both are in-memory graph lookups. The model uses these to orient itself
+/// before reaching for read_file, which costs real tokens.
+use std::collections::HashSet;
+
 use serde_json::Value;
 
 use crate::narrative::ProjectNarrative;
 use crate::pie::{Cluster, ProjectGraph};
+
+// Thresholds matching flowpaths.rs — keep in sync if those change.
+const UTILITY_THRESHOLD: usize = 6; // symbols with this many callers are utilities
+const MAX_AMBIGUITY: usize = 4;     // symbols defined in this many files are trait dispatch
+const MAX_BREADTH: usize = 8;       // max callees shown per node before truncation
 
 pub fn definition() -> Value {
     serde_json::json!({
@@ -46,7 +53,7 @@ pub fn execute(args: &Value, graph: &ProjectGraph) -> String {
         return find_file(name, graph);
     }
 
-    // Exact symbol match — include exact line_range and signature if available
+    // Exact symbol match — include exact line_range, signature, and call neighbourhood
     let matches: Vec<String> = graph.symbols.iter()
         .filter(|s| s.name == name)
         .map(|s| {
@@ -55,17 +62,41 @@ pub fn execute(args: &Value, graph: &ProjectGraph) -> String {
             let sig_part = s.signature.as_deref()
                 .map(|sig| format!("\n    {}: {}", s.kind.label(), sig))
                 .unwrap_or_default();
-            format!(
-                "  {}:{} ({}) → read_file(path=\"{}\", line_range=[{}, {}]){}",
-                s.file, s.line, s.kind.label(), s.file, start, end, sig_part
-            )
+            let mut entry = format!(
+                "  {}:{}-{} ({}){}",
+                s.file, s.line, end, s.kind.label(), sig_part
+            );
+            // Outgoing calls — where does this symbol dispatch to?
+            let key = format!("{}::{}", s.file, s.name);
+            if let Some(edges) = graph.call_edges.get(&key) {
+                if !edges.is_empty() {
+                    let callee_list: Vec<String> = edges.iter().map(|e| {
+                        let loc = graph.symbols.iter()
+                            .find(|sym| sym.name == e.callee && graph.by_name.get(&e.callee).map_or(false, |f| !f.is_empty()))
+                            .map(|sym| format!("({}:{})", sym.file, sym.line))
+                            .unwrap_or_default();
+                        if loc.is_empty() { e.callee.clone() } else { format!("{} {}", e.callee, loc) }
+                    }).collect();
+                    entry.push_str(&format!("\n    calls: {}", callee_list.join(", ")));
+                }
+            }
+            // Incoming callers — who calls this symbol?
+            let callers = graph.callers_of(&s.name);
+            if !callers.is_empty() {
+                let shown: Vec<&str> = callers.iter().take(5).copied().collect();
+                entry.push_str(&format!("\n    called by: {}", shown.join(", ")));
+                if callers.len() > 5 {
+                    entry.push_str(&format!(" (+{})", callers.len() - 5));
+                }
+            }
+            entry
         })
         .collect();
 
     if !matches.is_empty() {
         return format!(
-            "'{}' defined at:\n{}\nUse the EXACT line_range shown — it covers the complete body.",
-            name, matches.join("\n")
+            "'{}' defined at:\n{}\nCall trace_calls(name=\"{}\") to see call structure before reading.",
+            name, matches.join("\n"), name
         );
     }
 
@@ -175,6 +206,192 @@ fn find_file(name: &str, graph: &ProjectGraph) -> String {
     }
 
     format!("File '{name}' not found in project index.")
+}
+
+// ── trace_calls ───────────────────────────────────────────────────────────────
+
+pub fn trace_calls_definition() -> Value {
+    serde_json::json!({
+        "name": "trace_calls",
+        "description": "Explore call chains in the project graph — zero disk reads.\n\
+                        Call this BEFORE read_file to understand structure: what a \
+                        function calls, or what calls it. Returns a call tree with \
+                        file:line for each symbol. Use read_file only after you have \
+                        identified the exact symbol to modify.\n\n\
+                        direction \"calls\": outgoing calls (default) — what does X dispatch to?\n\
+                        direction \"callers\": who calls X?\n\
+                        direction \"both\": outgoing + incoming\n\
+                        depth: hops to follow (default 2, max 4)",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Symbol name to trace from (e.g. \"run_tui\", \"dispatch_tool\")"
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "Hops to follow for outgoing calls (default 2, max 4)"
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["calls", "callers", "both"],
+                    "description": "Which direction to trace (default: \"calls\")"
+                }
+            },
+            "required": ["name"]
+        }
+    })
+}
+
+pub fn trace_calls_execute(args: &Value, graph: &ProjectGraph) -> String {
+    let name = args["name"].as_str().unwrap_or("").trim();
+    if name.is_empty() {
+        return "Provide name= for trace_calls. Example: trace_calls(name=\"run_tui\")".to_string();
+    }
+
+    let depth = args["depth"].as_u64().unwrap_or(2).min(4) as usize;
+    let direction = args["direction"].as_str().unwrap_or("calls");
+
+    // Find starting symbol(s) — same name may live in multiple files
+    let starts: Vec<&crate::index::Symbol> = graph.symbols.iter()
+        .filter(|s| s.name == name)
+        .collect();
+
+    if starts.is_empty() {
+        return format!(
+            "Symbol '{name}' not found in call graph. \
+             Try find_symbol(name=\"{name}\") for partial matches."
+        );
+    }
+
+    // Pre-build caller counts once — used for utility detection
+    let caller_counts = build_caller_counts(graph);
+
+    let mut out = String::new();
+
+    for (i, start) in starts.iter().enumerate() {
+        if i > 0 { out.push('\n'); }
+
+        let key = format!("{}::{}", start.file, start.name);
+        out.push_str(&format!("{} ({}:{})\n", start.name, start.file, start.line));
+
+        // Outgoing call chain
+        if direction == "calls" || direction == "both" {
+            let mut visited = HashSet::new();
+            visited.insert(key.clone());
+            append_calls(&key, graph, &caller_counts, &mut out, &mut visited, 1, depth, "  ");
+            if graph.call_edges.get(&key).map_or(true, |e| e.is_empty()) {
+                out.push_str("  (no outgoing project-internal calls indexed)\n");
+            }
+        }
+
+        // Incoming callers (always depth-1 — deeper chains aren't useful here)
+        if direction == "callers" || direction == "both" {
+            if direction == "both" { out.push_str("  ←\n"); }
+            let callers = graph.callers_of(name);
+            if callers.is_empty() {
+                out.push_str("  called by: (none — entry point or external)\n");
+            } else {
+                out.push_str("  called by:\n");
+                for caller_key in callers.iter().take(MAX_BREADTH) {
+                    let caller_sym_name = caller_key.split("::").last().unwrap_or(caller_key);
+                    let loc = resolve_loc(caller_key, graph);
+                    out.push_str(&format!("    {caller_sym_name} ({loc})\n"));
+                }
+                if callers.len() > MAX_BREADTH {
+                    out.push_str(&format!(
+                        "    … +{} more\n", callers.len() - MAX_BREADTH
+                    ));
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// Recursively append outgoing call edges as an indented tree.
+fn append_calls(
+    key: &str,
+    graph: &ProjectGraph,
+    caller_counts: &std::collections::HashMap<String, usize>,
+    out: &mut String,
+    visited: &mut HashSet<String>,
+    current_depth: usize,
+    max_depth: usize,
+    indent: &str,
+) {
+    let Some(edges) = graph.call_edges.get(key) else { return };
+    if edges.is_empty() { return }
+
+    let shown = edges.iter().take(MAX_BREADTH);
+    let overflow = edges.len().saturating_sub(MAX_BREADTH);
+
+    for edge in shown {
+        let callee = &edge.callee;
+        let defs = graph.by_name.get(callee).map(|v| v.as_slice()).unwrap_or(&[]);
+
+        // Trait dispatch — don't expand, just note it
+        if defs.len() > MAX_AMBIGUITY {
+            out.push_str(&format!("{indent}→ {callee} [trait — {} impls]\n", defs.len()));
+            continue;
+        }
+
+        // Utility functions — don't expand, note the caller count
+        let incoming = caller_counts.get(callee).copied().unwrap_or(0);
+        if incoming >= UTILITY_THRESHOLD {
+            out.push_str(&format!("{indent}→ {callee} [utility — {incoming} callers]\n"));
+            continue;
+        }
+
+        for file in defs {
+            let callee_key = format!("{}::{}", file, callee);
+            let loc = graph.symbols.iter()
+                .find(|s| s.name == *callee && &s.file == file)
+                .map(|s| format!("{}:{}", s.file, s.line))
+                .unwrap_or_else(|| file.clone());
+
+            if visited.contains(&callee_key) {
+                out.push_str(&format!("{indent}→ {callee} ({loc}) [↩ cycle]\n"));
+                continue;
+            }
+
+            out.push_str(&format!("{indent}→ {callee} ({loc})\n"));
+
+            if current_depth < max_depth {
+                visited.insert(callee_key.clone());
+                append_calls(
+                    &callee_key, graph, caller_counts, out, visited,
+                    current_depth + 1, max_depth,
+                    &format!("{indent}   "),
+                );
+            }
+        }
+    }
+
+    if overflow > 0 {
+        out.push_str(&format!(
+            "{indent}… +{overflow} more (use depth=1 on any symbol above for details)\n"
+        ));
+    }
+}
+
+fn build_caller_counts(graph: &ProjectGraph) -> std::collections::HashMap<String, usize> {
+    let mut counts = std::collections::HashMap::new();
+    for edges in graph.call_edges.values() {
+        for edge in edges {
+            *counts.entry(edge.callee.clone()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn resolve_loc(key: &str, graph: &ProjectGraph) -> String {
+    graph.symbols.iter()
+        .find(|s| format!("{}::{}", s.file, s.name) == key)
+        .map(|s| format!("{}:{}", s.file, s.line))
+        .unwrap_or_else(|| key.to_string())
 }
 
 /// Build a compact PIE summary for session-start injection.
