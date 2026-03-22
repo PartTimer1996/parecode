@@ -191,16 +191,21 @@ const PLANNER_PROMPT: &str = r#"You are PareCode, a coding assistant. Your job i
 
 ORIENTATION: The project index and context file symbols are pre-loaded in your context. You already have file names, cluster membership, and (for attached files) exact symbol line numbers. Use them.
 
-TOOL ORDER — follow this sequence, do not skip steps:
-1. find_symbol(name="X") — get the file:line for any symbol not already in your context. Zero disk reads.
-2. trace_calls(name="X") — see what X calls and what calls X, with file:line for each. Zero disk reads.
-   Use this to understand call structure BEFORE reading any file body.
-3. read_file(path, line_range=[N,M]) — read a body ONLY when you need to understand exact logic to write the instruction. Struct/enum definitions only if you must — ≤30 lines.
+TOOL ORDER — follow this sequence, never skip steps:
+1. find_symbol(name="X") — locate any symbol; returns FULL field/variant list for structs and enums. Zero disk reads.
+   If a field exists in one struct, do NOT assume it is wired everywhere — proceed to step 3.
+2. trace_calls(name="X") — call structure with file:line for each node. Zero disk reads.
+3. check_wiring(field="X") — REQUIRED whenever you find a field somewhere: verifies it exists in ALL structs
+   across the pipeline (config → agent_config → event → ui). The "WITHOUT" list is your plan steps.
+   Call this before concluding any propagation is complete.
+4. read_file(path, line_range=[N,M]) — ONLY for imperative logic you must understand to write the instruction.
+   NEVER read a file to see struct fields — use find_symbol instead.
 
 EXPLORATION RULES — STRICTLY ENFORCED:
 - If a symbol is listed in "Context file symbols" above, you already have its line number — do NOT call find_symbol for it.
-- Use trace_calls before read_file — it shows the full call structure at zero cost.
-- Maximum 10 tool calls total. Stop as soon as you have file:line refs for everything the plan touches.
+- Finding a field in ONE struct is not enough — always call check_wiring to verify the full chain.
+- check_wiring's WITHOUT list = your plan steps. Do not generate steps for structs already in the WITH list.
+- Maximum 12 tool calls total. Stop as soon as you have file:line refs for everything the plan touches.
 
 OUTPUT: When you have all locations, immediately output the JSON plan (no markdown fences, no prose):
 
@@ -272,7 +277,7 @@ fn parse_verification(s: &str) -> Verification {
 /// Exploration tools for the planner — find_symbol + read_file from the shared registry.
 /// Same tools the agent uses, so the model gets the same enriched definitions.
 fn planner_tools() -> Vec<Tool> {
-    [crate::tools::TOOL_FIND_SYMBOL, crate::tools::TOOL_TRACE_CALLS, crate::tools::TOOL_READ_FILE]
+    [crate::tools::TOOL_FIND_SYMBOL, crate::tools::TOOL_TRACE_CALLS, crate::tools::TOOL_CHECK_WIRING, crate::tools::TOOL_READ_FILE]
         .iter()
         .filter_map(|name| crate::tools::get_tool(name))
         .map(|v| Tool {
@@ -289,14 +294,11 @@ fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
     match call.name.as_str() {
         "find_symbol" => crate::tools::pie_tool::execute(&args, graph),
         "trace_calls" => crate::tools::pie_tool::trace_calls_execute(&args, graph),
+        "check_wiring" => crate::tools::pie_tool::check_wiring_execute(&args, graph),
         "read_file" => {
-            // read.rs already handles this correctly:
-            //   - ranged reads → exact range returned
-            //   - full file ≤300 lines → full content
-            //   - full file >300 lines → preamble + symbol index + tail
-            // No cap needed — trust the tool.
-            crate::tools::read::execute(&args)
-                .unwrap_or_else(|e| format!("[read_file error: {e}]"))
+            // smart_read classifies the range: redirects pure type reads to graph data,
+            // augments function body reads with graph overlay, passes targeted reads through.
+            crate::tools::pie_tool::smart_read(&args, graph)
         }
         other => format!("[unknown planner tool: {other}]"),
     }

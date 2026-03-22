@@ -16,9 +16,11 @@ const MAX_TOOL_CALLS: usize = 40;
 
 const SYSTEM_PROMPT_BASE: &str = "You are PareCode, a coding assistant. \
 Complete tasks using the available tools in minimum tool calls. \
-A project index is pre-loaded. Tool order for any symbol you need to understand: \
-(1) find_symbol to get file:line, (2) trace_calls to see its call structure, \
-(3) read_file only for the exact body you must modify. \
+The project index is pre-loaded — the model knows the codebase. Tool order: \
+(1) find_symbol — locate any symbol; returns full field/variant list for structs and enums. \
+(2) trace_calls — call structure, zero disk reads. \
+(3) check_wiring — verify a field exists in ALL structs across the pipeline before concluding it is wired. \
+(4) read_file — only for imperative logic you must modify. \
 When done, stop.";
 
 /// Quick mode — single API call, no multi-turn loop, minimal context.
@@ -870,7 +872,7 @@ fn strip_cot_from_last_assistant(messages: &mut Vec<Message>) {
 /// because the model explicitly requested that window and likely still needs it.
 fn should_protect_tool_result(tool_name: &str, content: &str) -> bool {
     // Graph navigation results — tiny, always valid, never need re-fetching
-    if tool_name == "find_symbol" || tool_name == "trace_calls" {
+    if tool_name == "find_symbol" || tool_name == "trace_calls" || tool_name == "check_wiring" {
         return true;
     }
     // Ranged read_file results — always retain verbatim.
@@ -1029,6 +1031,20 @@ async fn dispatch_tool(
             match &config.project_graph {
                 Some(g) => tools::pie_tool::trace_calls_execute(args, g),
                 None => "[trace_calls: no project graph available for this session]".to_string(),
+            }
+        }
+        "check_wiring" => {
+            match &config.project_graph {
+                Some(g) => tools::pie_tool::check_wiring_execute(args, g),
+                None => "[check_wiring: no project graph available for this session]".to_string(),
+            }
+        }
+        "read_file" => {
+            // Smart read: classify the range and redirect/augment using the graph.
+            // Falls through to normal read when no graph or unindexed range.
+            match &config.project_graph {
+                Some(g) => tools::pie_tool::smart_read(args, g),
+                None => tools::dispatch(name, args).unwrap_or_else(|e| format!("[Tool error: {e}]")),
             }
         }
         "ask_user" => tools::ask::execute(args, ui_tx.clone()).await.unwrap_or_else(|e| e),

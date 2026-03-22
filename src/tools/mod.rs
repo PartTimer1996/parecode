@@ -22,6 +22,7 @@ pub const TOOL_BASH: &str = "bash";
 pub const TOOL_ASK_USER: &str = "ask_user";
 pub const TOOL_FIND_SYMBOL: &str = "find_symbol";
 pub const TOOL_TRACE_CALLS: &str = "trace_calls";
+pub const TOOL_CHECK_WIRING: &str = "check_wiring";
 
 // Turn thresholds for phase-adaptive tool selection
 const TURN_EXPLORATION_END: usize = 1;
@@ -32,6 +33,7 @@ pub fn all_tool_names() -> &'static [&'static str] {
     &[
         TOOL_FIND_SYMBOL,
         TOOL_TRACE_CALLS,
+        TOOL_CHECK_WIRING,
         TOOL_READ_FILE,
         TOOL_WRITE_FILE,
         TOOL_EDIT_FILE,
@@ -62,6 +64,7 @@ pub fn get_tool(name: &str) -> Option<Value> {
     match name {
         TOOL_FIND_SYMBOL => Some(pie_tool::definition()),
         TOOL_TRACE_CALLS => Some(pie_tool::trace_calls_definition()),
+        TOOL_CHECK_WIRING => Some(pie_tool::check_wiring_definition()),
         TOOL_READ_FILE => Some(read::definition()),
         TOOL_WRITE_FILE => Some(write::definition()),
         TOOL_EDIT_FILE => Some(edit::definition()),
@@ -104,6 +107,9 @@ pub fn tools_for_turn(turn: usize, has_graph: bool, path_matched: bool) -> Vec<T
     }
     if has_graph {
         t.push(def(pie_tool::trace_calls_definition()));
+    }
+    if has_graph {
+        t.push(def(pie_tool::check_wiring_definition()));
     }
 
     t.push(def(ask::definition()));    // clarify before spiralling into reads
@@ -177,7 +183,8 @@ mod tests {
         assert!(names.contains(&TOOL_ASK_USER));
         assert!(names.contains(&TOOL_FIND_SYMBOL));
         assert!(names.contains(&TOOL_TRACE_CALLS));
-        assert_eq!(names.len(), 8);
+        assert!(names.contains(&TOOL_CHECK_WIRING));
+        assert_eq!(names.len(), 9);
     }
 
     #[test]
@@ -201,7 +208,7 @@ mod tests {
     #[test]
     fn test_all_definitions() {
         let defs = all_definitions();
-        assert_eq!(defs.len(), 8);
+        assert_eq!(defs.len(), 9);
         assert!(defs.iter().any(|d| d.name == TOOL_READ_FILE));
         assert!(defs.iter().any(|d| d.name == TOOL_ASK_USER));
     }

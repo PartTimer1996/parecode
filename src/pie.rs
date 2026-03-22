@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{client::{ContentPart, Message, MessageContent, ToolCall}, index::{CallEdge, Symbol, SymbolIndex, compute_end_lines, extract_symbols}};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const GRAPH_PATH: &str = ".parecode/project.graph";
 
 
@@ -186,6 +186,15 @@ impl ProjectGraph {
             let Ok(content) = std::fs::read_to_string(&abs) else { continue };
             let edges = extractor.extract_file(&content, file, &self.symbols, &self.by_name);
             self.call_edges.extend(edges);
+            // Enrich struct/enum/trait signatures from the same file parse.
+            let sigs = extractor.extract_signatures(&content);
+            for sym in self.symbols.iter_mut() {
+                if sym.file == *file && !sigs.is_empty() {
+                    if let Some(sig) = sigs.get(&sym.name) {
+                        sym.signature = Some(sig.clone());
+                    }
+                }
+            }
         }
         crate::flowpaths::FlowPathIndex::build_and_save(self, root);
     }
@@ -210,6 +219,15 @@ impl ProjectGraph {
             let Ok(content) = std::fs::read_to_string(&abs) else { continue };
             let edges = extractor.extract_file(&content, file, &self.symbols, &self.by_name);
             self.call_edges.extend(edges);
+            // Enrich struct/enum/trait signatures from the same file parse.
+            let sigs = extractor.extract_signatures(&content);
+            for sym in self.symbols.iter_mut() {
+                if sym.file == *file && !sigs.is_empty() {
+                    if let Some(sig) = sigs.get(&sym.name) {
+                        sym.signature = Some(sig.clone());
+                    }
+                }
+            }
         }
         crate::flowpaths::FlowPathIndex::build_and_save(self, root);
     }

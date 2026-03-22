@@ -10,6 +10,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
+use crate::index::SymbolKind;
 use crate::narrative::ProjectNarrative;
 use crate::pie::{Cluster, ProjectGraph};
 
@@ -135,7 +136,77 @@ pub fn execute(args: &Value, graph: &ProjectGraph) -> String {
         return out;
     }
 
+    // Field-level search — scan struct/enum signatures for the query as a field/variant name
+    let field_matches: Vec<String> = graph.symbols.iter()
+        .filter(|s| matches!(s.kind, SymbolKind::Struct | SymbolKind::Enum))
+        .filter_map(|s| {
+            let sig = s.signature.as_deref()?;
+            find_field_in_sig(sig, name).map(|snippet| {
+                format!("  {snippet}  ← in {} {} ({}:{})", s.kind.label(), s.name, s.file, s.line)
+            })
+        })
+        .take(5)
+        .collect();
+
+    if !field_matches.is_empty() {
+        return format!(
+            "'{name}' not found as a top-level symbol.\nField/variant matches:\n{}",
+            field_matches.join("\n")
+        );
+    }
+
     format!("Symbol or file '{name}' not found in project index.")
+}
+
+/// Search a compact signature string for a field or variant name matching `query`.
+/// Returns the specific field/variant entry (e.g. "cost_per_mtok_input: Option<f64>")
+/// if found at a word boundary. Handles both struct fields (`name: Type`) and enum
+/// variants (`VariantName` or `VariantName { ... }` or `VariantName(...)`).
+fn find_field_in_sig<'a>(sig: &'a str, query: &str) -> Option<&'a str> {
+    if query.len() < 3 { return None; } // avoid noise on short queries
+    let sig_lower = sig.to_lowercase();
+    let q_lower = query.to_lowercase();
+
+    // Try as a struct field name: query immediately followed by ':'
+    let field_pat = format!("{q_lower}:");
+    let mut search = 0;
+    while let Some(rel) = sig_lower[search..].find(&field_pat) {
+        let idx = search + rel;
+        // Word boundary before: must be '{', ' ', or start of string
+        let before_ok = idx == 0
+            || matches!(sig.as_bytes().get(idx.saturating_sub(1)).copied(), Some(b'{') | Some(b' ') | Some(b','));
+        if before_ok {
+            let rest = &sig[idx..];
+            let end = rest.find(|c: char| c == ',' || c == '}').unwrap_or(rest.len());
+            return Some(rest[..end].trim_end_matches(',').trim());
+        }
+        search = idx + 1;
+        if search >= sig_lower.len() { break; }
+    }
+
+    // Try as a variant or tuple field name: word boundary before AND after
+    let mut search = 0;
+    while let Some(rel) = sig_lower[search..].find(&q_lower) {
+        let idx = search + rel;
+        let end_idx = idx + q_lower.len();
+        let before_ok = idx == 0 || {
+            let b = sig.as_bytes()[idx - 1];
+            b == b'{' || b == b' ' || b == b',' || b == b'('
+        };
+        let after_ok = end_idx >= sig.len() || {
+            let b = sig.as_bytes()[end_idx];
+            b == b' ' || b == b'{' || b == b',' || b == b'}' || b == b'(' || b == b')'
+        };
+        if before_ok && after_ok {
+            let rest = &sig[idx..];
+            let end = rest.find(|c: char| c == ',' || c == '}').unwrap_or(rest.len());
+            return Some(rest[..end].trim_end_matches(',').trim());
+        }
+        search = idx + 1;
+        if search >= sig_lower.len() { break; }
+    }
+
+    None
 }
 
 /// Search file_lines for a filename match (used when the query looks like a filename).
@@ -392,6 +463,277 @@ fn resolve_loc(key: &str, graph: &ProjectGraph) -> String {
         .find(|s| format!("{}::{}", s.file, s.name) == key)
         .map(|s| format!("{}:{}", s.file, s.line))
         .unwrap_or_else(|| key.to_string())
+}
+
+pub fn check_wiring_definition() -> Value {
+    serde_json::json!({
+        "name": "check_wiring",
+        "description": "Verify whether a field or concept is propagated through all required structs — zero disk reads.\n\
+                        Scans all struct/enum type definitions for fields matching the query and reports\n\
+                        which types HAVE it and which adjacent types DON'T — the missing list IS your plan.\n\n\
+                        Use this after find_symbol finds a field somewhere to verify the full pipeline:\n\
+                        config → resolved_config → agent_config → event → ui.\n\n\
+                        Optionally provide 'structs' to check specific types by name.\n\
+                        Without 'structs', scans all indexed types and shows cluster-adjacent gaps.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "description": "Field name or keyword to search for (e.g. \"cost_per_mtok\", \"max_tokens\", \"hook\")"
+                },
+                "structs": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional list of struct/enum names to explicitly check (e.g. [\"Profile\", \"AgentConfig\", \"UiEvent\"])"
+                }
+            },
+            "required": ["field"]
+        }
+    })
+}
+
+pub fn check_wiring_execute(args: &Value, graph: &ProjectGraph) -> String {
+    let field = args["field"].as_str().unwrap_or("").trim();
+    if field.is_empty() {
+        return "Provide field= for check_wiring. Example: check_wiring(field=\"cost_per_mtok\")".to_string();
+    }
+
+    let specific: Option<Vec<String>> = args["structs"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
+
+    // All struct/enum symbols that have signatures populated
+    let typed: Vec<&crate::index::Symbol> = graph.symbols.iter()
+        .filter(|s| matches!(s.kind, SymbolKind::Struct | SymbolKind::Enum))
+        .filter(|s| s.signature.is_some())
+        .collect();
+
+    let mut with_field: Vec<String> = Vec::new();
+    let mut without_field: Vec<String> = Vec::new();
+
+    if let Some(ref names) = specific {
+        // Explicit list — check only those, report both with and without
+        for sym in typed.iter().filter(|s| names.iter().any(|n| n.eq_ignore_ascii_case(&s.name))) {
+            let sig = sym.signature.as_deref().unwrap_or("");
+            if let Some(snippet) = find_field_in_sig(sig, field) {
+                with_field.push(format!(
+                    "  {} {} ({}:{}) — {}",
+                    sym.kind.label(), sym.name, sym.file, sym.line, snippet
+                ));
+            } else {
+                without_field.push(format!(
+                    "  {} {} ({}:{}) — [no '{}' field]",
+                    sym.kind.label(), sym.name, sym.file, sym.line, field
+                ));
+            }
+        }
+    } else {
+        // Scan all — collect WITH first, then find cluster-adjacent WITHOUT
+        for sym in &typed {
+            let sig = sym.signature.as_deref().unwrap_or("");
+            if let Some(snippet) = find_field_in_sig(sig, field) {
+                with_field.push(format!(
+                    "  {} {} ({}:{}) — {}",
+                    sym.kind.label(), sym.name, sym.file, sym.line, snippet
+                ));
+            }
+        }
+
+        // Find clusters that contain at least one struct WITH the field
+        let files_with: std::collections::HashSet<&str> = typed.iter()
+            .filter(|s| find_field_in_sig(s.signature.as_deref().unwrap_or(""), field).is_some())
+            .map(|s| s.file.as_str())
+            .collect();
+
+        let relevant_clusters: std::collections::HashSet<&str> = graph.clusters.iter()
+            .filter(|c| c.files.iter().any(|f| files_with.contains(f.as_str())))
+            .map(|c| c.name.as_str())
+            .collect();
+
+        // Structs in those clusters that DON'T have the field
+        for sym in &typed {
+            let sig = sym.signature.as_deref().unwrap_or("");
+            if find_field_in_sig(sig, field).is_some() { continue; }
+
+            let in_relevant = graph.clusters.iter()
+                .filter(|c| relevant_clusters.contains(c.name.as_str()))
+                .any(|c| c.files.contains(&sym.file));
+
+            if in_relevant {
+                // Show first 80 chars of sig so model knows what IS there
+                let sig_preview = if sig.len() > 80 {
+                    format!("{}…", &sig[..80])
+                } else {
+                    sig.to_string()
+                };
+                without_field.push(format!(
+                    "  {} {} ({}:{}) — [no '{}' field]  has: {}",
+                    sym.kind.label(), sym.name, sym.file, sym.line, field, sig_preview
+                ));
+            }
+        }
+    }
+
+    // Build output
+    let mut out = format!("Wiring report for '{field}':\n\n");
+
+    if with_field.is_empty() {
+        out.push_str(&format!(
+            "No structs/enums found with '{}' fields.\n\
+             Try find_symbol(name=\"{}\") to locate it as a top-level symbol.\n",
+            field, field
+        ));
+    } else {
+        out.push_str(&format!(
+            "WITH '{}' ({} found):\n{}\n\n",
+            field, with_field.len(), with_field.join("\n")
+        ));
+    }
+
+    if !without_field.is_empty() {
+        out.push_str(&format!(
+            "WITHOUT '{}' — these likely need it ({} found):\n{}\n\n\
+             Each missing struct above is a step in your plan.",
+            field, without_field.len(), without_field.join("\n")
+        ));
+    } else if !with_field.is_empty() {
+        out.push_str(&format!("All checked types contain '{}' — fully wired.\n", field));
+    }
+
+    out
+}
+
+/// Classify a read_file call and handle it intelligently using the project graph.
+///
+/// Three modes:
+///   Redirect  — range contains only indexed type definitions (struct/enum/trait with signatures).
+///               Returns the graph data instead of reading the file. The model already has
+///               the field list from find_symbol; reading is wasteful.
+///   Augment   — range contains function bodies. Allows the read but prepends a graph
+///               overlay (callers, callees, related type signatures) so one read does the
+///               work of three tool calls.
+///   Pass-through — targeted reads on unindexed ranges (small logic blocks, match arms,
+///               etc.). Clean read, no interception.
+pub fn smart_read(args: &Value, graph: &ProjectGraph) -> String {
+    use crate::index::SymbolKind;
+
+    let path = match args["path"].as_str() {
+        Some(p) if !p.is_empty() => p,
+        _ => return super::read::execute(args).unwrap_or_else(|e| format!("[read_file error: {e}]")),
+    };
+
+    // Only intercept ranged reads — full-file reads pass through (planner already
+    // gets the symbol map for large files from read.rs's own logic).
+    let line_range = args["line_range"].as_array().and_then(|arr| {
+        let s = arr.first()?.as_u64()? as usize;
+        let e = arr.get(1)?.as_u64()? as usize;
+        Some((s, e))
+    });
+    let Some((start, end)) = line_range else {
+        return super::read::execute(args).unwrap_or_else(|e| format!("[read_file error: {e}]"));
+    };
+
+    // Collect symbols whose definition falls within [start, end].
+    // Use a small tolerance (±3 lines) to handle off-by-one line_range estimates.
+    let tolerance = 3usize;
+    let syms_in_range: Vec<&crate::index::Symbol> = graph.symbols.iter()
+        .filter(|s| s.file == path)
+        .filter(|s| {
+            let sym_start = s.line.saturating_sub(tolerance);
+            let sym_end = s.end_line + tolerance;
+            // Symbol overlaps the requested range
+            sym_start <= end && sym_end >= start
+        })
+        .collect();
+
+    let type_syms: Vec<&crate::index::Symbol> = syms_in_range.iter()
+        .filter(|s| matches!(s.kind, SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait))
+        .filter(|s| s.signature.is_some())
+        .copied()
+        .collect();
+
+    let fn_syms: Vec<&crate::index::Symbol> = syms_in_range.iter()
+        .filter(|s| matches!(s.kind, SymbolKind::Function))
+        .copied()
+        .collect();
+
+    // ── REDIRECT: pure indexed type definitions, no functions ─────────────────
+    if !type_syms.is_empty() && fn_syms.is_empty() {
+        let mut out = format!(
+            "[read_file redirected — range {}:{}-{} contains indexed type definitions]\n\
+             Use find_symbol or check_wiring instead. Indexed data:\n\n",
+            path, start, end
+        );
+        for sym in &type_syms {
+            out.push_str(&format!(
+                "{} {} ({}:{})\n  {}\n\n",
+                sym.kind.label(), sym.name, sym.file, sym.line,
+                sym.signature.as_deref().unwrap_or("")
+            ));
+        }
+        out.push_str("To verify propagation across the pipeline: check_wiring(field=\"<field_name>\")");
+        return out;
+    }
+
+    // ── AUGMENT: function bodies — allow read, prepend graph overlay ──────────
+    if !fn_syms.is_empty() {
+        let mut overlay = format!(
+            "[Graph overlay for {}:{}-{}]\n",
+            path, start, end
+        );
+
+        for sym in &fn_syms {
+            let key = format!("{}::{}", sym.file, sym.name);
+            overlay.push_str(&format!("fn {} ({}:{}-{}):\n", sym.name, sym.file, sym.line, sym.end_line));
+
+            // Outgoing calls
+            if let Some(edges) = graph.call_edges.get(&key) {
+                if !edges.is_empty() {
+                    let callees: Vec<String> = edges.iter().take(10).map(|e| {
+                        graph.symbols.iter()
+                            .find(|s| s.name == e.callee)
+                            .map(|s| format!("{} ({}:{})", e.callee, s.file, s.line))
+                            .unwrap_or_else(|| e.callee.clone())
+                    }).collect();
+                    overlay.push_str(&format!("  calls: {}\n", callees.join(", ")));
+                }
+            }
+
+            // Incoming callers
+            let callers = graph.callers_of(&sym.name);
+            if !callers.is_empty() {
+                let shown: Vec<&str> = callers.iter().take(4).copied().collect();
+                let extra = if callers.len() > 4 { format!(" (+{})", callers.len() - 4) } else { String::new() };
+                overlay.push_str(&format!("  called by: {}{}\n", shown.join(", "), extra));
+            }
+        }
+
+        // Key types in the same file — helps the model understand data shapes
+        // without additional find_symbol calls after reading.
+        let file_types: Vec<String> = graph.symbols.iter()
+            .filter(|s| s.file == path)
+            .filter(|s| matches!(s.kind, SymbolKind::Struct | SymbolKind::Enum))
+            .filter(|s| s.signature.is_some())
+            .take(4)
+            .map(|s| format!("  {} {}: {}", s.kind.label(), s.name, s.signature.as_deref().unwrap_or("")))
+            .collect();
+        if !file_types.is_empty() {
+            overlay.push_str("Key types in this file (no find_symbol needed):\n");
+            for t in &file_types {
+                overlay.push_str(&format!("{t}\n"));
+            }
+        }
+
+        overlay.push_str("[/Graph overlay]\n\n");
+
+        let content = super::read::execute(args)
+            .unwrap_or_else(|e| format!("[read_file error: {e}]"));
+        return format!("{overlay}{content}");
+    }
+
+    // ── PASS-THROUGH: unindexed range (targeted logic block) ─────────────────
+    super::read::execute(args).unwrap_or_else(|e| format!("[read_file error: {e}]"))
 }
 
 /// Build a compact PIE summary for session-start injection.
@@ -708,5 +1050,123 @@ mod tests {
         assert!(!summary.contains("## Architecture"));
         assert!(summary.contains("## Clusters"));
         assert!(summary.contains("## Key symbols"));
+    }
+
+    #[test]
+    fn test_find_field_in_sig_struct() {
+        let sig = "{ model: String, cost_per_mtok_input: Option<f64>, cost_per_mtok_output: Option<f64> }";
+        let result = find_field_in_sig(sig, "cost_per_mtok_input");
+        assert_eq!(result, Some("cost_per_mtok_input: Option<f64>"), "got: {result:?}");
+    }
+
+    #[test]
+    fn test_find_field_in_sig_enum_variant() {
+        let sig = "{ TokenStats { input_tokens: u32, output_tokens: u32 }, AgentDone, Message(String) }";
+        let result = find_field_in_sig(sig, "TokenStats");
+        assert!(result.is_some(), "should find TokenStats variant: {result:?}");
+        assert!(result.unwrap().starts_with("TokenStats"), "got: {result:?}");
+    }
+
+    #[test]
+    fn test_find_field_in_sig_no_match() {
+        let sig = "{ model: String, count: u32 }";
+        let result = find_field_in_sig(sig, "cost");
+        assert_eq!(result, None, "should not match partial: {result:?}");
+    }
+
+    #[test]
+    fn test_find_symbol_field_search() {
+        use crate::index::{Symbol, SymbolKind};
+        use std::collections::HashMap;
+        let mut graph = make_graph(); // uses existing make_graph() fixture
+        // Add a struct with a signature
+        graph.symbols.push(Symbol {
+            name: "Profile".to_string(),
+            file: "src/config.rs".to_string(),
+            line: 10,
+            end_line: 20,
+            kind: SymbolKind::Struct,
+            signature: Some("{ model: String, cost_per_mtok_input: Option<f64> }".to_string()),
+        });
+        graph.by_name.entry("Profile".to_string()).or_default().push("src/config.rs".to_string());
+        graph.file_lines.insert("src/config.rs".to_string(), 100);
+
+        let args = serde_json::json!({"name": "cost_per_mtok_input"});
+        let result = execute(&args, &graph);
+        assert!(result.contains("cost_per_mtok_input"), "should find field: {result}");
+        assert!(result.contains("Profile"), "should name containing type: {result}");
+    }
+
+    #[test]
+    fn test_check_wiring_finds_gap() {
+        use crate::index::{Symbol, SymbolKind};
+        let mut graph = make_graph();
+
+        // Profile HAS cost_per_mtok, AgentConfig does NOT
+        graph.symbols.push(Symbol {
+            name: "Profile".to_string(),
+            file: "src/config.rs".to_string(),
+            line: 10, end_line: 20,
+            kind: SymbolKind::Struct,
+            signature: Some("{ model: String, cost_per_mtok_input: Option<f64> }".to_string()),
+        });
+        graph.symbols.push(Symbol {
+            name: "AgentConfig".to_string(),
+            file: "src/agent.rs".to_string(),
+            line: 474, end_line: 503,
+            kind: SymbolKind::Struct,
+            signature: Some("{ client: Client, model: String }".to_string()),
+        });
+        graph.file_lines.insert("src/config.rs".to_string(), 100);
+
+        // Explicit structs check
+        let args = serde_json::json!({
+            "field": "cost_per_mtok",
+            "structs": ["Profile", "AgentConfig"]
+        });
+        let result = check_wiring_execute(&args, &graph);
+        assert!(result.contains("Profile"), "should mention Profile: {result}");
+        assert!(result.contains("AgentConfig"), "should mention AgentConfig: {result}");
+        assert!(result.contains("no 'cost_per_mtok' field"), "should show gap: {result}");
+    }
+
+    #[test]
+    fn test_smart_read_redirects_type_range() {
+        use crate::index::{Symbol, SymbolKind};
+        let mut graph = make_graph();
+        // run_tui is a Function in make_graph (line 42-200) — NOT a type
+        // Add a struct with signature
+        graph.symbols.push(Symbol {
+            name: "Profile".to_string(),
+            file: "src/config.rs".to_string(),
+            line: 10, end_line: 25,
+            kind: SymbolKind::Struct,
+            signature: Some("{ model: String, cost_per_mtok_input: Option<f64> }".to_string()),
+        });
+        graph.file_lines.insert("src/config.rs".to_string(), 100);
+
+        // Request range that covers Profile struct only
+        let args = serde_json::json!({
+            "path": "src/config.rs",
+            "line_range": [10, 25]
+        });
+        let result = smart_read(&args, &graph);
+        assert!(result.contains("redirected"), "should redirect type read: {result}");
+        assert!(result.contains("Profile"), "should include type name: {result}");
+        assert!(result.contains("cost_per_mtok_input"), "should include field: {result}");
+    }
+
+    #[test]
+    fn test_smart_read_passthrough_no_symbols() {
+        let graph = make_graph();
+        // Request a range in a file with no symbols (src/main.rs lines 1-5)
+        let args = serde_json::json!({
+            "path": "src/main.rs",
+            "line_range": [1, 5]
+        });
+        // Should attempt a read (will fail since file doesn't exist in test env, that's fine)
+        let result = smart_read(&args, &graph);
+        // Should NOT say "redirected" — it's a pass-through
+        assert!(!result.contains("redirected"), "should not redirect: {result}");
     }
 }

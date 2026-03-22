@@ -37,6 +37,21 @@ impl CallExtractor {
         Ok(Self { parser })
     }
 
+    /// Extract compact type signatures for all structs, enums, and traits in a file.
+    /// Returns a map: symbol_name → compact definition string.
+    /// Used to enrich Symbol.signature during indexing so find_symbol returns
+    /// full field/variant lists without requiring a file read.
+    pub fn extract_signatures(&mut self, content: &str) -> HashMap<String, String> {
+        let mut result = HashMap::new();
+        let tree = match self.parser.parse(content.as_bytes(), None) {
+            Some(t) => t,
+            None => return result,
+        };
+        let src = content.as_bytes();
+        collect_type_signatures(tree.root_node(), src, &mut result);
+        result
+    }
+
     /// Extract outgoing call edges from one Rust source file.
     ///
     /// # Arguments
@@ -187,6 +202,172 @@ fn find_containing_symbol<'a>(file_syms: &[&'a Symbol], call_line: usize) -> Opt
         .copied()
 }
 
+// ── Type signature extraction ─────────────────────────────────────────────────
+
+fn collect_type_signatures(root: Node, src: &[u8], out: &mut HashMap<String, String>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "struct_item" => {
+                if let Some((name, sig)) = struct_sig(node, src) {
+                    out.insert(name, sig);
+                }
+            }
+            "enum_item" => {
+                if let Some((name, sig)) = enum_sig(node, src) {
+                    out.insert(name, sig);
+                }
+            }
+            "trait_item" => {
+                if let Some((name, sig)) = trait_sig(node, src) {
+                    out.insert(name, sig);
+                }
+            }
+            _ => {}
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+fn find_child_kind<'t>(node: Node<'t>, kind: &str) -> Option<Node<'t>> {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if child.kind() == kind {
+                return Some(child);
+            }
+        }
+    }
+    None
+}
+
+/// Format a list of items as `{ item1, item2, ... }`, truncating at `max_chars`.
+fn format_compact(items: &[String], max_chars: usize) -> String {
+    if items.is_empty() {
+        return "{}".to_string();
+    }
+    let full = format!("{{ {} }}", items.join(", "));
+    if full.len() <= max_chars {
+        return full;
+    }
+    // Build up as many items as fit, leaving room for the truncation note
+    let mut parts: Vec<&str> = Vec::new();
+    let mut len = 4usize; // "{ " + " }"
+    for item in items {
+        let add = if parts.is_empty() { item.len() } else { 2 + item.len() };
+        if len + add + 18 > max_chars { break; }
+        parts.push(item.as_str());
+        len += add;
+    }
+    let remaining = items.len() - parts.len();
+    format!("{{ {}, ... (+{remaining} more) }}", parts.join(", "))
+}
+
+fn struct_sig(node: Node, src: &[u8]) -> Option<(String, String)> {
+    let name = node.child_by_field_name("name")
+        .and_then(|n| n.utf8_text(src).ok())
+        .map(|s| s.to_string())?;
+
+    let body = find_child_kind(node, "field_declaration_list")?;
+
+    let mut fields: Vec<String> = Vec::new();
+    for i in 0..body.child_count() {
+        let child = body.child(i)?;
+        if child.kind() != "field_declaration" { continue; }
+        let field_name = child.child_by_field_name("name")
+            .and_then(|n| n.utf8_text(src).ok())
+            .unwrap_or("?");
+        let field_type = child.child_by_field_name("type")
+            .and_then(|n| n.utf8_text(src).ok())
+            .unwrap_or("?");
+        fields.push(format!("{field_name}: {field_type}"));
+    }
+
+    if fields.is_empty() { return None; }
+    Some((name, format_compact(&fields, 380)))
+}
+
+fn enum_sig(node: Node, src: &[u8]) -> Option<(String, String)> {
+    let name = node.child_by_field_name("name")
+        .and_then(|n| n.utf8_text(src).ok())
+        .map(|s| s.to_string())?;
+
+    let body = find_child_kind(node, "enum_variant_list")?;
+
+    let mut variants: Vec<String> = Vec::new();
+    for i in 0..body.child_count() {
+        let child = body.child(i)?;
+        if child.kind() != "enum_variant" { continue; }
+
+        let vname = child.child_by_field_name("name")
+            .and_then(|n| n.utf8_text(src).ok())
+            .unwrap_or("?");
+
+        if let Some(fields) = find_child_kind(child, "field_declaration_list") {
+            // Struct-like variant: Foo { field: Type, ... }
+            let field_strs: Vec<String> = (0..fields.child_count())
+                .filter_map(|j| fields.child(j))
+                .filter(|n| n.kind() == "field_declaration")
+                .filter_map(|fd| {
+                    let fname = fd.child_by_field_name("name")
+                        .and_then(|n| n.utf8_text(src).ok())?;
+                    let ftype = fd.child_by_field_name("type")
+                        .and_then(|n| n.utf8_text(src).ok())?;
+                    Some(format!("{fname}: {ftype}"))
+                })
+                .collect();
+            if field_strs.is_empty() {
+                variants.push(vname.to_string());
+            } else {
+                variants.push(format!("{vname} {{ {} }}", field_strs.join(", ")));
+            }
+        } else if let Some(tuple) = find_child_kind(child, "ordered_field_declaration_list") {
+            // Tuple-like variant: Foo(T1, T2)
+            let types: Vec<String> = (0..tuple.child_count())
+                .filter_map(|j| tuple.child(j))
+                .filter(|n| !matches!(n.kind(), "(" | ")" | "," | "visibility_modifier"))
+                .filter_map(|n| n.utf8_text(src).ok().map(|s| s.to_string()))
+                .collect();
+            if types.is_empty() {
+                variants.push(vname.to_string());
+            } else {
+                variants.push(format!("{vname}({})", types.join(", ")));
+            }
+        } else {
+            variants.push(vname.to_string());
+        }
+    }
+
+    if variants.is_empty() { return None; }
+    Some((name, format_compact(&variants, 380)))
+}
+
+fn trait_sig(node: Node, src: &[u8]) -> Option<(String, String)> {
+    let name = node.child_by_field_name("name")
+        .and_then(|n| n.utf8_text(src).ok())
+        .map(|s| s.to_string())?;
+
+    let body = find_child_kind(node, "declaration_list")?;
+
+    let mut methods: Vec<String> = Vec::new();
+    for i in 0..body.child_count() {
+        let child = body.child(i)?;
+        if matches!(child.kind(), "function_signature_item" | "function_item") {
+            if let Some(mname) = child.child_by_field_name("name")
+                .and_then(|n| n.utf8_text(src).ok())
+            {
+                methods.push(mname.to_string());
+            }
+        }
+    }
+
+    if methods.is_empty() { return None; }
+    Some((name, format!("trait {{ {} }}", methods.join(", "))))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -328,5 +509,62 @@ fn recurse(n: usize) -> usize {
 
         // Self-recursion should be excluded
         assert!(edges.get("src/a.rs::recurse").map_or(true, |v| v.is_empty()));
+    }
+
+    #[test]
+    fn test_extract_signatures_struct() {
+        let mut ext = CallExtractor::new().unwrap();
+        let src = r#"
+struct Profile {
+    model: String,
+    cost_per_mtok_input: Option<f64>,
+    cost_per_mtok_output: Option<f64>,
+}
+"#;
+        let sigs = ext.extract_signatures(src);
+        let sig = sigs.get("Profile").expect("Profile should be extracted");
+        assert!(sig.contains("model: String"), "got: {sig}");
+        assert!(sig.contains("cost_per_mtok_input: Option<f64>"), "got: {sig}");
+        assert!(sig.contains("cost_per_mtok_output: Option<f64>"), "got: {sig}");
+    }
+
+    #[test]
+    fn test_extract_signatures_enum() {
+        let mut ext = CallExtractor::new().unwrap();
+        let src = r#"
+enum UiEvent {
+    TokenStats { input_tokens: u32, output_tokens: u32 },
+    AgentDone,
+    Message(String),
+}
+"#;
+        let sigs = ext.extract_signatures(src);
+        let sig = sigs.get("UiEvent").expect("UiEvent should be extracted");
+        assert!(sig.contains("TokenStats"), "got: {sig}");
+        assert!(sig.contains("AgentDone"), "got: {sig}");
+        assert!(sig.contains("Message"), "got: {sig}");
+    }
+
+    #[test]
+    fn test_extract_signatures_trait() {
+        let mut ext = CallExtractor::new().unwrap();
+        let src = r#"
+trait Execute {
+    fn execute(&self) -> String;
+    fn definition(&self) -> Value;
+}
+"#;
+        let sigs = ext.extract_signatures(src);
+        let sig = sigs.get("Execute").expect("Execute should be extracted");
+        assert!(sig.contains("execute"), "got: {sig}");
+        assert!(sig.contains("definition"), "got: {sig}");
+    }
+
+    #[test]
+    fn test_format_compact_truncation() {
+        let items: Vec<String> = (0..20).map(|i| format!("field_{i}: SomeLongTypeName")).collect();
+        let result = format_compact(&items, 200);
+        assert!(result.len() <= 210, "should be near max: {}", result.len());
+        assert!(result.contains("more"), "should note truncation: {result}");
     }
 }
