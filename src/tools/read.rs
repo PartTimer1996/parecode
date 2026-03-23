@@ -42,13 +42,12 @@ pub fn format_line(line_num: usize, content: &str) -> String {
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "read_file",
-        "description": "Read a file. Each line: `N [hash] | content`. Hashes are required by edit_file.\n\
+        "description": "Read a section of a file. ALWAYS provide line_range=[start, end] — \
+                        you have the line numbers from orient and the known locations section. \
+                        Full-file reads are blocked when the project is indexed.\n\
                         \n\
-                        ≤300 lines: full file returned.\n\
-                        >300 lines: preamble + symbol index (fn/struct with line numbers) + tail.\n\
-                        → Use the symbol index line number with line_range immediately — no second full read needed.\n\
-                        \n\
-                        HASHES: valid until next edit. After edit_file, use hashes from its return value — prior hashes are stale.",
+                        Each line: `N [hash] | content`. Hashes are required by edit_file.\n\
+                        HASHES: valid until next edit. After edit_file, use hashes from its return value.",
         "parameters": {
             "type": "object",
             "properties": {

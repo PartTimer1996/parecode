@@ -192,20 +192,25 @@ const PLANNER_PROMPT: &str = r#"You are PareCode, a coding assistant. Your job i
 ORIENTATION: The project index and context file symbols are pre-loaded in your context. You already have file names, cluster membership, and (for attached files) exact symbol line numbers. Use them.
 
 TOOL ORDER — follow this sequence, never skip steps:
-1. find_symbol(name="X") — locate any symbol; returns FULL field/variant list for structs and enums. Zero disk reads.
-   If a field exists in one struct, do NOT assume it is wired everywhere — proceed to step 3.
-2. trace_calls(name="X") — call structure with file:line for each node. Zero disk reads.
-3. check_wiring(field="X") — REQUIRED whenever you find a field somewhere: verifies it exists in ALL structs
-   across the pipeline (config → agent_config → event → ui). The "WITHOUT" list is your plan steps.
-   Call this before concluding any propagation is complete.
-4. read_file(path, line_range=[N,M]) — ONLY for imperative logic you must understand to write the instruction.
-   NEVER read a file to see struct fields — use find_symbol instead.
+1. orient(query="task keywords") — ONE call returns all task-relevant structs with signatures,
+   locations, and call connections in pipeline order. Use this first, always.
+2. check_wiring(field="X") — REQUIRED whenever you find a field: verifies full pipeline.
+   WITHOUT list = your plan steps. Call this before concluding any propagation is complete.
+3. read_file(path, line_range=[N,M]) — see READ BUDGET below.
+
+READ BUDGET — strictly enforced:
+- You have at most 3 reads total. Spend them only on function bodies with imperative logic
+  you must quote in a step instruction (e.g. a constructor, a renderer, an event handler).
+- Struct/enum signatures from orient are authoritative — reading a struct wastes your budget.
+- Do NOT re-read a range you already read. Do NOT read speculatively.
+- Always provide line_range (you have line numbers from orient and known locations).
+  Full-file reads are BLOCKED.
 
 EXPLORATION RULES — STRICTLY ENFORCED:
-- If a symbol is listed in "Context file symbols" above, you already have its line number — do NOT call find_symbol for it.
+- If a symbol is listed in "Context file symbols" above, you already have its line number — do NOT call orient for it.
 - Finding a field in ONE struct is not enough — always call check_wiring to verify the full chain.
 - check_wiring's WITHOUT list = your plan steps. Do not generate steps for structs already in the WITH list.
-- Maximum 12 tool calls total. Stop as soon as you have file:line refs for everything the plan touches.
+- Maximum 8 tool calls total. Stop as soon as you have file:line refs for everything the plan touches.
 
 OUTPUT: When you have all locations, immediately output the JSON plan (no markdown fences, no prose):
 
@@ -274,10 +279,10 @@ fn parse_verification(s: &str) -> Verification {
 
 // ── Planner tools ─────────────────────────────────────────────────────────────
 
-/// Exploration tools for the planner — find_symbol + read_file from the shared registry.
+/// Exploration tools for the planner — orient + check_wiring + read_file from the shared registry.
 /// Same tools the agent uses, so the model gets the same enriched definitions.
 fn planner_tools() -> Vec<Tool> {
-    [crate::tools::TOOL_FIND_SYMBOL, crate::tools::TOOL_TRACE_CALLS, crate::tools::TOOL_CHECK_WIRING, crate::tools::TOOL_READ_FILE]
+    [crate::tools::TOOL_ORIENT, crate::tools::TOOL_CHECK_WIRING, crate::tools::TOOL_READ_FILE]
         .iter()
         .filter_map(|name| crate::tools::get_tool(name))
         .map(|v| Tool {
@@ -292,12 +297,23 @@ fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
     let args: serde_json::Value =
         serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
     match call.name.as_str() {
+        "orient" => crate::tools::pie_tool::orient_execute(&args, graph),
         "find_symbol" => crate::tools::pie_tool::execute(&args, graph),
         "trace_calls" => crate::tools::pie_tool::trace_calls_execute(&args, graph),
         "check_wiring" => crate::tools::pie_tool::check_wiring_execute(&args, graph),
         "read_file" => {
-            // smart_read classifies the range: redirects pure type reads to graph data,
-            // augments function body reads with graph overlay, passes targeted reads through.
+            // Require line_range — a ranged read means the model knows what it wants,
+            // which means it has already oriented via orient/check_wiring/known_locations.
+            // Full-file reads in the planner are exploratory and wasteful; block them.
+            let has_range = args["line_range"].as_array()
+                .map_or(false, |a| !a.is_empty());
+            if !has_range {
+                return format!(
+                    "[planner: full-file reads are blocked — you already have line numbers \
+                     from orient and the known locations. \
+                     Call read_file with line_range=[start, end] for the specific section you need.]"
+                );
+            }
             crate::tools::pie_tool::smart_read(&args, graph)
         }
         other => format!("[unknown planner tool: {other}]"),
@@ -306,6 +322,14 @@ fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
 
 // ── Plan generation ───────────────────────────────────────────────────────────
 
+
+/// Append `s` to `buf` and write the whole buffer to `.parecode/last_plan_session.txt`.
+/// Best-effort — silently ignored on I/O error. Updated after every turn and tool call
+/// so the file is readable mid-run (`tail -f .parecode/last_plan_session.txt`).
+fn log_append(buf: &mut String, s: &str) {
+    buf.push_str(s);
+    let _ = std::fs::write(".parecode/last_plan_session.txt", buf.as_str());
+}
 
 /// Write the full planner prompt to `.parecode/last_plan_prompt.txt` for inspection.
 /// Best-effort — silently ignored on any I/O error.
@@ -380,6 +404,12 @@ pub async fn generate_plan(
     let mut total_output: u32 = 0;
     let mut tool_call_count: usize = 0;
 
+    // ── Session log ───────────────────────────────────────────────────────────
+    // Accumulated in a String; written to .parecode/last_plan_session.txt after
+    // every turn and tool call so `tail -f` works during a live run.
+    let _ = std::fs::create_dir_all(".parecode");
+    let mut session_log = format!("=== PLAN SESSION ===\nTask: {task}\n\n");
+
     // ── PIE context assembly — same path as run_tui ───────────────────────────
     let pie_ctx = crate::pie::build_pie_context(task, context_files, graph, narrative, flow_paths);
 
@@ -403,28 +433,41 @@ pub async fn generate_plan(
     // ── Unified exploration + output loop ─────────────────────────────────────
     let tools = planner_tools();
     const MAX_TURNS: usize = 20;
-    const TOOL_CAP: usize = 10; // hard cap — enforced in code, not just in the prompt
+    const TOOL_CAP: usize = 8; // hard cap — matches the prompt's stated budget
     let mut output_mode = false; // true = no tools, model must output JSON this turn
     let mut json_text_raw = String::new();
 
-    for _ in 0..MAX_TURNS {
+    for turn_idx in 0..MAX_TURNS {
         // Enforce hard tool cap: once hit, strip tools and demand JSON regardless of model intent
         if tool_call_count >= TOOL_CAP && !output_mode {
             messages.push(Message {
                 role: "user".to_string(),
-                content: MessageContent::Text(
-                    "Tool budget reached (20/20). Output the JSON plan now using what you \
-                     have found. Approximate locations are fine — the executor reads full \
-                     context. Do NOT explore further.".to_string(),
-                ),
+                content: MessageContent::Text(format!(
+                    "Tool budget reached ({TOOL_CAP}/{TOOL_CAP}). Output the JSON plan now using what \
+                     you have found. Approximate locations are fine — the executor reads full \
+                     context. Do NOT explore further."
+                )),
                 tool_calls: vec![],
             });
             output_mode = true;
         }
         let current_tools: &[Tool] = if output_mode { &[] } else { &tools };
+
+        log_append(
+            &mut session_log,
+            &format!(
+                "\n╔═══ TURN {} {} ═══╗\n",
+                turn_idx + 1,
+                if output_mode { "(output — no tools)" } else { "" }
+            ),
+        );
+
         let resp = client
             .chat(PLANNER_PROMPT, &messages, current_tools, &on_chunk)
             .await?;
+
+        // Append full model response text (includes <think> blocks) to log
+        log_append(&mut session_log, &resp.text);
 
         total_input += resp.input_tokens;
         total_output += resp.output_tokens;
@@ -462,7 +505,8 @@ pub async fn generate_plan(
 
             // Try to parse as JSON plan — if it works, we're done
             if extract_json(&resp.text).is_some() {
-                json_text_raw = resp.text;
+                json_text_raw = resp.text.clone();
+                log_append(&mut session_log, &format!("\n\n=== FINAL PLAN ===\n{}\n", resp.text));
                 break;
             }
 
@@ -508,9 +552,13 @@ pub async fn generate_plan(
                 args_summary: args_summary.clone(),
             });
 
+            log_append(&mut session_log, &format!("\n\n◆ {} {}\n", tc.name, args_summary));
+
             let result = execute_planner_tool(tc, graph);
             let result_summary: String = result.lines().next().unwrap_or("").chars().take(80).collect();
             let _ = ui_tx.send(UiEvent::ToolResult { summary: result_summary });
+
+            log_append(&mut session_log, &format!("→ {result}\n"));
 
             tool_results.push(ContentPart::ToolResult {
                 tool_use_id: tc.id.clone(),

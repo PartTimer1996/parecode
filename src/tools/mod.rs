@@ -23,6 +23,7 @@ pub const TOOL_ASK_USER: &str = "ask_user";
 pub const TOOL_FIND_SYMBOL: &str = "find_symbol";
 pub const TOOL_TRACE_CALLS: &str = "trace_calls";
 pub const TOOL_CHECK_WIRING: &str = "check_wiring";
+pub const TOOL_ORIENT: &str = "orient";
 
 // Turn thresholds for phase-adaptive tool selection
 const TURN_EXPLORATION_END: usize = 1;
@@ -31,6 +32,7 @@ const TURN_MUTATION_START: usize = 2;
 /// All tool names as a slice, useful for bulk operations.
 pub fn all_tool_names() -> &'static [&'static str] {
     &[
+        TOOL_ORIENT,
         TOOL_FIND_SYMBOL,
         TOOL_TRACE_CALLS,
         TOOL_CHECK_WIRING,
@@ -62,6 +64,7 @@ impl Default for TurnThresholds {
 /// Dispatch to get a tool's definition by name.
 pub fn get_tool(name: &str) -> Option<Value> {
     match name {
+        TOOL_ORIENT => Some(pie_tool::orient_definition()),
         TOOL_FIND_SYMBOL => Some(pie_tool::definition()),
         TOOL_TRACE_CALLS => Some(pie_tool::trace_calls_definition()),
         TOOL_CHECK_WIRING => Some(pie_tool::check_wiring_definition()),
@@ -85,30 +88,21 @@ pub fn all_definitions() -> Vec<Tool> {
 
 /// Phase-adaptive tool selection — only send tools relevant to the current turn.
 ///
-/// When `has_graph` is true, `find_symbol` leads the list (models prefer earlier tools).
-/// When `path_matched` is true on turn 1, `find_symbol` is suppressed — the path context
-/// already contains everything the model needs, so offering it only wastes tokens.
+/// When `has_graph` is true, `orient` leads the list (replaces find_symbol + trace_calls).
+/// orient returns struct signatures, locations, and call connections in one call.
 ///
 /// Core tools (always): read_file, edit_file, bash, ask_user
-/// Conditional: find_symbol (graph + !path_matched on t1), write_file (early), patch_file (late)
+/// Conditional: orient + check_wiring (graph), write_file (early), patch_file (late)
 ///
 /// Saves ~400-800 tokens/turn compared to sending all tools every turn.
-pub fn tools_for_turn(turn: usize, has_graph: bool, path_matched: bool) -> Vec<Tool> {
+pub fn tools_for_turn(turn: usize, has_graph: bool) -> Vec<Tool> {
     let thresholds = TurnThresholds::default();
     let mut t: Vec<Tool> = Vec::new();
 
     // Graph tools first when available — high salience position drives usage.
-    // find_symbol suppressed on turn 1 when a path was pre-loaded (already have locations).
-    // trace_calls always offered when graph exists — it's the missing middle between
-    // find_symbol (where?) and read_file (what does it say?).
-    let suppress_find = path_matched && turn <= 1;
-    if has_graph && !suppress_find {
-        t.push(def(pie_tool::definition()));
-    }
+    // orient replaces find_symbol + trace_calls: one call returns everything needed.
     if has_graph {
-        t.push(def(pie_tool::trace_calls_definition()));
-    }
-    if has_graph {
+        t.push(def(pie_tool::orient_definition()));
         t.push(def(pie_tool::check_wiring_definition()));
     }
 
@@ -184,7 +178,8 @@ mod tests {
         assert!(names.contains(&TOOL_FIND_SYMBOL));
         assert!(names.contains(&TOOL_TRACE_CALLS));
         assert!(names.contains(&TOOL_CHECK_WIRING));
-        assert_eq!(names.len(), 9);
+        assert!(names.contains(&TOOL_ORIENT));
+        assert_eq!(names.len(), 10);
     }
 
     #[test]
@@ -199,30 +194,35 @@ mod tests {
         assert!(get_tool(TOOL_READ_FILE).is_some());
         assert!(get_tool(TOOL_BASH).is_some());
         assert!(get_tool(TOOL_FIND_SYMBOL).is_some());
+        assert!(get_tool(TOOL_ORIENT).is_some());
         assert!(get_tool("invalid_tool").is_none());
 
         let read_def = get_tool(TOOL_READ_FILE).unwrap();
         assert_eq!(read_def["name"], TOOL_READ_FILE);
+
+        let orient_def = get_tool(TOOL_ORIENT).unwrap();
+        assert_eq!(orient_def["name"], TOOL_ORIENT);
     }
 
     #[test]
     fn test_all_definitions() {
         let defs = all_definitions();
-        assert_eq!(defs.len(), 9);
+        assert_eq!(defs.len(), 10);
         assert!(defs.iter().any(|d| d.name == TOOL_READ_FILE));
         assert!(defs.iter().any(|d| d.name == TOOL_ASK_USER));
+        assert!(defs.iter().any(|d| d.name == TOOL_ORIENT));
     }
 
     #[test]
     fn test_tools_for_turn_logic() {
         // Turn 0: Exploration (includes list and write)
-        let t0 = tools_for_turn(0, false, false);
+        let t0 = tools_for_turn(0, false);
         let names0: Vec<_> = t0.iter().map(|d| d.name.as_str()).collect();
         assert!(names0.contains(&TOOL_WRITE_FILE));
         assert!(!names0.contains(&TOOL_PATCH_FILE));
 
         // Turn 2: Mutation (includes patch)
-        let t2 = tools_for_turn(2, false, false);
+        let t2 = tools_for_turn(2, false);
         let names2: Vec<_> = t2.iter().map(|d| d.name.as_str()).collect();
         assert!(names2.contains(&TOOL_PATCH_FILE));
     }

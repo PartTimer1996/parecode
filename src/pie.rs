@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{client::{ContentPart, Message, MessageContent, ToolCall}, index::{CallEdge, Symbol, SymbolIndex, compute_end_lines, extract_symbols}};
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 5; // bumped: construct_edges added (enum variant construction sites)
 const GRAPH_PATH: &str = ".parecode/project.graph";
 
 
@@ -45,6 +45,12 @@ pub struct ProjectGraph {
     /// Only populated for `.rs` files; other languages have no entries yet.
     #[serde(default)]
     pub call_edges: HashMap<String, Vec<CallEdge>>,
+    /// Struct/enum-variant construction edges extracted via tree-sitter.
+    /// Key: `"src/file.rs::symbol_name"` — Value: type/variant names constructed
+    /// by that symbol. Callee is either "UiEvent::TokenStats" (scoped enum variant)
+    /// or "AppState" (plain indexed struct literal). First construction site only.
+    #[serde(default)]
+    pub construct_edges: HashMap<String, Vec<CallEdge>>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -105,6 +111,7 @@ impl ProjectGraph {
             clusters: Vec::new(),
             last_indexed: chrono::Utc::now().timestamp(),
             call_edges: HashMap::new(),
+            construct_edges: HashMap::new(),
         };
         g.clusters = build_clusters(&g.symbols, &g.file_lines);
         g.rebuild_call_edges(root);
@@ -161,9 +168,10 @@ impl ProjectGraph {
         }
         self.by_name.retain(|_, files| !files.is_empty());
 
-        // Remove call edges originating from this file.
+        // Remove call/construct edges originating from this file.
         let prefix = format!("{}::", path);
         self.call_edges.retain(|k, _| !k.starts_with(&prefix));
+        self.construct_edges.retain(|k, _| !k.starts_with(&prefix));
     }
 
     /// (Re)build call edges for all Rust files from scratch, then rebuild
@@ -171,6 +179,7 @@ impl ProjectGraph {
     /// Called after a cold build; `by_name` must be fully populated first.
     fn rebuild_call_edges(&mut self, root: &Path) {
         self.call_edges.clear();
+        self.construct_edges.clear();
         let mut extractor = match crate::callgraph::CallExtractor::new() {
             Ok(e) => e,
             Err(_) => return, // grammar ABI mismatch — skip silently
@@ -186,6 +195,8 @@ impl ProjectGraph {
             let Ok(content) = std::fs::read_to_string(&abs) else { continue };
             let edges = extractor.extract_file(&content, file, &self.symbols, &self.by_name);
             self.call_edges.extend(edges);
+            let constructions = extractor.extract_constructions(&content, file, &self.symbols, &self.by_name);
+            self.construct_edges.extend(constructions);
             // Enrich struct/enum/trait signatures from the same file parse.
             let sigs = extractor.extract_signatures(&content);
             for sym in self.symbols.iter_mut() {
@@ -206,6 +217,7 @@ impl ProjectGraph {
         for file in changed {
             let prefix = format!("{}::", file);
             self.call_edges.retain(|k, _| !k.starts_with(&prefix));
+            self.construct_edges.retain(|k, _| !k.starts_with(&prefix));
         }
         let mut extractor = match crate::callgraph::CallExtractor::new() {
             Ok(e) => e,
@@ -219,6 +231,8 @@ impl ProjectGraph {
             let Ok(content) = std::fs::read_to_string(&abs) else { continue };
             let edges = extractor.extract_file(&content, file, &self.symbols, &self.by_name);
             self.call_edges.extend(edges);
+            let constructions = extractor.extract_constructions(&content, file, &self.symbols, &self.by_name);
+            self.construct_edges.extend(constructions);
             // Enrich struct/enum/trait signatures from the same file parse.
             let sigs = extractor.extract_signatures(&content);
             for sym in self.symbols.iter_mut() {
@@ -833,6 +847,12 @@ pub fn build_known_locations(focus_files: &[String], graph: &ProjectGraph) -> St
                     s.kind.label(), s.name, path, s.line
                 ));
             }
+            // Struct/Enum/Trait: add signature line for field visibility (functions too verbose)
+            if matches!(s.kind, SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait) {
+                if let Some(sig) = &s.signature {
+                    lines.push(format!("    {sig}"));
+                }
+            }
         }
         if syms.len() > 20 {
             lines.push(format!("  … {} more in {path}", syms.len() - 20));
@@ -842,7 +862,7 @@ pub fn build_known_locations(focus_files: &[String], graph: &ProjectGraph) -> St
         return String::new();
     }
     format!(
-        "Known locations — use find_symbol/trace_calls; read_file only to modify:\n{}\n\n",
+        "Known locations — signatures included; read_file only for imperative logic:\n{}\n\n",
         lines.join("\n")
     )
 }

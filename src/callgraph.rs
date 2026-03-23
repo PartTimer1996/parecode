@@ -37,6 +37,45 @@ impl CallExtractor {
         Ok(Self { parser })
     }
 
+    /// Extract struct/enum-variant construction edges from one Rust source file.
+    ///
+    /// Returns `HashMap<"file::caller", Vec<CallEdge>>` where `CallEdge.callee` is:
+    /// - `"UiEvent::TokenStats"` for scoped enum-variant constructions
+    /// - `"AppState"` for plain indexed-struct literals
+    ///
+    /// Used to populate `ProjectGraph::construct_edges` so orient can show
+    /// which functions *create* a type, complementing call edges which show
+    /// which functions *call* other functions.
+    pub fn extract_constructions(
+        &mut self,
+        content: &str,
+        file: &str,
+        symbols: &[Symbol],
+        known_names: &HashMap<String, Vec<String>>,
+    ) -> HashMap<String, Vec<CallEdge>> {
+        let mut result: HashMap<String, Vec<CallEdge>> = HashMap::new();
+        let tree = match self.parser.parse(content.as_bytes(), None) {
+            Some(t) => t,
+            None => return result,
+        };
+        let src = content.as_bytes();
+        let file_syms: Vec<&Symbol> = symbols.iter().filter(|s| s.file == file).collect();
+
+        let mut raw: Vec<(usize, String)> = Vec::new();
+        collect_struct_constructions(tree.root_node(), src, known_names, &mut raw);
+
+        for (line, constructed) in raw {
+            let Some(sym) = find_containing_symbol(&file_syms, line) else { continue };
+            let key = format!("{}::{}", file, sym.name);
+            let edges = result.entry(key).or_default();
+            // Dedup: one entry per (caller, constructed) pair — first site wins.
+            if !edges.iter().any(|e| e.callee == constructed) {
+                edges.push(CallEdge { callee: constructed, call_line: line });
+            }
+        }
+        result
+    }
+
     /// Extract compact type signatures for all structs, enums, and traits in a file.
     /// Returns a map: symbol_name → compact definition string.
     /// Used to enrich Symbol.signature during indexing so find_symbol returns
@@ -116,6 +155,51 @@ impl CallExtractor {
 }
 
 // ── CST traversal ─────────────────────────────────────────────────────────────
+
+/// Walk the CST and collect struct-expression construction sites.
+///
+/// For scoped constructions like `UiEvent::TokenStats { ... }` we record the
+/// full path string "UiEvent::TokenStats" — always included (unambiguous enum variant).
+/// For plain struct literals like `AppState { ... }` we record the type name only
+/// if it appears in `known_names` (i.e. it's an indexed project symbol).
+fn collect_struct_constructions(
+    root: Node,
+    src: &[u8],
+    known_names: &HashMap<String, Vec<String>>,
+    out: &mut Vec<(usize, String)>,
+) {
+    let mut stack: Vec<Node> = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "struct_expression" {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let entry: Option<(usize, String)> = match name_node.kind() {
+                    // Enum variant: UiEvent::TokenStats { ... } — always record, store full path
+                    "scoped_type_identifier" => name_node
+                        .utf8_text(src)
+                        .ok()
+                        .map(|s| (node.start_position().row + 1, s.to_string())),
+                    // Plain struct: AppState { ... } — only if indexed
+                    "type_identifier" => name_node.utf8_text(src).ok().and_then(|s| {
+                        if known_names.contains_key(s) {
+                            Some((node.start_position().row + 1, s.to_string()))
+                        } else {
+                            None
+                        }
+                    }),
+                    _ => None,
+                };
+                if let Some(pair) = entry {
+                    out.push(pair);
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+}
 
 /// Walk the entire CST iteratively and collect (line, callee_name) for every
 /// call site.  Uses an explicit stack to avoid recursion-depth issues on
@@ -287,7 +371,9 @@ fn struct_sig(node: Node, src: &[u8]) -> Option<(String, String)> {
     }
 
     if fields.is_empty() { return None; }
-    Some((name, format_compact(&fields, 380)))
+    // No truncation cap — all struct fields must be visible; truncated signatures
+    // cause follow-up tool calls that cost orders of magnitude more than the tokens saved.
+    Some((name, format_compact(&fields, usize::MAX)))
 }
 
 fn enum_sig(node: Node, src: &[u8]) -> Option<(String, String)> {
@@ -342,7 +428,7 @@ fn enum_sig(node: Node, src: &[u8]) -> Option<(String, String)> {
     }
 
     if variants.is_empty() { return None; }
-    Some((name, format_compact(&variants, 380)))
+    Some((name, format_compact(&variants, usize::MAX)))
 }
 
 fn trait_sig(node: Node, src: &[u8]) -> Option<(String, String)> {
@@ -558,6 +644,61 @@ trait Execute {
         let sig = sigs.get("Execute").expect("Execute should be extracted");
         assert!(sig.contains("execute"), "got: {sig}");
         assert!(sig.contains("definition"), "got: {sig}");
+    }
+
+    #[test]
+    fn test_extract_constructions_scoped_variant() {
+        let mut ext = CallExtractor::new().unwrap();
+        let src = r#"
+fn run_tui() {
+    let _ = ui_tx.send(UiEvent::TokenStats { input: 1, output: 2 });
+    let _ = ui_tx.send(UiEvent::AgentDone);
+}
+"#;
+        let symbols = vec![make_sym("run_tui", "src/a.rs", 2, 6)];
+        let known = known(&["run_tui"]); // known_names doesn't need enum variants
+        let edges = ext.extract_constructions(src, "src/a.rs", &symbols, &known);
+
+        let key = "src/a.rs::run_tui";
+        assert!(edges.contains_key(key), "expected construction edges from run_tui");
+        let callees: Vec<&str> = edges[key].iter().map(|e| e.callee.as_str()).collect();
+        assert!(callees.contains(&"UiEvent::TokenStats"), "expected TokenStats: {:?}", callees);
+    }
+
+    #[test]
+    fn test_extract_constructions_plain_struct() {
+        let mut ext = CallExtractor::new().unwrap();
+        let src = r#"
+fn make_state() -> AppState {
+    AppState { name: "x".to_string() }
+}
+"#;
+        let symbols = vec![make_sym("make_state", "src/a.rs", 2, 4)];
+        let mut known_names = known(&["make_state"]);
+        known_names.insert("AppState".to_string(), vec!["src/app.rs".to_string()]);
+        let edges = ext.extract_constructions(src, "src/a.rs", &symbols, &known_names);
+
+        let key = "src/a.rs::make_state";
+        assert!(edges.contains_key(key), "expected construction edge for AppState");
+        assert!(edges[key].iter().any(|e| e.callee == "AppState"));
+    }
+
+    #[test]
+    fn test_extract_constructions_dedup() {
+        let mut ext = CallExtractor::new().unwrap();
+        let src = r#"
+fn sender() {
+    send(UiEvent::TokenStats { input: 1, output: 1 });
+    send(UiEvent::TokenStats { input: 2, output: 2 });
+}
+"#;
+        let symbols = vec![make_sym("sender", "src/a.rs", 2, 6)];
+        let known = known(&["sender"]);
+        let edges = ext.extract_constructions(src, "src/a.rs", &symbols, &known);
+        let key = "src/a.rs::sender";
+        // Two constructions of the same variant — should be deduplicated to one edge
+        let count = edges.get(key).map_or(0, |v| v.len());
+        assert_eq!(count, 1, "expected dedup: {:?}", edges.get(key));
     }
 
     #[test]

@@ -592,6 +592,7 @@ mod tests {
             clusters: Vec::new(),
             last_indexed: 0,
             call_edges,
+            construct_edges: HashMap::new(),
         }
     }
 
