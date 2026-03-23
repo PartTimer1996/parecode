@@ -54,9 +54,15 @@ pub fn execute(args: &Value, graph: &ProjectGraph) -> String {
         return find_file(name, graph);
     }
 
-    // Exact symbol match — include exact line_range, signature, and call neighbourhood
+    // Exact symbol match — include exact line_range, signature, and call neighbourhood.
+    // Deduplicate: skip Impl entries when a non-Impl entry exists for the same (file, name).
+    let has_non_impl: std::collections::HashSet<&str> = graph.symbols.iter()
+        .filter(|s| s.name == name && !matches!(s.kind, SymbolKind::Impl))
+        .map(|s| s.file.as_str())
+        .collect();
     let matches: Vec<String> = graph.symbols.iter()
         .filter(|s| s.name == name)
+        .filter(|s| !matches!(s.kind, SymbolKind::Impl) || !has_non_impl.contains(s.file.as_str()))
         .map(|s| {
             let start = s.line.saturating_sub(1).max(1);
             let end = s.end_line;
@@ -156,6 +162,74 @@ pub fn execute(args: &Value, graph: &ProjectGraph) -> String {
     }
 
     format!("Symbol or file '{name}' not found in project index.")
+}
+
+// ── Construction snippet ───────────────────────────────────────────────────────
+
+/// Read a struct literal at `call_line` in `file` and return the first `max_fields`
+/// field assignments as indented lines.  Returns None if the file can't be read,
+/// the call_line is out of range, or no struct literal is found.
+///
+/// Used by check_wiring to show the model WHAT fields are already present in a
+/// constructor call so it knows where to insert a new field without reading the file.
+fn construction_snippet(file: &str, call_line: usize, max_fields: usize) -> Option<String> {
+    let content = std::fs::read_to_string(file).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = call_line.saturating_sub(1); // convert 1-indexed → 0-indexed
+    if start >= lines.len() { return None; }
+
+    let window = &lines[start..(start + 35).min(lines.len())];
+
+    // Guard: only show a snippet if the struct literal opens within the first 4 lines.
+    // ::new() call sites have no '{' nearby — without this guard we wander forward
+    // and pick up a random adjacent struct literal (e.g. HookOutput instead of AppState).
+    if window.iter().take(4).all(|l| !l.contains('{')) {
+        return None;
+    }
+
+    let mut fields: Vec<String> = Vec::new();
+    let mut total_field_count: usize = 0;
+    let mut brace_depth: i32 = 0;
+    let mut inside_struct = false;
+
+    for line in window {
+        let trimmed = line.trim();
+        // Update brace depth from this line
+        for ch in line.chars() {
+            match ch {
+                '{' => { brace_depth += 1; inside_struct = true; }
+                '}' => { brace_depth -= 1; }
+                _ => {}
+            }
+        }
+        // A field assignment is a non-empty, non-comment line at depth=1
+        // that contains ": " (struct field syntax: name: value,)
+        if inside_struct
+            && brace_depth == 1
+            && !trimmed.is_empty()
+            && !trimmed.starts_with("//")
+            && !trimmed.starts_with("/*")
+            && trimmed.contains(": ")
+            && !trimmed.starts_with("where")
+        {
+            total_field_count += 1;
+            if fields.len() < max_fields {
+                let field_str: String = trimmed.chars().take(60).collect();
+                let ellipsis = if trimmed.len() > 60 { "…" } else { "" };
+                fields.push(format!("      {field_str}{ellipsis}"));
+            }
+        }
+        if inside_struct && brace_depth <= 0 { break; }
+    }
+
+    if fields.is_empty() { return None; }
+
+    let mut out = fields.join("\n");
+    if total_field_count > max_fields {
+        out.push_str(&format!("\n      … +{} more fields", total_field_count - max_fields));
+    }
+    out.push('\n');
+    Some(out)
 }
 
 // ── Signature formatting ───────────────────────────────────────────────────────
@@ -749,7 +823,7 @@ pub fn check_wiring_execute(args: &Value, graph: &ProjectGraph) -> String {
     }
 
     // ── Build output ──────────────────────────────────────────────────────────
-    let mut out = format!("Wiring report for '{field}':\n\n");
+    let mut out = format!("check_wiring: '{field}'\n\n");
 
     if with_syms.is_empty() {
         out.push_str(&format!(
@@ -757,33 +831,112 @@ pub fn check_wiring_execute(args: &Value, graph: &ProjectGraph) -> String {
              Try find_symbol(name=\"{}\") to locate it as a top-level symbol.\n",
             field, field
         ));
-    } else {
-        let with_lines: Vec<String> = with_syms.iter().map(|sym| {
-            let sig = sym.signature.as_deref().unwrap_or("");
-            let snippet = find_field_in_sig(sig, field).unwrap_or(field);
-            format!("  {} {} {} ({}:{}) — {}",
-                pipeline_layer(&sym.file), sym.kind.label(), sym.name, sym.file, sym.line, snippet)
-        }).collect();
-        out.push_str(&format!("WITH '{field}':\n{}\n\n", with_lines.join("\n")));
+        return out;
     }
 
-    if !without_syms.is_empty() {
-        let without_lines: Vec<String> = without_syms.iter().map(|sym| {
-            let sig = sym.signature.as_deref().unwrap_or("");
-            let preview = if sig.len() > 70 { format!("{}…", &sig[..70]) } else { sig.to_string() };
-            format!("  {} {} {} ({}:{}) — [missing]  has: {}",
-                pipeline_layer(&sym.file), sym.kind.label(), sym.name, sym.file, sym.line, preview)
-        }).collect();
+    // ── Rich WITH section: layout + constructors + active functions ────────────
+    // One block per matching struct — gives the model everything it needs to
+    // plan the propagation without any follow-up reads.
+    for sym in &with_syms {
+        let snippet = sym.signature.as_deref()
+            .and_then(|s| find_field_in_sig(s, field))
+            .unwrap_or(field);
         out.push_str(&format!(
-            "WITHOUT '{field}' — pipeline gaps ({} found):\n{}\n\n\
-             Each [missing] entry above is a step in your plan.",
-            without_syms.len(), without_lines.join("\n")
+            "{} {} {} ({}:{})\n",
+            pipeline_layer(&sym.file), sym.kind.label(), sym.name, sym.file, sym.line
         ));
-    } else if !with_syms.is_empty() {
-        if specific.is_some() {
-            out.push_str(&format!("All checked types contain '{field}' — fully wired.\n"));
-        } else {
-            out.push_str(&format!("No call-adjacent gaps found for '{field}' — appears fully wired in the immediate pipeline.\n"));
+        // Full layout
+        if let Some(sig) = &sym.signature {
+            out.push_str(&format!("  layout: {sig}\n"));
+        }
+        out.push_str(&format!("  has: {snippet}\n"));
+
+        // Who constructs this type (struct literal + ::new() constructions tracked by tree-sitter)
+        // For each constructor: show the caller location AND the first few fields of the call
+        // so the model knows exactly where to insert a new field without reading the file.
+        let type_prefix = format!("{}::", sym.name);
+        // Collect (caller_name, caller_file, call_line) — dedup by caller identity
+        let mut ctor_tuples: Vec<(String, String, usize)> = graph.construct_edges.iter()
+            .filter_map(|(caller_key, edges)| {
+                let edge = edges.iter()
+                    .find(|e| e.callee == sym.name || e.callee.starts_with(&type_prefix))?;
+                let caller_name = caller_key.split("::").last().unwrap_or(caller_key);
+                if caller_name == sym.name { return None; } // skip self-referential
+                let caller_file = caller_key.split("::").next().unwrap_or("");
+                Some((caller_name.to_string(), caller_file.to_string(), edge.call_line))
+            })
+            .collect();
+        ctor_tuples.sort_by(|a, b| a.0.cmp(&b.0));
+        ctor_tuples.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+        ctor_tuples.truncate(3);
+        if !ctor_tuples.is_empty() {
+            out.push_str("  constructed by:\n");
+            for (caller_name, caller_file, call_line) in &ctor_tuples {
+                out.push_str(&format!("    {caller_name} ({caller_file}:{call_line})\n"));
+                if let Some(snippet) = construction_snippet(caller_file, *call_line, 4) {
+                    out.push_str(&snippet);
+                }
+            }
+        }
+
+        // Active functions in the same file — the ones likely to read/write this struct.
+        // "Active" = they appear in call_edges (they call other things), so they're not stubs.
+        let file_prefix = format!("{}::", sym.file);
+        let mut file_fns: Vec<(usize, String)> = graph.call_edges.keys()
+            .filter(|k| k.starts_with(&file_prefix))
+            .filter_map(|k| {
+                let fn_name = k.split("::").last()?;
+                graph.symbols.iter()
+                    .find(|s| s.file == sym.file && s.name == fn_name && matches!(s.kind, SymbolKind::Function))
+                    .map(|s| (s.line, format!("{fn_name} (line {})", s.line)))
+            })
+            .collect();
+        file_fns.sort_by_key(|(line, _)| *line);
+        file_fns.dedup_by_key(|(_, s)| s.clone());
+        let fn_list: Vec<String> = file_fns.into_iter().map(|(_, s)| s).take(5).collect();
+        if !fn_list.is_empty() {
+            out.push_str(&format!("  fns in file: {}\n", fn_list.join(", ")));
+        }
+
+        out.push('\n');
+    }
+
+    // ── Gap section: structs that need the field added ─────────────────────────
+    // For each gap struct, show: where it's defined, who constructs it, and the
+    // first few fields of that construction call — so the model knows exactly where
+    // to insert the new field without a read_files call.
+    if !without_syms.is_empty() {
+        let gap_syms: Vec<&&crate::index::Symbol> = without_syms.iter()
+            .filter(|s| matches!(s.kind, SymbolKind::Struct))
+            .take(3)
+            .collect();
+        if !gap_syms.is_empty() {
+            out.push_str(&format!("Gaps — structs needing '{field}':\n"));
+            for sym in gap_syms {
+                out.push_str(&format!("  {} {} ({}:{})\n",
+                    pipeline_layer(&sym.file), sym.name, sym.file, sym.line));
+                // Show who constructs this gap struct + first fields of that call
+                let type_prefix = format!("{}::", sym.name);
+                let mut ctor_tuples: Vec<(String, String, usize)> = graph.construct_edges.iter()
+                    .filter_map(|(caller_key, edges)| {
+                        let edge = edges.iter()
+                            .find(|e| e.callee == sym.name || e.callee.starts_with(&type_prefix))?;
+                        let caller_name = caller_key.split("::").last().unwrap_or(caller_key);
+                        if caller_name == sym.name { return None; }
+                        let caller_file = caller_key.split("::").next().unwrap_or("");
+                        Some((caller_name.to_string(), caller_file.to_string(), edge.call_line))
+                    })
+                    .collect();
+                ctor_tuples.sort_by(|a, b| a.0.cmp(&b.0));
+                ctor_tuples.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+                ctor_tuples.truncate(3);
+                for (caller_name, caller_file, call_line) in &ctor_tuples {
+                    out.push_str(&format!("    constructed by: {caller_name} ({caller_file}:{call_line})\n"));
+                    if let Some(snippet) = construction_snippet(caller_file, *call_line, 4) {
+                        out.push_str(&snippet);
+                    }
+                }
+            }
         }
     }
 
@@ -936,6 +1089,8 @@ pub fn orient_execute(args: &Value, graph: &ProjectGraph) -> String {
                 .filter_map(|(caller_key, edges)| {
                     if edges.iter().any(|e| e.callee == sym.name || e.callee.starts_with(&enum_prefix)) {
                         let caller_name = caller_key.split("::").last().unwrap_or(caller_key);
+                        // Skip self-referential entries
+                        if caller_name == sym.name { return None; }
                         let caller_file = caller_key.split("::").next().unwrap_or("");
                         let loc = graph.symbols.iter()
                             .find(|s| s.file == caller_file && s.name == caller_name)
@@ -1275,6 +1430,83 @@ fn symbols_for_cluster(cluster: &Cluster, graph: &ProjectGraph) -> Vec<String> {
 }
 
 
+/// Tool definition for `read_files` — planner-only batched read tool.
+pub fn read_files_definition() -> Value {
+    serde_json::json!({
+        "name": "read_files",
+        "description": "Read multiple file sections in ONE call. \
+                        Always use this instead of reading one file at a time. \
+                        After orient/check_wiring you know all the locations — \
+                        batch every read you need into a single read_files call. \
+                        Each entry MUST have a line_range. Full-file reads are blocked.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reads": {
+                    "type": "array",
+                    "description": "List of file sections to read. Provide ALL sections you need at once.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative file path (e.g. src/agent.rs)"
+                            },
+                            "line_range": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "[start_line, end_line] — 1-indexed, inclusive. Up to 150 lines each."
+                            }
+                        },
+                        "required": ["path", "line_range"]
+                    },
+                    "minItems": 1,
+                    "maxItems": 6
+                }
+            },
+            "required": ["reads"]
+        }
+    })
+}
+
+/// Execute `read_files` — iterate the `reads` array and call smart_read for each entry.
+pub fn read_files_execute(args: &Value, graph: &ProjectGraph) -> String {
+    let reads = match args["reads"].as_array() {
+        Some(r) if !r.is_empty() => r,
+        _ => return "[read_files: provide a non-empty 'reads' array]".to_string(),
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    for entry in reads {
+        let path = match entry["path"].as_str() {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                parts.push("[read_files entry: missing 'path']".to_string());
+                continue;
+            }
+        };
+        // Require line_range
+        let has_range = entry["line_range"].as_array().map_or(false, |a| a.len() == 2);
+        if !has_range {
+            parts.push(format!(
+                "[read_files: {path} — line_range required. \
+                 You have line numbers from orient/check_wiring — use them.]"
+            ));
+            continue;
+        }
+        // Build a synthetic args Value for smart_read
+        let read_args = serde_json::json!({
+            "path": path,
+            "line_range": entry["line_range"]
+        });
+        parts.push(smart_read(&read_args, graph));
+    }
+
+    parts.join("\n\n---\n\n")
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1541,7 +1773,7 @@ mod tests {
         let result = check_wiring_execute(&args, &graph);
         assert!(result.contains("Profile"), "should mention Profile: {result}");
         assert!(result.contains("AgentConfig"), "should mention AgentConfig: {result}");
-        assert!(result.contains("[missing]") || result.contains("missing"), "should show gap: {result}");
+        assert!(result.contains("AgentConfig") || result.contains("gap"), "should show gap: {result}");
     }
 
     #[test]

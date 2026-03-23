@@ -12,6 +12,7 @@
 ///   5. After each step, verification runs; failure surfaces for user decision
 ///
 /// Plans are persisted to `.parecode/plans/{timestamp}.json` so they can be resumed.
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -164,6 +165,31 @@ impl Plan {
     }
 }
 
+// ── Plan metrics ──────────────────────────────────────────────────────────────
+
+/// Token and tool-call statistics captured during a `generate_plan()` run.
+/// Returned alongside the `Plan` so callers (tests, TUI) can evaluate quality.
+#[derive(Debug, Clone, Default)]
+pub struct PlanMetrics {
+    pub total_input_tokens: u32,
+    pub total_output_tokens: u32,
+    /// Number of API turns (one per `client.chat()` call).
+    pub turns: usize,
+    /// Per-tool call counts: `"orient"` → 2, `"read_symbol"` → 1, etc.
+    pub tool_calls: HashMap<String, usize>,
+    pub elapsed_secs: u32,
+}
+
+impl PlanMetrics {
+    pub fn total_tokens(&self) -> u32 {
+        self.total_input_tokens + self.total_output_tokens
+    }
+
+    pub fn total_tool_calls(&self) -> usize {
+        self.tool_calls.values().sum()
+    }
+}
+
 // ── Plan persistence ──────────────────────────────────────────────────────────
 
 /// Directory for saved plans: `.parecode/plans/` relative to cwd.
@@ -196,14 +222,15 @@ TOOL ORDER — follow this sequence, never skip steps:
    locations, and call connections in pipeline order. Use this first, always.
 2. check_wiring(field="X") — REQUIRED whenever you find a field: verifies full pipeline.
    WITHOUT list = your plan steps. Call this before concluding any propagation is complete.
-3. read_file(path, line_range=[N,M]) — see READ BUDGET below.
+3. read_files(reads=[{path, line_range=[N,M]}, ...]) — batch ALL reads in ONE call (see READ BUDGET).
 
 READ BUDGET — strictly enforced:
-- You have at most 3 reads total. Spend them only on function bodies with imperative logic
-  you must quote in a step instruction (e.g. a constructor, a renderer, an event handler).
-- Struct/enum signatures from orient are authoritative — reading a struct wastes your budget.
-- Do NOT re-read a range you already read. Do NOT read speculatively.
-- Always provide line_range (you have line numbers from orient and known locations).
+- You have at most 3 read_files calls. Each call can read up to 6 locations at once.
+- ALWAYS BATCH: after orient/check_wiring you know all the locations — issue ONE read_files
+  call with every section you need. Never read one file, then decide to read another.
+- Read results are compressed after the following turn — request up to 150 lines per entry.
+- Struct/enum signatures from orient are authoritative — do not re-read struct definitions.
+- Always provide line_range for each entry (you have line numbers from orient).
   Full-file reads are BLOCKED.
 
 EXPLORATION RULES — STRICTLY ENFORCED:
@@ -282,7 +309,7 @@ fn parse_verification(s: &str) -> Verification {
 /// Exploration tools for the planner — orient + check_wiring + read_file from the shared registry.
 /// Same tools the agent uses, so the model gets the same enriched definitions.
 fn planner_tools() -> Vec<Tool> {
-    [crate::tools::TOOL_ORIENT, crate::tools::TOOL_CHECK_WIRING, crate::tools::TOOL_READ_FILE]
+    [crate::tools::TOOL_ORIENT, crate::tools::TOOL_CHECK_WIRING, crate::tools::TOOL_READ_FILES]
         .iter()
         .filter_map(|name| crate::tools::get_tool(name))
         .map(|v| Tool {
@@ -301,20 +328,20 @@ fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
         "find_symbol" => crate::tools::pie_tool::execute(&args, graph),
         "trace_calls" => crate::tools::pie_tool::trace_calls_execute(&args, graph),
         "check_wiring" => crate::tools::pie_tool::check_wiring_execute(&args, graph),
+        "read_files" => {
+            crate::tools::pie_tool::read_files_execute(&args, graph)
+        }
+        // Keep read_file as a fallback in case the model uses the old name
         "read_file" => {
-            // Require line_range — a ranged read means the model knows what it wants,
-            // which means it has already oriented via orient/check_wiring/known_locations.
-            // Full-file reads in the planner are exploratory and wasteful; block them.
             let has_range = args["line_range"].as_array()
                 .map_or(false, |a| !a.is_empty());
             if !has_range {
-                return format!(
-                    "[planner: full-file reads are blocked — you already have line numbers \
-                     from orient and the known locations. \
-                     Call read_file with line_range=[start, end] for the specific section you need.]"
-                );
+                return "[planner: use read_files([{path, line_range}]) to batch all reads in one call]"
+                    .to_string();
             }
-            crate::tools::pie_tool::smart_read(&args, graph)
+            // Wrap as single-entry read_files call
+            let wrapped = serde_json::json!({"reads": [{"path": args["path"], "line_range": args["line_range"]}]});
+            crate::tools::pie_tool::read_files_execute(&wrapped, graph)
         }
         other => format!("[unknown planner tool: {other}]"),
     }
@@ -358,21 +385,121 @@ fn dump_plan_prompt(system_prompt: &str, messages: &[Message]) {
 
 
 
+/// Return true if `word` appears as a whole identifier in `text` (not a substring of a longer name).
+fn contains_word(text: &str, word: &str) -> bool {
+    if word.is_empty() { return false; }
+    let tb = text.as_bytes();
+    let wb = word.as_bytes();
+    let wlen = wb.len();
+    let mut i = 0;
+    while i + wlen <= tb.len() {
+        if tb[i..i + wlen] == *wb {
+            let before_ok = i == 0 || !tb[i - 1].is_ascii_alphanumeric() && tb[i - 1] != b'_';
+            let after_ok = i + wlen == tb.len()
+                || !tb[i + wlen].is_ascii_alphanumeric() && tb[i + wlen] != b'_';
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Best-effort symbol-enrichment pass: for any symbol name that appears in a
 /// step instruction but has no line number referenced, append an index hint.
-/// This ensures executors always have a concrete starting point without needing
-/// to call list_symbols themselves.
+/// Also appends construction sites for struct/enum types so executors know
+/// exactly where to find the live value, not just the definition.
 fn enrich_step_instructions(steps: &mut Vec<PlanStep>, graph: &ProjectGraph) {
+    use crate::index::SymbolKind;
     for step in steps.iter_mut() {
+        let inst_snapshot = step.instruction.clone();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for sym in graph.symbols.iter() {
-            // Only enrich if the instruction mentions the symbol name but not its line
-            if step.instruction.contains(&sym.name)
-                && !step.instruction.contains(&format!("line {}", sym.line))
-            {
-                step.instruction.push_str(&format!(
-                    "\n[index: `{}` at line {} in {}]",
-                    sym.name, sym.line, sym.file
-                ));
+            // Skip Impl blocks — their struct/enum entry covers them.
+            if matches!(sym.kind, SymbolKind::Impl) {
+                continue;
+            }
+            // Whole-word match only: avoids spurious hits on common substrings.
+            if !contains_word(&inst_snapshot, &sym.name) {
+                continue;
+            }
+            // Skip if a line reference already exists for this exact location.
+            if inst_snapshot.contains(&format!("line {}", sym.line)) {
+                continue;
+            }
+            let dedup_key = format!("{}:{}", sym.file, sym.line);
+            if !seen.insert(dedup_key) {
+                continue;
+            }
+            step.instruction.push_str(&format!(
+                "\n[index: `{}` at line {} in {}]",
+                sym.name, sym.line, sym.file
+            ));
+            // For struct/enum types, also append construction sites so the
+            // executor knows where the value is created, not just defined.
+            if matches!(sym.kind, SymbolKind::Struct | SymbolKind::Enum) {
+                let type_prefix = format!("{}::", sym.name);
+                let mut sites: Vec<String> = graph.construct_edges.iter()
+                    .filter_map(|(caller_key, edges)| {
+                        if edges.iter().any(|e| e.callee == sym.name || e.callee.starts_with(&type_prefix)) {
+                            let caller_name = caller_key.split("::").last().unwrap_or(caller_key);
+                            if caller_name == sym.name { return None; } // skip circular
+                            let caller_file = caller_key.split("::").next().unwrap_or("");
+                            let line = graph.symbols.iter()
+                                .find(|s| s.file == caller_file && s.name == caller_name)
+                                .map(|s| s.line)
+                                .unwrap_or(0);
+                            if line > 0 {
+                                Some(format!("{caller_name} ({}:{line})", caller_file))
+                            } else {
+                                Some(format!("{caller_name} ({})", caller_file))
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                sites.sort();
+                sites.dedup();
+                sites.truncate(4);
+                if !sites.is_empty() {
+                    step.instruction.push_str(&format!(
+                        " — constructed by: {}",
+                        sites.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Stub out stale read_file / read_symbol tool results in the message history.
+///
+/// Reads are expensive (2-5k tokens each) and accumulate across turns. Once the model
+/// has processed a read result (i.e. it's ≥2 turns old), the full content is no longer
+/// needed — replace it with a compact stub so the model knows it already read that range
+/// but doesn't pay to re-send thousands of tokens on every subsequent API call.
+///
+/// Graph tool results (orient, check_wiring, find_symbol) are left intact — they are
+/// already compact and the model references them throughout planning.
+fn compress_stale_reads(messages: &mut Vec<Message>, stale_ids: &HashSet<String>) {
+    if stale_ids.is_empty() { return; }
+    for msg in messages.iter_mut() {
+        if msg.role != "user" { continue; }
+        if let MessageContent::Parts(parts) = &mut msg.content {
+            for part in parts.iter_mut() {
+                if let ContentPart::ToolResult { tool_use_id, content } = part {
+                    if stale_ids.contains(tool_use_id) && content.len() > 120 {
+                        let header: String = content.lines()
+                            .next().unwrap_or("").chars().take(80).collect();
+                        *content = format!(
+                            "[read consumed ({} chars) — {header}. \
+                             Content already used for plan formulation. Do not re-read.]",
+                            content.len()
+                        );
+                    }
+                }
             }
         }
     }
@@ -398,11 +525,19 @@ pub async fn generate_plan(
     flow_paths: Option<&crate::flowpaths::FlowPathIndex>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     on_chunk: impl Fn(&str) + Send + Sync + 'static,
-) -> Result<Plan> {
+) -> Result<(Plan, PlanMetrics)> {
     let task_start = std::time::Instant::now();
     let mut total_input: u32 = 0;
     let mut total_output: u32 = 0;
-    let mut tool_call_count: usize = 0;
+    let mut tool_counts: HashMap<String, usize> = HashMap::new();
+    let mut turns: usize = 0;
+
+    // Read compression: track read_file/read_symbol tool_use_ids across turns.
+    // Reads from turn N are kept intact for turn N+1 (model still processing them),
+    // then stubbed at the start of turn N+2.
+    let mut stale_read_ids: HashSet<String> = HashSet::new(); // compress these now
+    let mut prev_turn_read_ids: HashSet<String> = HashSet::new(); // becomes stale next turn
+    let mut current_turn_read_ids: HashSet<String> = HashSet::new(); // being collected
 
     // ── Session log ───────────────────────────────────────────────────────────
     // Accumulated in a String; written to .parecode/last_plan_session.txt after
@@ -438,6 +573,12 @@ pub async fn generate_plan(
     let mut json_text_raw = String::new();
 
     for turn_idx in 0..MAX_TURNS {
+        // ── Read compression: rotate turn buckets and stub stale reads ────────
+        stale_read_ids.extend(std::mem::take(&mut prev_turn_read_ids));
+        prev_turn_read_ids = std::mem::take(&mut current_turn_read_ids);
+        compress_stale_reads(&mut messages, &stale_read_ids);
+
+        let tool_call_count: usize = tool_counts.values().sum();
         // Enforce hard tool cap: once hit, strip tools and demand JSON regardless of model intent
         if tool_call_count >= TOOL_CAP && !output_mode {
             messages.push(Message {
@@ -471,8 +612,10 @@ pub async fn generate_plan(
 
         total_input += resp.input_tokens;
         total_output += resp.output_tokens;
+        turns += 1;
 
         if resp.input_tokens > 0 || resp.output_tokens > 0 {
+            let tool_call_count: usize = tool_counts.values().sum();
             let _ = ui_tx.send(UiEvent::TokenStats {
                 _input: resp.input_tokens,
                 _output: resp.output_tokens,
@@ -537,6 +680,21 @@ pub async fn generate_plan(
                 serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
             let args_summary = match tc.name.as_str() {
                 "find_symbol" => args["name"].as_str().unwrap_or("?").to_string(),
+                "read_files" => {
+                    if let Some(reads) = args["reads"].as_array() {
+                        let summaries: Vec<String> = reads.iter().map(|r| {
+                            let path = r["path"].as_str().unwrap_or("?");
+                            if let (Some(s), Some(e)) = (r["line_range"].get(0), r["line_range"].get(1)) {
+                                format!("{path}[{s}–{e}]")
+                            } else {
+                                path.to_string()
+                            }
+                        }).collect();
+                        summaries.join(", ")
+                    } else {
+                        "?".to_string()
+                    }
+                }
                 "read_file" => {
                     let path = args["path"].as_str().unwrap_or("?");
                     if let (Some(s), Some(e)) = (args["line_range"].get(0), args["line_range"].get(1)) {
@@ -564,9 +722,14 @@ pub async fn generate_plan(
                 tool_use_id: tc.id.clone(),
                 content: result,
             });
-            tool_call_count += 1;
+            *tool_counts.entry(tc.name.clone()).or_default() += 1;
+            // Track read-class tool IDs for compression on turn N+2
+            if matches!(tc.name.as_str(), "read_files" | "read_file" | "read_symbol") {
+                current_turn_read_ids.insert(tc.id.clone());
+            }
         }
 
+        let tool_call_count: usize = tool_counts.values().sum();
         let _ = ui_tx.send(UiEvent::TokenStats {
             _input: 0,
             _output: 0,
@@ -598,8 +761,9 @@ pub async fn generate_plan(
     }
 
     let elapsed = task_start.elapsed().as_secs() as u32;
+    let total_tool_calls: usize = tool_counts.values().sum();
     let _ = ui_tx.send(UiEvent::SystemMsg(format!(
-        "⚙ plan generated — {tool_call_count} explore calls · {}→+{} tokens · {elapsed}s",
+        "⚙ plan generated — {total_tool_calls} explore calls · {}→+{} tokens · {elapsed}s",
         total_input, total_output
     )));
 
@@ -682,7 +846,15 @@ pub async fn generate_plan(
     let mut steps = steps;
     enrich_step_instructions(&mut steps, graph);
 
-    Ok(Plan::new(task.to_string(), steps, project.to_string()))
+    let plan = Plan::new(task.to_string(), steps, project.to_string());
+    let metrics = PlanMetrics {
+        total_input_tokens: total_input,
+        total_output_tokens: total_output,
+        turns,
+        tool_calls: tool_counts,
+        elapsed_secs: elapsed,
+    };
+    Ok((plan, metrics))
 }
 
 /// Write the plan as human-readable markdown to `.parecode/plan.md`.
@@ -1185,9 +1357,194 @@ some text after"#;
         
         let result = extract_json(input);
         assert!(result.is_some());
-        
+
         let json = result.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should be valid JSON");
         assert_eq!(parsed["steps"][0]["description"], "First step");
+    }
+}
+
+// ── Plan quality integration test ─────────────────────────────────────────────
+//
+// NOT a normal unit test — makes real API calls and prints a quality report.
+//
+// Run with:
+//   ANTHROPIC_API_KEY=sk-... cargo test test_plan_quality -- --ignored --nocapture
+//
+// Soft limits (warn but don't fail):
+//   • Total tokens ≤ 60k
+//   • Read-class tool calls (read_symbol, read_file) ≤ 3
+//
+// Hard limit (always fails):
+//   • Plan must have at least 1 step
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+
+    const TASK: &str = concat!(
+        "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, ",
+        "can we configure this to work with actual cost also? So essentially we need to know which how much ",
+        "the users configured model costs in #src/config.rs #src/tui/config_view.rs"
+    );
+
+    const TOKEN_WARN:  u32   = 60_000;
+    const READ_WARN:   usize = 3;
+
+    // Quality heuristics -------------------------------------------------------
+
+    struct StepQuality {
+        has_file_path: bool,   // instruction or files mentions src/
+        has_line_number: bool, // instruction contains "line \d" or ":\d\d\d"
+        vague_phrases: Vec<&'static str>,
+    }
+
+    fn score_step(step: &PlanStep) -> StepQuality {
+        let text = format!("{} {}", step.instruction, step.files.join(" "));
+        let has_file_path = text.contains("src/") || !step.files.is_empty();
+        let has_line_number = {
+            let re_line = step.instruction.contains("line ") || step.instruction.contains("Line ");
+            let re_colon_digits = step.instruction
+                .split(':')
+                .skip(1)
+                .any(|part| part.chars().next().map_or(false, |c| c.is_ascii_digit()));
+            re_line || re_colon_digits
+        };
+        let vague: &[&str] = &[
+            "find the function",
+            "find the method",
+            "search for",
+            "look for",
+            "locate the",
+            "identify the",
+            "find where",
+            "figure out",
+        ];
+        let vague_phrases = vague
+            .iter()
+            .copied()
+            .filter(|p| step.instruction.to_lowercase().contains(p))
+            .collect();
+        StepQuality { has_file_path, has_line_number, vague_phrases }
+    }
+
+    fn print_report(plan: &Plan, metrics: &PlanMetrics) {
+        let total = metrics.total_tokens();
+        let token_flag = if total > TOKEN_WARN { "  ⚠ OVER LIMIT" } else { "" };
+        let read_calls = metrics.tool_calls.get("read_symbol").copied().unwrap_or(0)
+            + metrics.tool_calls.get("read_file").copied().unwrap_or(0)
+            + metrics.tool_calls.get("read_files").copied().unwrap_or(0);
+        let read_flag = if read_calls > READ_WARN { "  ⚠ OVER LIMIT" } else { "" };
+
+        println!();
+        println!("╔══════════════════════════════════════════════════╗");
+        println!("║           PLAN QUALITY REPORT                    ║");
+        println!("╚══════════════════════════════════════════════════╝");
+        println!();
+        println!("METRICS:");
+        println!("  Input tokens:  {:>7}", metrics.total_input_tokens);
+        println!("  Output tokens: {:>7}", metrics.total_output_tokens);
+        println!("  Total tokens:  {:>7}{token_flag}", total);
+        println!("  API turns:     {:>7}", metrics.turns);
+        println!("  Elapsed:       {:>6}s", metrics.elapsed_secs);
+        println!();
+        println!("TOOL CALLS (total={}):", metrics.total_tool_calls());
+        let mut tool_vec: Vec<(&String, &usize)> = metrics.tool_calls.iter().collect();
+        tool_vec.sort_by_key(|(k, _)| k.as_str());
+        for (name, count) in &tool_vec {
+            println!("  {name:<20} ×{count}");
+        }
+        println!("  read-class calls: {read_calls}{read_flag}");
+        println!();
+        println!("PLAN ({} steps):", plan.steps.len());
+        let mut fully_specific = 0usize;
+        for (i, step) in plan.steps.iter().enumerate() {
+            let q = score_step(step);
+            let file_icon  = if q.has_file_path   { "FILE:✓" } else { "FILE:✗" };
+            let line_icon  = if q.has_line_number  { "LINE:✓" } else { "LINE:✗" };
+            let vague_icon = if q.vague_phrases.is_empty() { "VAGUE:✗" } else { "VAGUE:⚠" };
+            if q.has_file_path && q.has_line_number && q.vague_phrases.is_empty() {
+                fully_specific += 1;
+            }
+            println!();
+            println!("  Step {}: {}", i + 1, step.description);
+            if !step.files.is_empty() {
+                println!("    Files: {}", step.files.join(", "));
+            }
+            let instr_preview: String = step.instruction.chars().take(140).collect();
+            let ellipsis = if step.instruction.len() > 140 { "…" } else { "" };
+            println!("    Instruction: {instr_preview}{ellipsis}");
+            println!("    Quality: [{file_icon}] [{line_icon}] [{vague_icon}]");
+            if !q.vague_phrases.is_empty() {
+                println!("    Vague: {:?}", q.vague_phrases);
+            }
+        }
+        println!();
+        let pct = if plan.steps.is_empty() { 0 } else { fully_specific * 100 / plan.steps.len() };
+        println!("QUALITY SCORE: {fully_specific}/{} steps fully specific ({pct}%)", plan.steps.len());
+        println!();
+        if total > TOKEN_WARN {
+            println!("⚠ Token limit exceeded: {total} > {TOKEN_WARN}");
+        }
+        if read_calls > READ_WARN {
+            println!("⚠ Read-class calls exceeded: {read_calls} > {READ_WARN}");
+        }
+        if fully_specific == plan.steps.len() && !plan.steps.is_empty() {
+            println!("✓ All steps fully specific");
+        }
+        println!();
+    }
+
+    #[tokio::test]
+    #[ignore = "integration: not to be run with all units"]
+    async fn test_plan_quality_cost_config() {
+        // Load real config — same resolution path as the TUI (endpoint, model, api_key,
+        // planner_model override).  Skip gracefully if no API key is available.
+        let cfg_file = crate::config::ConfigFile::load().unwrap_or_default();
+        let cfg = crate::config::ResolvedConfig::resolve(&cfg_file, None, None, None, None);
+
+        let plan_model = cfg.planner_model.clone().unwrap_or_else(|| cfg.model.clone());
+        if cfg.api_key.is_none() {
+            println!("SKIP: no api_key in config (set it via config.toml or ANTHROPIC_API_KEY env)");
+            return;
+        }
+        println!("Using model: {plan_model}  endpoint: {}", cfg.endpoint);
+
+        // Load graph from the actual project (test runs from project root)
+        let root = std::env::current_dir().expect("cwd");
+        let (graph, was_warm) = crate::pie::ProjectGraph::load_or_build(&root, 10_000);
+        println!("Graph: {} symbols, warm={was_warm}", graph.symbols.len());
+
+        let mut client = crate::client::Client::new(cfg.endpoint.clone(), plan_model.clone());
+        if let Some(key) = &cfg.api_key {
+            client.set_api_key(key.clone());
+        }
+
+        let context_files = vec![
+            "src/agent.rs".to_string(),
+            "src/config.rs".to_string(),
+            "src/tui/config_view.rs".to_string(),
+        ];
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = generate_plan(
+            TASK,
+            &client,
+            "parecode",
+            &context_files,
+            &graph,
+            None,
+            None,
+            tx,
+            |_| {},
+        )
+        .await;
+
+        let (plan, metrics) = result.expect("generate_plan failed");
+
+        // Print the detailed quality report
+        print_report(&plan, &metrics);
+
+        // Hard assertion — plan must have been generated
+        assert!(!plan.steps.is_empty(), "plan must have at least one step");
     }
 }

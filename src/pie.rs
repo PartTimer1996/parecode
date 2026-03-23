@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{client::{ContentPart, Message, MessageContent, ToolCall}, index::{CallEdge, Symbol, SymbolIndex, compute_end_lines, extract_symbols}};
 
-const SCHEMA_VERSION: u32 = 5; // bumped: construct_edges added (enum variant construction sites)
+const SCHEMA_VERSION: u32 = 6; // bumped: construct_edges now includes ::new()/::default() call sites
 const GRAPH_PATH: &str = ".parecode/project.graph";
 
 
@@ -200,7 +200,9 @@ impl ProjectGraph {
             // Enrich struct/enum/trait signatures from the same file parse.
             let sigs = extractor.extract_signatures(&content);
             for sym in self.symbols.iter_mut() {
-                if sym.file == *file && !sigs.is_empty() {
+                if sym.file == *file && !sigs.is_empty()
+                    && matches!(sym.kind, crate::index::SymbolKind::Struct | crate::index::SymbolKind::Enum | crate::index::SymbolKind::Trait)
+                {
                     if let Some(sig) = sigs.get(&sym.name) {
                         sym.signature = Some(sig.clone());
                     }
@@ -236,7 +238,9 @@ impl ProjectGraph {
             // Enrich struct/enum/trait signatures from the same file parse.
             let sigs = extractor.extract_signatures(&content);
             for sym in self.symbols.iter_mut() {
-                if sym.file == *file && !sigs.is_empty() {
+                if sym.file == *file && !sigs.is_empty()
+                    && matches!(sym.kind, crate::index::SymbolKind::Struct | crate::index::SymbolKind::Enum | crate::index::SymbolKind::Trait)
+                {
                     if let Some(sig) = sigs.get(&sym.name) {
                         sym.signature = Some(sig.clone());
                     }

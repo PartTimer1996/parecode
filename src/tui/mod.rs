@@ -3191,7 +3191,7 @@ fn generate_and_show_plan(
             let _ = tx_chunk.send(UiEvent::ThinkingChunk(chunk.to_string()));
         };
         match plan::generate_plan(&task, &client, &project, &context_files, &graph, narrative.as_ref(), flow_paths.as_ref(), tx_plan, on_chunk).await {
-            Ok(generated_plan) => {
+            Ok((generated_plan, _metrics)) => {
                 // Save plan to disk: JSON for machine use, Markdown for human reading
                 let _ = plan::save_plan(&generated_plan);
                 plan::write_plan_to_disk(&generated_plan);

@@ -15,6 +15,7 @@ use serde_json::Value;
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub const TOOL_READ_FILE: &str = "read_file";
+pub const TOOL_READ_FILES: &str = "read_files";
 pub const TOOL_WRITE_FILE: &str = "write_file";
 pub const TOOL_EDIT_FILE: &str = "edit_file";
 pub const TOOL_PATCH_FILE: &str = "patch_file";
@@ -37,6 +38,7 @@ pub fn all_tool_names() -> &'static [&'static str] {
         TOOL_TRACE_CALLS,
         TOOL_CHECK_WIRING,
         TOOL_READ_FILE,
+        TOOL_READ_FILES,
         TOOL_WRITE_FILE,
         TOOL_EDIT_FILE,
         TOOL_PATCH_FILE,
@@ -69,6 +71,7 @@ pub fn get_tool(name: &str) -> Option<Value> {
         TOOL_TRACE_CALLS => Some(pie_tool::trace_calls_definition()),
         TOOL_CHECK_WIRING => Some(pie_tool::check_wiring_definition()),
         TOOL_READ_FILE => Some(read::definition()),
+        TOOL_READ_FILES => Some(pie_tool::read_files_definition()),
         TOOL_WRITE_FILE => Some(write::definition()),
         TOOL_EDIT_FILE => Some(edit::definition()),
         TOOL_PATCH_FILE => Some(patch::definition()),
@@ -179,7 +182,7 @@ mod tests {
         assert!(names.contains(&TOOL_TRACE_CALLS));
         assert!(names.contains(&TOOL_CHECK_WIRING));
         assert!(names.contains(&TOOL_ORIENT));
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 11);
     }
 
     #[test]
@@ -207,7 +210,7 @@ mod tests {
     #[test]
     fn test_all_definitions() {
         let defs = all_definitions();
-        assert_eq!(defs.len(), 10);
+        assert_eq!(defs.len(), 11);
         assert!(defs.iter().any(|d| d.name == TOOL_READ_FILE));
         assert!(defs.iter().any(|d| d.name == TOOL_ASK_USER));
         assert!(defs.iter().any(|d| d.name == TOOL_ORIENT));

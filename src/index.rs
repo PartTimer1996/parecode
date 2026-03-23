@@ -185,7 +185,35 @@ pub(crate) fn extract_symbols(content: &str, file: &str, out: &mut Vec<Symbol>) 
 
     let lines: Vec<&str> = content.lines().collect();
 
+    // Track whether we're inside a raw string literal (`r#"..."#` or `r"..."`).
+    // Lines inside raw strings can start at column 0 and look like top-level symbols
+    // (common in test fixtures that embed source code), causing false index entries.
+    // We use a simple heuristic: count unmatched r#" openers vs "#" closers.
+    let mut raw_depth: u32 = 0;
+
     for (i, line) in lines.iter().enumerate() {
+        // Update raw-string depth before the top-level check so we don't
+        // accidentally index the first line of a raw string.
+        // r#" opens, "# closes. Handle same-line open+close (no depth change).
+        let opens = line.matches("r#\"").count() as u32;
+        let closes = line.matches("\"#").count() as u32;
+        if raw_depth == 0 {
+            // Not currently inside a raw string — check if this line opens one
+            // and doesn't immediately close it on the same line.
+            if opens > closes {
+                raw_depth += opens - closes;
+            }
+            // If opens == closes the raw string opened and closed on this line — fine.
+        } else {
+            // Inside a raw string — look for the closing "#
+            if closes >= raw_depth {
+                raw_depth = 0;
+            } else {
+                raw_depth -= closes;
+            }
+            continue; // skip symbol extraction while inside raw string
+        }
+
         // Only index top-level symbols — lines that start at column 0 (no indentation).
         // Indented lines are inside function/impl bodies and must not create false
         // symbol boundaries (which would truncate end_line for the enclosing symbol).

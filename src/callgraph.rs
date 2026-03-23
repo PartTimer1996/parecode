@@ -66,6 +66,12 @@ impl CallExtractor {
 
         for (line, constructed) in raw {
             let Some(sym) = find_containing_symbol(&file_syms, line) else { continue };
+            // Skip self-referential: impl AppState constructing AppState (or UiEvent::Foo)
+            // happens when fn new() / Default::default() is inside impl but not indexed.
+            let base = constructed.split("::").next().unwrap_or(&constructed);
+            if sym.name == base {
+                continue;
+            }
             let key = format!("{}::{}", file, sym.name);
             let edges = result.entry(key).or_default();
             // Dedup: one entry per (caller, constructed) pair — first site wins.
@@ -162,36 +168,98 @@ impl CallExtractor {
 /// full path string "UiEvent::TokenStats" — always included (unambiguous enum variant).
 /// For plain struct literals like `AppState { ... }` we record the type name only
 /// if it appears in `known_names` (i.e. it's an indexed project symbol).
+/// For `Self { ... }` inside an impl block we resolve `Self` to the impl's type name,
+/// catching common Rust constructor patterns like `impl Foo { fn new() -> Self { Self { } } }`.
 fn collect_struct_constructions(
     root: Node,
     src: &[u8],
     known_names: &HashMap<String, Vec<String>>,
     out: &mut Vec<(usize, String)>,
 ) {
-    let mut stack: Vec<Node> = vec![root];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "struct_expression" {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let entry: Option<(usize, String)> = match name_node.kind() {
-                    // Enum variant: UiEvent::TokenStats { ... } — always record, store full path
-                    "scoped_type_identifier" => name_node
-                        .utf8_text(src)
-                        .ok()
-                        .map(|s| (node.start_position().row + 1, s.to_string())),
-                    // Plain struct: AppState { ... } — only if indexed
-                    "type_identifier" => name_node.utf8_text(src).ok().and_then(|s| {
-                        if known_names.contains_key(s) {
-                            Some((node.start_position().row + 1, s.to_string()))
-                        } else {
-                            None
+    // Pre-pass: collect impl block line ranges → base type name for `Self` resolution.
+    // `impl<T> Foo<T> { ... }` → base = "Foo"
+    let mut impl_ranges: Vec<(usize, usize, String)> = Vec::new();
+    {
+        let mut stack: Vec<Node> = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "impl_item" {
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    if let Ok(raw) = type_node.utf8_text(src) {
+                        let base = raw.split('<').next().unwrap_or(raw).trim().to_string();
+                        if !base.is_empty() {
+                            impl_ranges.push((
+                                node.start_position().row + 1,
+                                node.end_position().row + 1,
+                                base,
+                            ));
                         }
-                    }),
-                    _ => None,
-                };
-                if let Some(pair) = entry {
-                    out.push(pair);
+                    }
                 }
             }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                stack.push(child);
+            }
+        }
+    }
+
+    let mut stack: Vec<Node> = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "struct_expression" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let expr_line = node.start_position().row + 1;
+                    let entry: Option<(usize, String)> = match name_node.kind() {
+                        // Enum variant: UiEvent::TokenStats { ... } — always record, store full path
+                        "scoped_type_identifier" => name_node
+                            .utf8_text(src)
+                            .ok()
+                            .map(|s| (expr_line, s.to_string())),
+                        "type_identifier" => name_node.utf8_text(src).ok().and_then(|s| {
+                            if s == "Self" {
+                                // Resolve Self → enclosing impl type name
+                                impl_ranges.iter()
+                                    .find(|(start, end, _)| expr_line >= *start && expr_line <= *end)
+                                    .map(|(_, _, type_name)| (expr_line, type_name.clone()))
+                            } else if known_names.contains_key(s) {
+                                // Plain indexed struct literal
+                                Some((expr_line, s.to_string()))
+                            } else {
+                                None
+                            }
+                        }),
+                        _ => None,
+                    };
+                    if let Some(pair) = entry {
+                        out.push(pair);
+                    }
+                }
+            }
+            // TypeName::new() / TypeName::default() / TypeName::build() — common Rust
+            // constructor patterns that don't use struct literal syntax.
+            "call_expression" => {
+                if let Some(func) = node.child_by_field_name("function") {
+                    if func.kind() == "scoped_identifier" {
+                        if let (Some(path_node), Some(name_node)) = (
+                            func.child_by_field_name("path"),
+                            func.child_by_field_name("name"),
+                        ) {
+                            if let (Ok(type_name), Ok(method)) = (
+                                path_node.utf8_text(src),
+                                name_node.utf8_text(src),
+                            ) {
+                                if matches!(method, "new" | "default" | "build")
+                                    && known_names.contains_key(type_name)
+                                {
+                                    let call_line = node.start_position().row + 1;
+                                    out.push((call_line, type_name.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
         let mut cursor = node.walk();
         let children: Vec<Node> = node.children(&mut cursor).collect();
@@ -684,6 +752,33 @@ fn make_state() -> AppState {
     }
 
     #[test]
+    fn test_extract_constructions_self_resolution() {
+        let mut ext = CallExtractor::new().unwrap();
+        let src = r#"
+struct ResolvedConfig { endpoint: String }
+impl ResolvedConfig {
+    pub fn resolve() -> Self {
+        Self { endpoint: "http://localhost".to_string() }
+    }
+}
+"#;
+        let symbols = vec![
+            make_sym("ResolvedConfig", "src/config.rs", 2, 2),
+            make_sym("resolve", "src/config.rs", 4, 6),
+        ];
+        let mut known_names = known(&["resolve"]);
+        known_names.insert("ResolvedConfig".to_string(), vec!["src/config.rs".to_string()]);
+        let edges = ext.extract_constructions(src, "src/config.rs", &symbols, &known_names);
+
+        let key = "src/config.rs::resolve";
+        assert!(edges.contains_key(key), "expected construction edge from resolve: {:?}", edges.keys().collect::<Vec<_>>());
+        assert!(
+            edges[key].iter().any(|e| e.callee == "ResolvedConfig"),
+            "expected callee=ResolvedConfig, got: {:?}", edges.get(key)
+        );
+    }
+
+    #[test]
     fn test_extract_constructions_dedup() {
         let mut ext = CallExtractor::new().unwrap();
         let src = r#"
@@ -699,6 +794,29 @@ fn sender() {
         // Two constructions of the same variant — should be deduplicated to one edge
         let count = edges.get(key).map_or(0, |v| v.len());
         assert_eq!(count, 1, "expected dedup: {:?}", edges.get(key));
+    }
+
+    #[test]
+    fn test_extract_constructions_new_method() {
+        let mut ext = CallExtractor::new().unwrap();
+        let src = r#"
+fn setup(cfg: Config) -> AppState {
+    AppState::new(cfg)
+}
+fn also_default() -> AppState {
+    AppState::default()
+}
+"#;
+        let symbols = vec![
+            make_sym("setup", "src/a.rs", 2, 4),
+            make_sym("also_default", "src/a.rs", 5, 7),
+        ];
+        let known = known(&["setup", "also_default", "AppState"]);
+        let edges = ext.extract_constructions(src, "src/a.rs", &symbols, &known);
+        let setup_edges = edges.get("src/a.rs::setup").expect("setup should have edges");
+        assert!(setup_edges.iter().any(|e| e.callee == "AppState"), "::new() should be tracked");
+        let def_edges = edges.get("src/a.rs::also_default").expect("also_default should have edges");
+        assert!(def_edges.iter().any(|e| e.callee == "AppState"), "::default() should be tracked");
     }
 
     #[test]
