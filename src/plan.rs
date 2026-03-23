@@ -258,7 +258,10 @@ STEP RULES:
 - List EVERY file the step needs to read OR modify (max 10 per step)
 - Every instruction MUST contain exact file paths and line numbers
 - Prefer 4–8 steps; do not split naturally-coupled changes into micro-steps
-- verify: "none" | "command:CMD" | "changed:FILE" | "absent:FILE:PATTERN""#;
+- verify: "none" | "command:CMD" | "changed:FILE" | "absent:FILE:PATTERN"
+- EXACT LINES REQUIRED: If you lack exact line numbers for a file a step must edit, add it to your read_files batch BEFORE writing the step. Never write "around line N" or "similar to line N" — either you know the exact location or you read it first.
+- NO REDUNDANT PARAMETERS: Before adding a parameter to a function, check whether an existing struct argument (e.g. AppState, AgentConfig) already carries that data. Read the field from the existing argument — do not add parameters that duplicate data already passed in.
+- RUST VERIFY: Any step that adds/removes a struct field OR changes a function signature MUST set verify: "command:cargo check". Field propagation across multiple files will silently break without this."#;
 
 /// Response from the model during plan generation.
 #[derive(Debug, Deserialize)]

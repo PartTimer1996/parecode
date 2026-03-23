@@ -906,8 +906,32 @@ pub fn check_wiring_execute(args: &Value, graph: &ProjectGraph) -> String {
     // first few fields of that construction call — so the model knows exactly where
     // to insert the new field without a read_files call.
     if !without_syms.is_empty() {
+        // Build set of files whose structs are nested field types inside WITH-structs.
+        // e.g. HookConfig appears as a field in Profile/AppState signatures → hooks.rs is a
+        // support file, not a propagation container. Exclude the whole file to also catch
+        // sibling types (e.g. HookResult in the same file).
+        let nested_files: std::collections::HashSet<&str> = without_syms.iter()
+            .filter(|gap| matches!(gap.kind, SymbolKind::Struct))
+            .filter(|gap| {
+                with_syms.iter().any(|w| {
+                    w.signature.as_deref()
+                        .map_or(false, |sig| sig.contains(gap.name.as_str()))
+                })
+            })
+            .map(|gap| gap.file.as_str())
+            .collect();
+
         let gap_syms: Vec<&&crate::index::Symbol> = without_syms.iter()
             .filter(|s| matches!(s.kind, SymbolKind::Struct))
+            .filter(|gap| {
+                // Skip structs that ARE field types in with-structs (nested components)
+                let is_nested = with_syms.iter().any(|w| {
+                    w.signature.as_deref()
+                        .map_or(false, |sig| sig.contains(gap.name.as_str()))
+                });
+                // Skip siblings in the same support file
+                !is_nested && !nested_files.contains(gap.file.as_str())
+            })
             .take(3)
             .collect();
         if !gap_syms.is_empty() {
