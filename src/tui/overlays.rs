@@ -608,15 +608,20 @@ pub fn draw_symbol_picker(f: &mut Frame, picker: &FileSymbolPickerState, area: R
         f.render_widget(List::new(items), list_area);
     }
 
+    let (enter_color, enter_label, enter_hint) = if n_picked > 0 {
+        (Color::Rgb(120, 220, 120), "Enter", " confirm  ")
+    } else {
+        (Color::Rgb(70, 65, 100), "Enter", " (pick ≥1)  ")
+    };
     let hint = Line::from(vec![
         Span::styled("  ↑↓", Style::default().fg(Color::Rgb(100, 90, 160))),
         Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Space/Enter", Style::default().fg(Color::Rgb(180, 140, 255))),
         Span::styled(" toggle  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Enter", Style::default().fg(Color::Rgb(120, 220, 120))),
-        Span::styled(" (empty) confirm  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(enter_label, Style::default().fg(enter_color)),
+        Span::styled(enter_hint, Style::default().fg(Color::DarkGray)),
         Span::styled("Esc", Style::default().fg(Color::Rgb(160, 140, 200))),
-        Span::styled(" discard", Style::default().fg(Color::DarkGray)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(hint), chunks[2]);
 }

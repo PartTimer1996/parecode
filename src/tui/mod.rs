@@ -31,7 +31,8 @@ use crossterm::{
     event::{
         Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
         EnableBracketedPaste, DisableBracketedPaste,
-        MouseEventKind,
+        MouseEventKind, MouseButton,
+        EnableMouseCapture, DisableMouseCapture,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -467,6 +468,8 @@ pub struct AppState {
     pub sidebar_focused: bool,
     /// Highlighted row index in the sidebar
     pub sidebar_selected: usize,
+    /// How many entries to skip at the top (scroll offset)
+    pub sidebar_scroll: usize,
     /// Loaded sidebar entries (top 30 sessions)
     pub sidebar_entries: Vec<SidebarEntry>,
     /// Currently active tab
@@ -604,6 +607,7 @@ impl AppState {
             sidebar_visible: false, // set to true after terminal size check in event_loop
             sidebar_focused: false,
             sidebar_selected: 0,
+            sidebar_scroll: 0,
             sidebar_entries: Vec::new(),
             git_available: crate::git::GitRepo::is_git_repo(std::path::Path::new(".")),
             last_checkpoint_hash: None,
@@ -949,6 +953,16 @@ impl AppState {
     }
 }
 
+// ── Chip layout helpers ───────────────────────────────────────────────────────
+
+impl AppState {
+    /// Number of rows needed for the chips bar.
+    /// Symbol attachments appear as inline text in the input box, not as chips.
+    pub fn chips_row_count(&self) -> usize {
+        if self.attached_files.is_empty() { 0 } else { 1 }
+    }
+}
+
 // ── Turn finalisation ─────────────────────────────────────────────────────────
 
 impl AppState {
@@ -1044,14 +1058,14 @@ fn slash_filtered(input: &str) -> Vec<PaletteCommand> {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     Ok(Terminal::new(backend)?)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen);
+    let _ = execute!(terminal.backend_mut(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen);
     let _ = terminal.show_cursor();
 }
 
@@ -1347,17 +1361,46 @@ async fn event_loop(
                     Event::Mouse(mouse) => {
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
-                                if state.active_tab == Tab::Stats {
+                                if state.sidebar_visible && mouse.column < 30 {
+                                    state.sidebar_scroll = state.sidebar_scroll.saturating_sub(1);
+                                } else if state.active_tab == Tab::Stats {
                                     state.stats_scroll = state.stats_scroll.saturating_add(3);
                                 } else {
                                     state.scroll = state.scroll.saturating_add(3);
                                 }
                             }
                             MouseEventKind::ScrollDown => {
-                                if state.active_tab == Tab::Stats {
+                                if state.sidebar_visible && mouse.column < 30 {
+                                    let max_scroll = state.sidebar_entries.len().saturating_sub(1);
+                                    state.sidebar_scroll = (state.sidebar_scroll + 1).min(max_scroll);
+                                } else if state.active_tab == Tab::Stats {
                                     state.stats_scroll = state.stats_scroll.saturating_sub(3);
                                 } else {
                                     state.scroll = state.scroll.saturating_sub(3);
+                                }
+                            }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                // Sidebar session click — hit-test against the 30-col sidebar panel
+                                if state.sidebar_visible && mouse.column < 30 {
+                                    let rel_row = mouse.row as usize;
+                                    // Rows 0-1 are header + divider; entries start at row 2
+                                    if rel_row >= 2 {
+                                        let mut row_offset = 2usize;
+                                        let mut clicked_idx = None;
+                                        for (i, entry) in state.sidebar_entries.iter().enumerate() {
+                                            // Each entry: name(1) + ts(1) + preview?(1) + divider(1)
+                                            let entry_height = if !entry.preview.is_empty() { 4 } else { 3 };
+                                            if rel_row < row_offset + entry_height {
+                                                clicked_idx = Some(i);
+                                                break;
+                                            }
+                                            row_offset += entry_height;
+                                        }
+                                        if let Some(idx) = clicked_idx {
+                                            let actual_idx = idx + state.sidebar_scroll;
+                                            load_sidebar_session(&mut state, actual_idx);
+                                        }
+                                    }
                                 }
                             }
                             _ => {}
@@ -1377,7 +1420,7 @@ async fn event_loop(
 
                     // Suspend TUI
                     disable_raw_mode()?;
-                    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
 
                     // Run editor
                     let status = std::process::Command::new(&editor)
@@ -1386,7 +1429,7 @@ async fn event_loop(
 
                     // Resume TUI
                     enable_raw_mode()?;
-                    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableBracketedPaste)?;
+                    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
                     terminal.clear()?;
 
                     match status {
@@ -1486,47 +1529,7 @@ fn handle_key(
             }
             KeyCode::Enter => {
                 let idx = state.sidebar_selected;
-                if let Some(entry) = state.sidebar_entries.get(idx) {
-                    let path = entry.path.clone();
-                    let id = entry.id.clone();
-                    state.sidebar_focused = false;
-                    match sessions::load_session_turns(&path) {
-                        Ok(turns) if !turns.is_empty() => {
-                            let count = turns.len();
-                            state.entries.clear();
-                            state.scroll = 0;
-                            for t in &turns {
-                                state.entries.push(ConversationEntry::UserMessage(t.user_message.clone()));
-                                if !t.agent_response.is_empty() {
-                                    state.entries.push(ConversationEntry::AssistantChunk(t.agent_response.clone()));
-                                }
-                            }
-                            // Update state.session to the newly selected session so
-                            // is_current highlights correctly in the sidebar.
-                            let cwd = id.splitn(2, '_').nth(1).unwrap_or("unknown").to_string();
-                            state.session = Some(sessions::Session {
-                                id: id.clone(),
-                                _cwd: cwd,
-                                _turns: turns.clone(),
-                                active_turn: count.saturating_sub(1),
-                                path: path.clone(),
-                            });
-                            state.conversation_turns = turns;
-                            state.session_resumed = true;
-                            state.push(ConversationEntry::SystemMsg(
-                                format!("✓ resumed {id} ({count} turns)"),
-                            ));
-                            // Refresh sidebar to mark new current
-                            state.sidebar_entries = load_sidebar_entries(&state.session);
-                        }
-                        Ok(_) => {
-                            state.push(ConversationEntry::SystemMsg("session is empty".to_string()));
-                        }
-                        Err(e) => {
-                            state.push(ConversationEntry::SystemMsg(format!("resume error: {e}")));
-                        }
-                    }
-                }
+                load_sidebar_session(state, idx);
                 return Ok(true);
             }
             KeyCode::Esc => {
@@ -1974,11 +1977,13 @@ fn handle_key(
             match key.code {
                 // Esc: discard picks, return to Normal
                 KeyCode::Esc => SymAction::Discard,
-                // Enter on empty query: confirm all picked symbols
-                KeyCode::Enter if picker.query.is_empty() => {
+                // Enter on empty query + at least one picked: confirm
+                KeyCode::Enter if picker.query.is_empty() && !picker.picked.is_empty() => {
                     SymAction::Confirm(picker.picked.clone())
                 }
-                // Enter / Space with query: toggle highlighted, clear query
+                // Enter on empty query with nothing picked: do nothing (Esc to cancel)
+                KeyCode::Enter if picker.query.is_empty() => SymAction::None,
+                // Enter / Space: toggle highlighted symbol
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     let sym_opt = picker.filtered().get(picker.selected).map(|s| (*s).clone());
                     if let Some(sym) = sym_opt { SymAction::Toggle(sym) }
@@ -2012,17 +2017,37 @@ fn handle_key(
             SymAction::Confirm(picked) => {
                 state.symbol_picker = None;
                 state.mode = Mode::Normal;
+                // Build inline text tokens like "agent.rs::run_tui() mod.rs::AppState"
+                let mut tokens: Vec<String> = picked.iter().map(|s| {
+                    let base = std::path::Path::new(&s.file)
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or(s.file.as_str())
+                        .to_string();
+                    if s.kind == "fn" { format!("{}::{}()", base, s.name) }
+                    else { format!("{}::{}", base, s.name) }
+                }).collect();
+                tokens.dedup();
+                let text = tokens.join(" ");
+                if !text.is_empty() {
+                    state.input_box.move_to_end();
+                    if !state.input_box.get_text().trim().is_empty() {
+                        state.input_box.insert_str(" ");
+                    }
+                    state.input_box.insert_str(&text);
+                }
+                // Populate attached_symbols for source preload injection (consumed on submit)
                 for sym in picked {
                     if !state.attached_symbols.iter().any(|s| s.name == sym.name && s.file == sym.file) {
                         state.attached_symbols.push(sym);
                     }
                 }
+                state.attached_symbols.sort_by(|a, b| a.file.cmp(&b.file).then(a.name.cmp(&b.name)));
             }
             SymAction::Toggle(sym) => {
                 if let Some(picker) = &mut state.symbol_picker {
                     picker.toggle(&sym);
-                    picker.query.clear();
-                    picker.selected = 0;
+                    // Stay at current position — don't reset query or selection
                 }
             }
             SymAction::Discard => {
@@ -2367,14 +2392,6 @@ fn handle_key(
                 }
             }
         }
-        // Tab — when sidebar is visible + input empty: enter sidebar focus
-        (KeyModifiers::NONE, KeyCode::Tab)
-            if state.sidebar_visible
-                && state.input_box.is_empty()
-                && state.mode == Mode::Normal
-                && state.attached_files.is_empty() => {
-            state.sidebar_focused = true;
-        }
         // 1-5 — switch tabs (only when input is empty and not running)
         (KeyModifiers::NONE, KeyCode::Char('1')) if state.input_box.is_empty()
             && state.mode == Mode::Normal => {
@@ -2429,9 +2446,9 @@ fn handle_key(
                 }
             }
         }
-        // Tab — cycle focus through all attached chips (files + symbols)
+        // Tab — cycle focus through file chips only (symbols are inline text now)
         (KeyModifiers::NONE, KeyCode::Tab) => {
-            let total_chips = state.attached_files.len() + state.attached_symbols.len();
+            let total_chips = state.attached_files.len();
             if state.mode == Mode::Normal && total_chips > 0 {
                 state.focused_chip = Some(match state.focused_chip {
                     None => 0,
@@ -2469,19 +2486,13 @@ fn handle_key(
                 state.scroll = state.scroll.saturating_sub(20);
             }
         }
-        // Backspace — remove focused chip (files first, then symbols) before delegating to input_box
+        // Backspace — remove focused file chip, or fall through to input_box
         (KeyModifiers::NONE, KeyCode::Backspace) if state.mode == Mode::Normal => {
             if let Some(idx) = state.focused_chip {
-                let nfiles = state.attached_files.len();
-                if idx < nfiles {
+                if idx < state.attached_files.len() {
                     state.attached_files.remove(idx);
-                } else {
-                    let sym_idx = idx - nfiles;
-                    if sym_idx < state.attached_symbols.len() {
-                        state.attached_symbols.remove(sym_idx);
-                    }
                 }
-                let total_chips = state.attached_files.len() + state.attached_symbols.len();
+                let total_chips = state.attached_files.len();
                 state.focused_chip = if total_chips == 0 {
                     None
                 } else {
@@ -2629,6 +2640,42 @@ fn handle_submit(
             if !state.attached_files.iter().any(|f| f.path == path) {
                 if std::path::Path::new(path).exists() {
                     state.attached_files.push(AttachedFile { path: path.to_string() });
+                }
+            }
+        }
+    }
+
+    // Parse file::symbol tokens (typed or pasted) and back-fill attached_symbols from graph
+    if let Some(ref graph) = state.project_graph {
+        let tokens: Vec<&str> = input.split_whitespace()
+            .filter(|t| {
+                let c = t.trim_end_matches("()");
+                let p = c.find("::");
+                p.map(|i| i > 0 && i + 2 < c.len()).unwrap_or(false)
+            })
+            .collect();
+        for token in tokens {
+            let clean = token.trim_end_matches("()");
+            if let Some(sep) = clean.rfind("::") {
+                let file_hint = &clean[..sep];
+                let sym_name = &clean[sep + 2..];
+                if state.attached_symbols.iter().any(|a| a.name == sym_name) { continue; }
+                if let Some(sym) = graph.symbols.iter().find(|s| {
+                    s.name == sym_name
+                        && (std::path::Path::new(&s.file)
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .map(|f| f == file_hint)
+                            .unwrap_or(false)
+                            || s.file.ends_with(file_hint))
+                }) {
+                    state.attached_symbols.push(crate::pie::AttachedSymbol {
+                        name: sym.name.clone(),
+                        file: sym.file.clone(),
+                        start_line: sym.line,
+                        end_line: sym.end_line,
+                        kind: sym.kind.label().to_string(),
+                    });
                 }
             }
         }
@@ -3218,9 +3265,9 @@ fn launch_agent(
     // Reset collectors for this new run
     state.collecting_response.clear();
     state.collecting_tools.clear();
-    // Clear attached files — consumed into the first user message; don't re-send next turn.
-    // attached_symbols are persistent (user removes them explicitly via chip ✕).
+    // Clear attached files and symbols — consumed into the first user message.
     state.attached_files.clear();
+    state.attached_symbols.clear();
     state.focused_chip = None;
 
     let file_cache = state.file_cache.clone();
@@ -3288,6 +3335,7 @@ fn launch_quick(
     state.collecting_response.clear();
     state.collecting_tools.clear();
     state.attached_files.clear();
+    state.attached_symbols.clear();
     state.focused_chip = None;
 
     tokio::spawn(async move {
@@ -3319,6 +3367,9 @@ fn generate_and_show_plan(
     ui_tx: mpsc::UnboundedSender<UiEvent>,
 ) {
     let attached_symbols = state.attached_symbols.clone();
+    state.attached_symbols.clear(); // consumed into planner context
+    state.attached_files.clear();   // consumed into planner context
+    state.focused_chip = None;
     // Use planner_model if configured, otherwise fall back to the regular model
     let plan_model = resolved.planner_model
         .clone()
@@ -3607,7 +3658,50 @@ fn launch_plan(
     });
 }
 
-// ── Sidebar data loading ──────────────────────────────────────────────────────
+// ── Sidebar helpers ───────────────────────────────────────────────────────────
+
+/// Load and switch to a sidebar session by index.  Used from both keyboard Enter
+/// and mouse-click handlers to avoid duplicating the resume logic.
+fn load_sidebar_session(state: &mut AppState, idx: usize) {
+    if let Some(entry) = state.sidebar_entries.get(idx) {
+        let path = entry.path.clone();
+        let id = entry.id.clone();
+        state.sidebar_focused = false;
+        match sessions::load_session_turns(&path) {
+            Ok(turns) if !turns.is_empty() => {
+                let count = turns.len();
+                state.entries.clear();
+                state.scroll = 0;
+                for t in &turns {
+                    state.entries.push(ConversationEntry::UserMessage(t.user_message.clone()));
+                    if !t.agent_response.is_empty() {
+                        state.entries.push(ConversationEntry::AssistantChunk(t.agent_response.clone()));
+                    }
+                }
+                let cwd = id.splitn(2, '_').nth(1).unwrap_or("unknown").to_string();
+                state.session = Some(sessions::Session {
+                    id: id.clone(),
+                    _cwd: cwd,
+                    _turns: turns.clone(),
+                    active_turn: count.saturating_sub(1),
+                    path: path.clone(),
+                });
+                state.conversation_turns = turns;
+                state.session_resumed = true;
+                state.push(ConversationEntry::SystemMsg(
+                    format!("✓ resumed {id} ({count} turns)"),
+                ));
+                state.sidebar_entries = load_sidebar_entries(&state.session);
+            }
+            Ok(_) => {
+                state.push(ConversationEntry::SystemMsg("session is empty".to_string()));
+            }
+            Err(e) => {
+                state.push(ConversationEntry::SystemMsg(format!("resume error: {e}")));
+            }
+        }
+    }
+}
 
 fn load_sidebar_entries(current_session: &Option<sessions::Session>) -> Vec<SidebarEntry> {
     let current_id = current_session.as_ref().map(|s| s.id.as_str()).unwrap_or("");

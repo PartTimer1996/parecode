@@ -50,6 +50,9 @@ impl InputBox {
                 .add_modifier(Modifier::BOLD),
         );
         ta.set_selection_style(Style::default().bg(Color::Rgb(40, 60, 100)).fg(Color::White));
+        // Highlight file::symbol() references as they're typed/pasted
+        let _ = ta.set_search_pattern(r"[a-zA-Z0-9_./-]+::[a-zA-Z0-9_]+(?:\(\))?");
+        ta.set_search_style(Style::default().fg(Color::Rgb(100, 220, 120)).add_modifier(Modifier::BOLD));
         // No block — outer block is rendered separately
         ta.set_block(Block::default());
         Self { textarea: ta }

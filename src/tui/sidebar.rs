@@ -24,8 +24,9 @@ pub fn draw_sidebar(f: &mut Frame, state: &AppState, area: Rect) {
     let w = inner.width as usize;
     let mut items: Vec<ListItem<'static>> = Vec::new();
 
-    // Header
-    let ctrl_hint = if focused { " Esc=exit" } else { " Tab=focus" };
+    // Header — show scroll indicator if list is scrolled
+    let scroll = state.sidebar_scroll;
+    let ctrl_hint = if focused { " Esc=exit" } else if scroll > 0 { " ↑ scroll" } else { " ↕ scroll" };
     let header_pad = w.saturating_sub(9 + ctrl_hint.len());
     items.push(ListItem::new(Line::from(vec![
         Span::styled(" Sessions", Style::default().fg(Color::Rgb(100, 95, 150)).add_modifier(Modifier::BOLD)),
@@ -36,13 +37,20 @@ pub fn draw_sidebar(f: &mut Frame, state: &AppState, area: Rect) {
         Span::styled("─".repeat(w), Style::default().fg(Color::Rgb(35, 33, 55))),
     ])));
 
-    if state.sidebar_entries.is_empty() {
+    // Apply scroll offset — skip first `scroll` entries
+    let visible_entries: &[super::SidebarEntry] = if scroll < state.sidebar_entries.len() {
+        &state.sidebar_entries[scroll..]
+    } else {
+        &[]
+    };
+
+    if visible_entries.is_empty() {
         items.push(ListItem::new(Line::from(vec![
             Span::styled(" no sessions", Style::default().fg(Color::Rgb(50, 47, 75))),
         ])));
     } else {
-        for (i, entry) in state.sidebar_entries.iter().enumerate() {
-            let selected = focused && i == state.sidebar_selected;
+        for (i, entry) in visible_entries.iter().enumerate() {
+            let selected = focused && (i + scroll) == state.sidebar_selected;
 
             // Colour scheme: current session = cyan; selected (focused) = bright highlight
             let (bg, bullet_fg, name_fg, meta_fg, preview_fg) = if entry.is_current && selected {

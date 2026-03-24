@@ -118,18 +118,19 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
         area
     };
 
-    let has_chips = !state.attached_files.is_empty() || !state.attached_symbols.is_empty();
+    let chips_rows = state.chips_row_count();
+    let has_chips = chips_rows > 0;
     let input_line_count = state.input_box.line_count().max(1);
     let input_height = (input_line_count + 2).clamp(6, 18) as u16; // +2 for borders, min 6, max 18
     // Layout: tab bar | content | stats bar | (chips?) | input box | status bar
     let constraints = if has_chips {
         vec![
-            Constraint::Length(1),            // tab bar
-            Constraint::Min(0),               // content area
-            Constraint::Length(1),            // stats bar (∑ tasks/tokens/hooks)
-            Constraint::Length(1),            // attached files chips row
-            Constraint::Length(input_height), // input box
-            Constraint::Length(1),            // status bar (▲ parecode profile model)
+            Constraint::Length(1),                 // tab bar
+            Constraint::Min(0),                    // content area
+            Constraint::Length(1),                 // stats bar (∑ tasks/tokens/hooks)
+            Constraint::Length(chips_rows as u16), // chips rows (1 per file group)
+            Constraint::Length(input_height),      // input box
+            Constraint::Length(1),                 // status bar (▲ parecode profile model)
         ]
     } else {
         vec![

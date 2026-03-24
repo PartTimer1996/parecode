@@ -541,43 +541,17 @@ pub fn draw_history(f: &mut Frame, state: &AppState, area: Rect) {
 }
 
 pub fn draw_chips(f: &mut Frame, state: &AppState, area: Rect) {
-    let mut spans = vec![Span::styled(" 📎 ", Style::default().fg(Color::DarkGray))];
-    let mut chip_idx = 0usize;
+    if state.attached_files.is_empty() { return; }
 
-    // File chips (whole-file attachments via Tab in file picker)
-    for file in state.attached_files.iter() {
-        let focused = state.focused_chip == Some(chip_idx);
+    let mut spans = vec![Span::styled(" 📎 ", Style::default().fg(Color::DarkGray))];
+    for (idx, file) in state.attached_files.iter().enumerate() {
+        let focused = state.focused_chip == Some(idx);
         let name = short_filename(&file.path);
         let (bg, fg) = if focused { (Color::Cyan, Color::Black) } else { (Color::DarkGray, Color::White) };
         spans.push(Span::styled(format!(" {name} ✕ "), Style::default().fg(fg).bg(bg)));
         spans.push(Span::raw(" "));
-        chip_idx += 1;
     }
-
-    // Symbol chips (precision attachments via # → Enter drill-down)
-    for sym in state.attached_symbols.iter() {
-        let focused = state.focused_chip == Some(chip_idx);
-        let kind_color = match sym.kind.as_str() {
-            "fn"     => Color::Rgb(100, 160, 255),
-            "struct" => Color::Rgb(220, 160, 80),
-            "enum"   => Color::Rgb(200, 100, 180),
-            "trait"  => Color::Rgb(80, 200, 180),
-            _        => Color::Rgb(160, 160, 160),
-        };
-        let (bg, name_fg) = if focused {
-            (Color::Rgb(60, 45, 120), Color::White)
-        } else {
-            (Color::Rgb(22, 18, 40), Color::Rgb(210, 200, 255))
-        };
-        spans.push(Span::styled(format!(" {} ", sym.kind), Style::default().fg(kind_color).bg(bg)));
-        spans.push(Span::styled(format!("{} ✕ ", sym.name), Style::default().fg(name_fg).bg(bg).add_modifier(ratatui::style::Modifier::BOLD)));
-        spans.push(Span::raw(" "));
-        chip_idx += 1;
-    }
-
-    if chip_idx > 0 {
-        spans.push(Span::styled(" Tab · Del to remove ", Style::default().fg(Color::DarkGray)));
-    }
+    spans.push(Span::styled(" Tab · Del ", Style::default().fg(Color::Rgb(55, 50, 80))));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
