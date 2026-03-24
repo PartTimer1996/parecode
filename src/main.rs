@@ -222,6 +222,7 @@ async fn run_single_shot(
         project_narrative: None,
         flow_paths: crate::flowpaths::FlowPathIndex::load(std::path::Path::new("."))
             .map(std::sync::Arc::new),
+        attached_symbols: vec![],
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<tui::UiEvent>();
@@ -359,6 +360,7 @@ async fn run_single_shot_quick(
         project_graph: Some(project_graph),
         project_narrative: None,
         flow_paths: None, // quick/headless mode: no path preloading
+        attached_symbols: vec![],
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<tui::UiEvent>();

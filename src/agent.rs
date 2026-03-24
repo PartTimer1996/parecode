@@ -168,7 +168,8 @@ pub async fn run_tui(
         ))
         .unwrap_or_else(crate::pie::PieContext::empty);
 
-    let user_content = format!("{}{}", pie_ctx.user_prefix, build_user_message(task, &attached));
+    let symbol_preload = crate::pie::build_symbol_preload(&config.attached_symbols);
+    let user_content = format!("{}{}{}", symbol_preload, pie_ctx.user_prefix, build_user_message(task, &attached));
     messages.extend(pie_ctx.injection_messages);
 
     // ── Git checkpoint ────────────────────────────────────────────────────────
@@ -494,6 +495,9 @@ pub struct AgentConfig {
     pub project_narrative: Option<std::sync::Arc<crate::narrative::ProjectNarrative>>,
     /// Pre-computed flow paths for proactive context delivery. None for executor plan steps.
     pub flow_paths: Option<std::sync::Arc<crate::flowpaths::FlowPathIndex>>,
+    /// Symbols pre-selected by the user via `#` drill-down. Source code is injected
+    /// before the task message so the model skips redundant reads.
+    pub attached_symbols: Vec<crate::pie::AttachedSymbol>,
 }
 
 // ── Pure prompt-assembly helpers ──────────────────────────────────────────────
@@ -1339,6 +1343,7 @@ mod tests {
             project_graph: None,
             project_narrative: None,
             flow_paths: None,
+            attached_symbols: vec![],
         }
     }
 
@@ -1523,6 +1528,7 @@ mod tests {
             project_graph: None,
             project_narrative: None,
             flow_paths: None,
+            attached_symbols: vec![],
         }
     }
 

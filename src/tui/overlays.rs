@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use super::{AppState, FilePickerState, SessionBrowserState, slash_filtered,
-            HookWizardState, WizardStep, PlanSymbolPickerState};
+            HookWizardState, WizardStep, FileSymbolPickerState};
 
 // ── Command palette ────────────────────────────────────────────────────────────
 
@@ -494,12 +494,11 @@ pub fn draw_profile_picker(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(list, inner);
 }
 
-// ── Plan symbol picker ────────────────────────────────────────────────────────
+// ── Symbol picker (# drill-down) ──────────────────────────────────────────────
 
-/// Overlay for picking graph symbols (fn, struct, enum, trait) to pre-load into the planner.
-/// Shown between `/plan task` input and actual plan generation. User searches by name,
-/// marks symbols with Space/Enter, then presses Enter on an empty query to start planning.
-pub fn draw_plan_symbol_picker(f: &mut Frame, picker: &PlanSymbolPickerState, area: Rect) {
+/// Overlay shown after selecting a file in the file picker. Displays all graph symbols
+/// from that file; user picks multiple with Space/Enter, confirms with Enter on empty query.
+pub fn draw_symbol_picker(f: &mut Frame, picker: &FileSymbolPickerState, area: Rect) {
     let width = 70u16.min(area.width.saturating_sub(4));
     let height = 22u16.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
@@ -509,12 +508,14 @@ pub fn draw_plan_symbol_picker(f: &mut Frame, picker: &PlanSymbolPickerState, ar
     f.render_widget(Clear, popup_area);
 
     let n_picked = picker.picked.len();
+    // Show just the filename portion in the title
+    let fname = std::path::Path::new(&picker.file)
+        .file_name().and_then(|f| f.to_str()).unwrap_or(&picker.file);
     let title = if n_picked == 0 {
-        " ◆ plan — attach symbols  (optional) ".to_string()
+        format!(" ◆ {fname} — pick symbols ")
     } else {
-        format!(" ◆ plan — {} symbol{} attached ", n_picked, if n_picked == 1 { "" } else { "s" })
+        format!(" ◆ {fname} — {} selected ", n_picked)
     };
-
     let title_color = if n_picked > 0 { Color::Rgb(180, 140, 255) } else { Color::Rgb(140, 120, 200) };
 
     let outer = Block::default()
@@ -527,7 +528,6 @@ pub fn draw_plan_symbol_picker(f: &mut Frame, picker: &PlanSymbolPickerState, ar
     let inner = outer.inner(popup_area);
     f.render_widget(outer, popup_area);
 
-    // Layout: search bar | list | footer
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -550,8 +550,6 @@ pub fn draw_plan_symbol_picker(f: &mut Frame, picker: &PlanSymbolPickerState, ar
     let total = filtered.len();
     let list_area = chunks[1];
     let visible_height = list_area.height as usize;
-
-    // Scroll to keep selected visible
     let sel = picker.selected.min(total.saturating_sub(1));
     let skip = if sel >= visible_height { sel - visible_height + 1 } else { 0 };
 
@@ -566,7 +564,6 @@ pub fn draw_plan_symbol_picker(f: &mut Frame, picker: &PlanSymbolPickerState, ar
 
             let check = if is_picked { "✓ " } else { "  " };
             let check_color = if is_picked { Color::Rgb(120, 220, 120) } else { Color::DarkGray };
-
             let kind_color = match sym.kind.as_str() {
                 "fn"     => Color::Rgb(100, 160, 255),
                 "struct" => Color::Rgb(220, 160, 80),
@@ -574,83 +571,53 @@ pub fn draw_plan_symbol_picker(f: &mut Frame, picker: &PlanSymbolPickerState, ar
                 "trait"  => Color::Rgb(80, 200, 180),
                 _        => Color::Rgb(160, 160, 160),
             };
-
             let (bg, name_fg, loc_fg) = if is_sel {
                 (Color::Rgb(30, 22, 55), Color::White, Color::Rgb(160, 150, 210))
             } else {
                 (Color::Reset, Color::Rgb(210, 205, 240), Color::Rgb(90, 80, 130))
             };
 
-            // Trim file path to last two segments for readability
-            let file_short = {
-                let p = std::path::Path::new(&sym.file);
-                let parts: Vec<_> = p.components().collect();
-                if parts.len() >= 2 {
-                    format!("{}/{}", parts[parts.len()-2].as_os_str().to_string_lossy(),
-                                     parts[parts.len()-1].as_os_str().to_string_lossy())
-                } else {
-                    sym.file.clone()
-                }
-            };
-
             ListItem::new(Line::from(vec![
                 Span::styled(check, Style::default().fg(check_color).bg(bg)),
                 Span::styled(format!("{:<7}", sym.kind), Style::default().fg(kind_color).bg(bg)),
-                Span::styled(format!("{:<30}", sym.name), Style::default().fg(name_fg).bg(bg).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("  {}:{}", file_short, sym.start_line), Style::default().fg(loc_fg).bg(bg)),
+                Span::styled(format!("{:<34}", sym.name), Style::default().fg(name_fg).bg(bg).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  :{}", sym.start_line), Style::default().fg(loc_fg).bg(bg)),
             ]))
         })
         .collect();
 
     if filtered.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  no symbols match",
-                Style::default().fg(Color::DarkGray),
-            )),
+            Paragraph::new(Span::styled("  no symbols match", Style::default().fg(Color::DarkGray))),
             list_area,
         );
     } else {
-        // Scroll position indicator
-        let scroll_info = if total > visible_height {
-            format!("  {}/{total}", sel + 1)
-        } else {
-            String::new()
-        };
-        if !scroll_info.is_empty() {
-            let info_area = Rect { x: list_area.x + list_area.width.saturating_sub(12), y: list_area.y, width: 12, height: 1 };
+        if total > visible_height {
+            let info_area = Rect {
+                x: list_area.x + list_area.width.saturating_sub(12),
+                y: list_area.y, width: 12, height: 1,
+            };
             f.render_widget(
-                Paragraph::new(Span::styled(scroll_info, Style::default().fg(Color::Rgb(60, 55, 100)))),
+                Paragraph::new(Span::styled(
+                    format!("  {}/{total}", sel + 1),
+                    Style::default().fg(Color::Rgb(60, 55, 100)),
+                )),
                 info_area,
             );
         }
         f.render_widget(List::new(items), list_area);
     }
 
-    // Footer hint
-    let hint = if n_picked > 0 {
-        Line::from(vec![
-            Span::styled("  ↑↓", Style::default().fg(Color::Rgb(100, 90, 160))),
-            Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Space/Enter", Style::default().fg(Color::Rgb(180, 140, 255))),
-            Span::styled(" toggle  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Enter", Style::default().fg(Color::Rgb(120, 220, 120))),
-            Span::styled(" (empty query) start  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Esc", Style::default().fg(Color::Rgb(160, 140, 200))),
-            Span::styled(" skip picker", Style::default().fg(Color::DarkGray)),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("  ↑↓", Style::default().fg(Color::Rgb(100, 90, 160))),
-            Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Space/Enter", Style::default().fg(Color::Rgb(180, 140, 255))),
-            Span::styled(" attach  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Enter", Style::default().fg(Color::Rgb(120, 220, 120))),
-            Span::styled(" (empty) start without symbols  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Esc", Style::default().fg(Color::Rgb(160, 140, 200))),
-            Span::styled(" skip", Style::default().fg(Color::DarkGray)),
-        ])
-    };
+    let hint = Line::from(vec![
+        Span::styled("  ↑↓", Style::default().fg(Color::Rgb(100, 90, 160))),
+        Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Space/Enter", Style::default().fg(Color::Rgb(180, 140, 255))),
+        Span::styled(" toggle  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::Rgb(120, 220, 120))),
+        Span::styled(" (empty) confirm  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Rgb(160, 140, 200))),
+        Span::styled(" discard", Style::default().fg(Color::DarkGray)),
+    ]);
     f.render_widget(Paragraph::new(hint), chunks[2]);
 }
 

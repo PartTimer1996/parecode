@@ -118,7 +118,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
         area
     };
 
-    let has_chips = !state.attached_files.is_empty();
+    let has_chips = !state.attached_files.is_empty() || !state.attached_symbols.is_empty();
     let input_line_count = state.input_box.line_count().max(1);
     let input_height = (input_line_count + 2).clamp(6, 18) as u16; // +2 for borders, min 6, max 18
     // Layout: tab bar | content | stats bar | (chips?) | input box | status bar
@@ -209,9 +209,9 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
             super::overlays::draw_hook_wizard(f, wiz, area);
         }
     }
-    if state.mode == Mode::PlanSymbolPicker {
-        if let Some(picker) = &state.plan_symbol_picker {
-            super::overlays::draw_plan_symbol_picker(f, picker, area);
+    if state.mode == Mode::SymbolPicker {
+        if let Some(picker) = &state.symbol_picker {
+            super::overlays::draw_symbol_picker(f, picker, area);
         }
     }
 }

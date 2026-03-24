@@ -169,7 +169,7 @@ pub enum Mode {
     SessionBrowser, // Ctrl+H session history browser
     PlanReview,     // Plan review/annotation overlay
     PlanRunning,      // Plan step currently executing
-    PlanSymbolPicker, // Symbol picker shown before plan generation
+    SymbolPicker,     // # drill-down: symbol picker for a chosen file
     UndoPicker,       // Interactive checkpoint picker in Git tab (↑↓ select, Enter confirm, Esc cancel)
     ProfilePicker,    // Interactive profile picker overlay in Config tab
     AskingUser,       // Model asked a question, waiting for user's typed answer
@@ -201,21 +201,21 @@ pub struct HookWizardState {
     pub on_session_end_input: String,
 }
 
-// ── Plan symbol picker ────────────────────────────────────────────────────────
+// ── Symbol picker (# drill-down) ──────────────────────────────────────────────
 
-/// State for the symbol picker shown before plan generation.
-/// User searches graph symbols by name and picks the ones they expect to change.
-/// Picked symbols have their source code injected into the planner's first message,
-/// collapsing the exploration phase to verification-only.
-pub struct PlanSymbolPickerState {
-    pub task: String,
+/// State for the per-file symbol picker opened when the user presses Enter in the
+/// file picker. Shows only symbols from the chosen file; supports multi-select.
+/// Confirmed symbols are added to `AppState::attached_symbols`.
+pub struct FileSymbolPickerState {
+    /// The file this picker is scoped to (displayed in title).
+    pub file: String,
     pub query: String,
     pub selected: usize,
     pub all_symbols: Vec<crate::pie::AttachedSymbol>,
     pub picked: Vec<crate::pie::AttachedSymbol>,
 }
 
-impl PlanSymbolPickerState {
+impl FileSymbolPickerState {
     pub fn filtered(&self) -> Vec<&crate::pie::AttachedSymbol> {
         if self.query.is_empty() {
             self.all_symbols.iter().collect()
@@ -223,7 +223,7 @@ impl PlanSymbolPickerState {
             let q = self.query.to_lowercase();
             self.all_symbols.iter()
                 .filter(|s| s.name.to_lowercase().contains(&q)
-                          || s.file.to_lowercase().contains(&q))
+                          || s.kind.to_lowercase().contains(&q))
                 .collect()
         }
     }
@@ -528,7 +528,11 @@ pub struct AppState {
     pub available_hook_presets: Vec<String>,
     /// Hook setup wizard state (Some when Mode::HookWizard)
     pub hook_wizard: Option<HookWizardState>,
-    pub plan_symbol_picker: Option<PlanSymbolPickerState>,
+    /// Per-file symbol picker opened from the # file picker (Some when Mode::SymbolPicker).
+    pub symbol_picker: Option<FileSymbolPickerState>,
+    /// Symbols attached via # drill-down — persistent for the session, injected into every
+    /// agent/plan call as pre-loaded source (like attached_files but at symbol granularity).
+    pub attached_symbols: Vec<crate::pie::AttachedSymbol>,
     /// Persistent project graph — loaded/built at startup, injected into every agent call.
     /// None only before the first build completes (should not happen in normal flow).
     pub project_graph: Option<crate::pie::ProjectGraph>,
@@ -617,7 +621,8 @@ impl AppState {
             active_hook_preset: resolved.active_hooks.clone(),
             available_hook_presets: resolved.available_hooks.clone(),
             hook_wizard: None,
-            plan_symbol_picker: None,
+            symbol_picker: None,
+            attached_symbols: Vec::new(),
             project_graph: None,     // populated during splash in event_loop
             project_narrative: None, // populated during splash in event_loop
             flow_paths: None,        // loaded from .parecode/paths.json after graph ready
@@ -1957,69 +1962,74 @@ fn handle_key(
         return Ok(true);
     }
 
-    // ── PlanSymbolPicker mode ─────────────────────────────────────────────────
-    if state.mode == Mode::PlanSymbolPicker {
-        // Collect the action outside the borrow to avoid NLL conflicts
-        enum PickerAction {
+    // ── SymbolPicker mode (# drill-down into a single file) ──────────────────
+    if state.mode == Mode::SymbolPicker {
+        enum SymAction {
             None,
-            Confirm { task: String, picked: Vec<crate::pie::AttachedSymbol> },
-            Toggle { sym: crate::pie::AttachedSymbol },
+            Confirm(Vec<crate::pie::AttachedSymbol>),
+            Toggle(crate::pie::AttachedSymbol),
+            Discard,
         }
-        let action = if let Some(picker) = &mut state.plan_symbol_picker {
+        let action = if let Some(picker) = &mut state.symbol_picker {
             match key.code {
-                // Esc / Enter-on-empty-query: confirm picks (even empty) and start plan
-                KeyCode::Esc => PickerAction::Confirm {
-                    task: picker.task.clone(),
-                    picked: picker.picked.clone(),
-                },
-                KeyCode::Enter if picker.query.is_empty() => PickerAction::Confirm {
-                    task: picker.task.clone(),
-                    picked: picker.picked.clone(),
-                },
-                // Enter with query: toggle the highlighted symbol, clear query
-                KeyCode::Enter => {
+                // Esc: discard picks, return to Normal
+                KeyCode::Esc => SymAction::Discard,
+                // Enter on empty query: confirm all picked symbols
+                KeyCode::Enter if picker.query.is_empty() => {
+                    SymAction::Confirm(picker.picked.clone())
+                }
+                // Enter / Space with query: toggle highlighted, clear query
+                KeyCode::Enter | KeyCode::Char(' ') => {
                     let sym_opt = picker.filtered().get(picker.selected).map(|s| (*s).clone());
-                    if let Some(sym) = sym_opt { PickerAction::Toggle { sym } }
-                    else { PickerAction::None }
+                    if let Some(sym) = sym_opt { SymAction::Toggle(sym) }
+                    else { SymAction::None }
                 }
                 KeyCode::Up => {
                     if picker.selected > 0 { picker.selected -= 1; }
-                    PickerAction::None
+                    SymAction::None
                 }
                 KeyCode::Down => {
                     let count = picker.filtered().len();
                     if picker.selected + 1 < count { picker.selected += 1; }
-                    PickerAction::None
+                    SymAction::None
                 }
                 KeyCode::Backspace => {
                     picker.query.pop();
                     picker.selected = 0;
-                    PickerAction::None
+                    SymAction::None
                 }
                 KeyCode::Char(c) => {
                     picker.query.push(c);
                     picker.selected = 0;
-                    PickerAction::None
+                    SymAction::None
                 }
-                _ => PickerAction::None,
+                _ => SymAction::None,
             }
         } else {
-            PickerAction::None
+            SymAction::None
         };
         match action {
-            PickerAction::Confirm { task, picked } => {
-                state.plan_symbol_picker = None;
+            SymAction::Confirm(picked) => {
+                state.symbol_picker = None;
                 state.mode = Mode::Normal;
-                generate_and_show_plan(task, picked, state, resolved, ui_tx.clone());
+                for sym in picked {
+                    if !state.attached_symbols.iter().any(|s| s.name == sym.name && s.file == sym.file) {
+                        state.attached_symbols.push(sym);
+                    }
+                }
             }
-            PickerAction::Toggle { sym } => {
-                if let Some(picker) = &mut state.plan_symbol_picker {
+            SymAction::Toggle(sym) => {
+                if let Some(picker) = &mut state.symbol_picker {
                     picker.toggle(&sym);
                     picker.query.clear();
                     picker.selected = 0;
                 }
             }
-            PickerAction::None => {}
+            SymAction::Discard => {
+                state.symbol_picker = None;
+                state.mode = Mode::Normal;
+            }
+            SymAction::None => {}
         }
         return Ok(true);
     }
@@ -2046,13 +2056,55 @@ fn handle_key(
                         fp.selected += 1;
                     }
                 }
-                KeyCode::Enter | KeyCode::Tab => {
+                KeyCode::Enter => {
+                    // Drill into symbols for this file (if graph available)
+                    let chosen = fp.filtered().get(fp.selected).map(|s| s.to_string());
+                    state.input.clear();
+                    state.cursor = 0;
+                    state.file_picker = None;
+                    if let Some(file) = chosen {
+                        let all_symbols: Vec<crate::pie::AttachedSymbol> =
+                            if let Some(graph) = &state.project_graph {
+                                graph.symbols.iter()
+                                    .filter(|s| s.file == file && s.end_line > s.line)
+                                    .filter(|s| matches!(s.kind,
+                                        crate::index::SymbolKind::Function |
+                                        crate::index::SymbolKind::Struct |
+                                        crate::index::SymbolKind::Enum |
+                                        crate::index::SymbolKind::Trait))
+                                    .map(|s| crate::pie::AttachedSymbol {
+                                        name: s.name.clone(),
+                                        file: s.file.clone(),
+                                        start_line: s.line,
+                                        end_line: s.end_line,
+                                        kind: s.kind.label().to_string(),
+                                    })
+                                    .collect()
+                            } else { vec![] };
+
+                        if all_symbols.is_empty() {
+                            // No graph or no symbols — fall back to whole-file attach
+                            state.input_box.insert_str(&format!("#{file} "));
+                            state.mode = Mode::Normal;
+                        } else {
+                            state.symbol_picker = Some(FileSymbolPickerState {
+                                file,
+                                query: String::new(),
+                                selected: 0,
+                                all_symbols,
+                                picked: Vec::new(),
+                            });
+                            state.mode = Mode::SymbolPicker;
+                        }
+                    } else {
+                        state.mode = Mode::Normal;
+                    }
+                }
+                KeyCode::Tab => {
+                    // Tab: attach whole file (bypasses symbol drill-down)
                     let filtered = fp.filtered();
                     if let Some(chosen) = filtered.get(fp.selected) {
-                        let chosen = chosen.to_string();
-                        // Append #chosen_path into the input_box so it shows with existing text
-                        let token = format!("#{} ", chosen);
-                        state.input_box.insert_str(&token);
+                        state.input_box.insert_str(&format!("#{} ", chosen));
                     }
                     state.input.clear();
                     state.cursor = 0;
@@ -2235,7 +2287,7 @@ fn handle_key(
                                 "usage: /plan \"describe the task\"".to_string(),
                             ));
                         } else {
-                            open_plan_symbol_picker(task, state);
+                            generate_and_show_plan(task, state, resolved, ui_tx.clone());
                         }
                     } else if input.starts_with("/quick ") || input == "/quick" {
                         let task = input.trim_start_matches("/quick").trim().to_string();
@@ -2377,12 +2429,13 @@ fn handle_key(
                 }
             }
         }
-        // Tab — cycle focus through attached file chips
+        // Tab — cycle focus through all attached chips (files + symbols)
         (KeyModifiers::NONE, KeyCode::Tab) => {
-            if state.mode == Mode::Normal && !state.attached_files.is_empty() {
+            let total_chips = state.attached_files.len() + state.attached_symbols.len();
+            if state.mode == Mode::Normal && total_chips > 0 {
                 state.focused_chip = Some(match state.focused_chip {
                     None => 0,
-                    Some(i) if i + 1 >= state.attached_files.len() => 0,
+                    Some(i) if i + 1 >= total_chips => 0,
                     Some(i) => i + 1,
                 });
             }
@@ -2416,16 +2469,23 @@ fn handle_key(
                 state.scroll = state.scroll.saturating_sub(20);
             }
         }
-        // Backspace — remove focused chip (if any) before delegating to input_box
+        // Backspace — remove focused chip (files first, then symbols) before delegating to input_box
         (KeyModifiers::NONE, KeyCode::Backspace) if state.mode == Mode::Normal => {
             if let Some(idx) = state.focused_chip {
-                if idx < state.attached_files.len() {
+                let nfiles = state.attached_files.len();
+                if idx < nfiles {
                     state.attached_files.remove(idx);
+                } else {
+                    let sym_idx = idx - nfiles;
+                    if sym_idx < state.attached_symbols.len() {
+                        state.attached_symbols.remove(sym_idx);
+                    }
                 }
-                state.focused_chip = if state.attached_files.is_empty() {
+                let total_chips = state.attached_files.len() + state.attached_symbols.len();
+                state.focused_chip = if total_chips == 0 {
                     None
                 } else {
-                    Some(idx.min(state.attached_files.len() - 1))
+                    Some(idx.min(total_chips - 1))
                 };
                 return Ok(true);
             }
@@ -2582,7 +2642,7 @@ fn handle_submit(
         if task.is_empty() {
             state.push(ConversationEntry::SystemMsg("usage: /plan \"describe the task\"".to_string()));
         } else {
-            open_plan_symbol_picker(task, state);
+            generate_and_show_plan(task, state, resolved, ui_tx.clone());
         }
         return Ok(true);
     }
@@ -3139,6 +3199,7 @@ fn launch_agent(
         project_graph: state.project_graph.as_ref().map(|g| std::sync::Arc::new(g.clone())),
         project_narrative: state.project_narrative.as_ref().map(|n| std::sync::Arc::new(n.clone())),
         flow_paths: state.flow_paths.as_ref().map(|fp| std::sync::Arc::new(fp.clone())),
+        attached_symbols: state.attached_symbols.clone(),
     };
 
     let attached: Vec<String> = state.attached_files
@@ -3157,7 +3218,8 @@ fn launch_agent(
     // Reset collectors for this new run
     state.collecting_response.clear();
     state.collecting_tools.clear();
-    // Clear attached files — they were consumed into the first user message; don't re-send next turn
+    // Clear attached files — consumed into the first user message; don't re-send next turn.
+    // attached_symbols are persistent (user removes them explicitly via chip ✕).
     state.attached_files.clear();
     state.focused_chip = None;
 
@@ -3220,6 +3282,7 @@ fn launch_quick(
         project_graph: state.project_graph.as_ref().map(|g| std::sync::Arc::new(g.clone())),
         project_narrative: state.project_narrative.as_ref().map(|n| std::sync::Arc::new(n.clone())),
         flow_paths: None, // quick mode: single shot, no path preloading
+        attached_symbols: state.attached_symbols.clone(),
     };
 
     state.collecting_response.clear();
@@ -3247,46 +3310,15 @@ fn launch_quick(
 
 // ── Plan generation ───────────────────────────────────────────────────────────
 
-/// Open the plan symbol picker overlay. Called on /plan submission.
-/// If no graph is available, falls straight through to plan generation.
-fn open_plan_symbol_picker(task: String, state: &mut AppState) {
-    let all_symbols: Vec<crate::pie::AttachedSymbol> = if let Some(graph) = &state.project_graph {
-        graph.symbols.iter()
-            .filter(|s| s.end_line > s.line)
-            .filter(|s| matches!(s.kind,
-                crate::index::SymbolKind::Function |
-                crate::index::SymbolKind::Struct |
-                crate::index::SymbolKind::Enum |
-                crate::index::SymbolKind::Trait))
-            .map(|s| crate::pie::AttachedSymbol {
-                name: s.name.clone(),
-                file: s.file.clone(),
-                start_line: s.line,
-                end_line: s.end_line,
-                kind: s.kind.label().to_string(),
-            })
-            .collect()
-    } else {
-        vec![]
-    };
-    state.plan_symbol_picker = Some(PlanSymbolPickerState {
-        task,
-        query: String::new(),
-        selected: 0,
-        all_symbols,
-        picked: Vec::new(),
-    });
-    state.mode = Mode::PlanSymbolPicker;
-}
-
 /// Spawn a background task to generate the plan, sending results back via UiEvent.
+/// Uses `state.attached_symbols` for pre-loaded symbol source injection.
 fn generate_and_show_plan(
     task: String,
-    attached_symbols: Vec<crate::pie::AttachedSymbol>,
     state: &mut AppState,
     resolved: &ResolvedConfig,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
 ) {
+    let attached_symbols = state.attached_symbols.clone();
     // Use planner_model if configured, otherwise fall back to the regular model
     let plan_model = resolved.planner_model
         .clone()
@@ -3388,6 +3420,7 @@ fn launch_plan(
         project_graph: None,     // executor steps have pre-digested instructions — no graph needed
         project_narrative: None,
         flow_paths: None,
+        attached_symbols: vec![], // executor steps use pre-digested instructions
     };
 
     tokio::spawn(async move {
