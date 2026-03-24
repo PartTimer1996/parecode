@@ -1,0 +1,10 @@
+  ```json                                                                                                                                                                                                                                         
+    {
+          {                                                                                                                                                                                                                                           
+        "description": "Examine current @ file picker implementation",                                                                                                                                                                            
+          "instruction": "Examine src/tui/render.rs, src/tui/overlays.rs, and src/tui/mod.rs to understand how the @ sign currently triggers file picking. Look for: 1) Where @ is used as a trigger character for file/completion picker 2) The UiE
+                  "files": ["src/tui/render.rs", "src/tui/overlays.rs", "src/tui/
+                  "verify": "none",                                                                                                                                                                                                                         
+        "tool_budget": 15                                                                                                                                                                                                                         
+        }                                                                                                                                                                                                                                           
+  }                                                                                                                                                                                                                                               

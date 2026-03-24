@@ -1,0 +1,81 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_input field to AgentConfig struct",
+      "instruction": "In src/agent.rs at line 474 (AgentConfig struct definition), add field: cost_per_mtok_input: Option<f64> to the struct definition after git_context field\n[index: `definition` at line 22 in src/tools/ask.rs]\n[index: `definition` at line 9 in src/tools/bash.rs]\n[index: `definition` at line 5 in src/tools/edit.rs]\n[index: `def` at line 134 in src/tools/mod.rs]\n[index: `definition` at line 18 in src/tools/patch.rs]\n[index: `definition` at line 42 in src/tools/read.rs]\n[index: `definition` at line 6 in src/tools/write.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Pass cost_per_mtok to AgentDone event in run_tui",
+      "instruction": "In src/agent.rs at lines 441-448 (UiEvent::AgentDone emission), add config.cost_per_mtok_input as a new field to the AgentDone variant\n[index: `UiEvent` at line 535 in src/callgraph.rs]\n[index: `UiEvent` at line 56 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost field to UiEvent::AgentDone enum",
+      "instruction": "In src/tui/mod.rs at line 56 (UiEvent enum), find the AgentDone variant and add a cost_usd: Option<f64> field to it\n[index: `UiEvent` at line 535 in src/callgraph.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok field to AppState for config display",
+      "instruction": "In src/tui/mod.rs at line 363 (AppState struct), add a cost_per_mtok_input: Option<f64> field to store the configured cost rate for display in config view\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Display cost_per_mtok in config view settings section",
+      "instruction": "In src/tui/config_view.rs around line 59 (after context_tokens display), add a new kv() call to display cost_per_mtok_input value from state, formatted as $/Mtok or 'not configured'\n[index: `kv` at line 202 in src/tui/config_view.rs]",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Wire cost_per_mtok from ResolvedConfig through to AppState in TUI initialization",
+      "instruction": "In src/tui/mod.rs where AppState is constructed (likely in run() or event_loop around line 1012), pass the cost_per_mtok_input from ResolvedConfig into the AppState cost_per_mtok field\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]\n[index: `event_loop` at line 1045 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774228351,
+  "project": "forge"
+}

@@ -1,0 +1,63 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile, ResolvedConfig structs",
+      "instruction": "Add `cost_per_mtok_output: Option<f64>` field to:\n- src/config.rs:24 struct Profile (add after cost_per_mtok_input)\n- src/config.rs:175 struct ResolvedConfig (add after cost_per_mtok_input)\n- Update default() impl and any serialization if needed\n[index: `Profile` at line 24 in src/config.rs] — constructed by: DEFAULT_CONFIG_TOML (src/config.rs:281)\n[index: `ResolvedConfig` at line 175 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_output to AppState and wire from config",
+      "instruction": "Add `cost_per_mtok_output: Option<f64>` field to:\n- src/tui/mod.rs:363 struct AppState (add after cost_per_mtok_input)\n- Update event_loop (src/tui/mod.rs:1056) where AppState is constructed to pass resolved_config.cost_per_mtok_output\n[index: `AppState` at line 363 in src/tui/mod.rs] — constructed by: event_loop (src/tui/mod.rs:1045)\n[index: `event_loop` at line 1045 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost display to live stats bar",
+      "instruction": "Modify src/tui/render.rs:384-482 draw_stats_bar function:\n- Access state.cost_per_mtok_input and state.cost_per_mtok_output\n- After token_str line (line 417), add a cost_str similar to stats_view.rs:56-66\n- Display estimated cost in the stats bar (e.g., \"  $0.023\" after token count)\n- Use existing cost_str logic or create inline calculation: (input_tok/1M * input_cost) + (output_tok/1M * output_cost)\n[index: `draw_stats_bar` at line 379 in src/tui/render.rs]\n[index: `bar` at line 17 in src/tui/stats_view.rs]\n[index: `cost_str` at line 56 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/render.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_output to config view display",
+      "instruction": "Add display of output cost in src/tui/config_view.rs:\n- Around line 59-60, add kv(\"cost_per_mtok_output\", ...) row after cost_per_mtok_input display\n- Show the value or \"(not set)\" if None\n[index: `kv` at line 202 in src/tui/config_view.rs]",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774353514,
+  "project": "forge"
+}

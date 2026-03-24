@@ -1,0 +1,45 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Find where AppState is constructed to verify cost_per_mtok_input propagation",
+      "instruction": "Search for where AppState is constructed (AppState { ...) in src/tui/mod.rs and verify cost_per_mtok_input is passed from ResolvedConfig. Read around line 3000-3200 in src/tui/mod.rs where run_tui launches the UI.\n[index: `run_tui` at line 105 in src/agent.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Check config_view.rs to see if cost_per_mtok_input can be configured",
+      "instruction": "Read src/tui/config_view.rs to see if there's an option to set cost_per_mtok_input. Look for Profile editing code around line 100-150.\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Verify Profile cost field in config.rs has default examples",
+      "instruction": "Check src/config.rs:24-62 (Profile struct) and DEFAULT_CONFIG_TOML around line 281 to see if there's an example cost_per_mtok_input value for users to see.\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774234444,
+  "project": "forge"
+}

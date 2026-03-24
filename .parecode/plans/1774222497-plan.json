@@ -1,0 +1,70 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_input to AgentConfig in agent.rs",
+      "instruction": "Add field `cost_per_mtok_input: Option<f64>` to struct AgentConfig at src/agent.rs:474 (after context_tokens field)\n[index: `AgentConfig` at line 474 in src/agent.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_input to AppState in tui/mod.rs",
+      "instruction": "Add field `cost_per_mtok_input: Option<f64>` to struct AppState at src/tui/mod.rs:363 (after context_tokens field)\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Wire cost_per_mtok_input from ResolvedConfig to AgentConfig in run_tui",
+      "instruction": "In run_tui at src/agent.rs:106, after creating ResolvedConfig, copy config.cost_per_mtok_input to AgentConfig.cost_per_mtok_input\n[index: `run_tui` at line 106 in src/agent.rs]\n[index: `AgentConfig` at line 474 in src/agent.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Wire cost_per_mtok_input from AgentConfig to AppState in tui initialization",
+      "instruction": "Find where AppState is created in run_tui or event loop (likely around src/agent.rs:106-456 or src/tui/mod.rs) and copy agent_config.cost_per_mtok_input to AppState.cost_per_mtok_input\n[index: `run_tui` at line 106 in src/agent.rs]\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs",
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost config field to config_view.rs for user editing",
+      "instruction": "Add cost_per_mtok_input field editing to src/tui/config_view.rs (see existing fields like context_tokens editing pattern)",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774222497,
+  "project": "forge"
+}

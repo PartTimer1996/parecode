@@ -1,0 +1,69 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile and ResolvedConfig in config.rs",
+      "instruction": "Add field `cost_per_mtok_output: Option<f64>` to struct Profile at line 24 (after cost_per_mtok_input on line 35), and to struct ResolvedConfig at line 175 (after cost_per_mtok_input on line 190). Also update the derive macro line if needed.",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_output to AppState in tui/mod.rs",
+      "instruction": "Add field `cost_per_mtok_output: Option<f64>` to struct AppState at line 363 (after cost_per_mtok_input around line 405). Find where AppState is constructed in event_loop at line 1056 and add cost_per_mtok_output: resolved.cost_per_mtok_output there.\n[index: `event_loop` at line 1045 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update config_view.rs to show and edit output cost",
+      "instruction": "In src/tui/config_view.rs, add a new field for cost_per_mtok_output in the draw function (around line 18). Add a new kv line similar to line 78-80 that shows and allows editing of output cost.\n[index: `kv` at line 202 in src/tui/config_view.rs]\n[index: `draw` at line 22 in src/tui/git_view.rs]\n[index: `draw` at line 12 in src/tui/plan_view.rs]\n[index: `draw` at line 106 in src/tui/render.rs]\n[index: `draw` at line 177 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update cost_str in stats_view.rs to use actual output cost",
+      "instruction": "In src/tui/stats_view.rs at line 56-69, update the cost_str function to accept cost_per_mtok_output: Option<f64> as a parameter. Replace the hardcoded 3x multiplier with the actual output cost if provided.",
+      "files": [
+        "src/tui/stats_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update draw_stats_bar in render.rs to display cost",
+      "instruction": "In src/tui/render.rs at line 379-478, modify draw_stats_bar to accept cost_per_mtok_input and cost_per_mtok_output parameters, then call the updated cost_str and display the cost in the stats bar. Update callers of this function to pass the cost parameters.\n[index: `bar` at line 17 in src/tui/stats_view.rs]\n[index: `cost_str` at line 56 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/render.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774283260,
+  "project": "forge"
+}

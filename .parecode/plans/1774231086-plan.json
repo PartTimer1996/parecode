@@ -1,0 +1,84 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add output token cost field to Profile and ResolvedConfig",
+      "instruction": "Add `cost_per_mtok_output: Option<f64>` field to struct Profile at src/config.rs:24 and struct ResolvedConfig at src/config.rs:175, following the same pattern as cost_per_mtok_input. Update any Profile construction sites to include this new field.\n[index: `Profile` at line 520 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to TokenStats UiEvent variant",
+      "instruction": "Modify TokenStats enum variant at src/tui/mod.rs:74 to include cost calculation fields: add `input_cost: Option<f64>` and `output_cost: Option<f64>` fields alongside existing token fields.",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok to AgentConfig and pass to run_tui",
+      "instruction": "Add `cost_per_mtok_input: Option<f64>` and `cost_per_mtok_output: Option<f64>` fields to AgentConfig at src/agent.rs:473. Then modify the run_tui function signature at src/agent.rs:105 to accept these cost parameters, and update call sites in src/main.rs to pass them.\n[index: `run_tui` at line 105 in src/agent.rs]\n[index: `AgentConfig` at line 473 in src/agent.rs]\n[index: `main` at line 90 in src/main.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs",
+        "src/main.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Calculate and emit cost in TokenStats within run_tui",
+      "instruction": "In run_tui at src/agent.rs, where TokenStats is emitted (search for UiEvent::TokenStats), add calculation: `let input_cost = cost_per_mtok_input.map(|c| (total_input_tokens as f64) * c); let output_cost = cost_per_mtok_output.map(|c| (total_output_tokens as f64) * c);` and include these in the TokenStats event emission.\n[index: `run_tui` at line 105 in src/agent.rs]\n[index: `UiEvent` at line 537 in src/callgraph.rs]\n[index: `UiEvent` at line 56 in src/tui/mod.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Display cost in stats view render function",
+      "instruction": "Modify the stats display function at src/tui/stats_view.rs (look for draw_stats_bar at src/tui/render.rs:379) to read cost_per_mtok_input and cost_per_mtok_output from AppState (available at src/tui/mod.rs:363) and display estimated cost when TokenStats event is received.\n[index: `draw` at line 18 in src/tui/config_view.rs]\n[index: `draw` at line 22 in src/tui/git_view.rs]\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]\n[index: `draw` at line 12 in src/tui/plan_view.rs]\n[index: `draw` at line 106 in src/tui/render.rs]\n[index: `draw_stats_bar` at line 379 in src/tui/render.rs]\n[index: `bar` at line 17 in src/tui/stats_view.rs]\n[index: `draw` at line 177 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/render.rs",
+        "src/tui/stats_view.rs",
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to config view editing UI",
+      "instruction": "Update config_view.rs to display and edit cost_per_mtok_input and cost_per_mtok_output fields. Add input fields in the profile editing section at src/tui/config_view.rs:18-201 following the existing pattern for other numeric fields.",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774231086,
+  "project": "forge"
+}

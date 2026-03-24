@@ -213,39 +213,32 @@ pub fn save_plan(plan: &Plan) -> Result<PathBuf> {
 /// No phase switch — the model explores with tools, then outputs JSON when done.
 /// Keeping one consistent prompt avoids models getting confused by a system-prompt
 /// change mid-conversation (the root cause of XML tool call fallback on phase 2).
-const PLANNER_PROMPT: &str = r#"You are PareCode, a coding assistant. Your job is to produce a structured edit plan — NOT to understand or explain the codebase.
+const PLANNER_PROMPT: &str = r#"You are PareCode, a coding assistant. Produce a structured edit plan — not an explanation.
 
-ORIENTATION: The project index and context file symbols are pre-loaded in your context. You already have file names, cluster membership, and (for attached files) exact symbol line numbers. Use them.
+COMPLETED READS — use these directly:
+Any block formatted as [path — lines X-Y] in your context is a COMPLETED READ. Treat it
+exactly like a read_files result. This includes user-attached symbols and orient output.
+Line numbers from these blocks are authoritative — use them in plan steps without re-reading.
 
-TOOL ORDER — follow this sequence, never skip steps:
-1. orient(query="task keywords") — ONE call returns all task-relevant structs with signatures,
-   locations, and call connections in pipeline order. Use this first, always.
-2. check_wiring(field="X") — REQUIRED whenever you find a field: verifies full pipeline.
-   WITHOUT list = your plan steps. Call this before concluding any propagation is complete.
-3. read_files(reads=[{path, line_range=[N,M]}, ...]) — batch ALL reads in ONE call (see READ BUDGET).
+DISCOVERY FLOW — follow in order, skip steps you don't need:
+1. SCAN the context above. If it already shows all types the task touches → go to OUTPUT now.
+2. orient(query="task keywords") — ONE call. Returns struct layouts, line numbers, and
+   construction sites in pipeline order. Call only if context map does NOT already cover the task.
+3. check_wiring(field="X") — REQUIRED when the task adds/modifies a field. The WITHOUT list
+   from the result = the structs your plan must update. Call once per new field.
+4. read_files(reads=[{path, line_range=[N,M]}, ...]) — ONE batch call for any remaining gaps.
+   Only if you need exact lines not already shown above. Batch all reads in a single call.
 
-READ BUDGET — strictly enforced:
-- You have at most 3 read_files calls. Each call can read up to 6 locations at once.
-- ALWAYS BATCH: after orient/check_wiring you know all the locations — issue ONE read_files
-  call with every section you need. Never read one file, then decide to read another.
-- Read results are compressed after the following turn — request up to 150 lines per entry.
-- Struct/enum signatures from orient are authoritative — do not re-read struct definitions.
-- Always provide line_range for each entry (you have line numbers from orient).
-  Full-file reads are BLOCKED.
+LIMITS: 6 tool calls total. orient + check_wiring is almost always enough — read_files only
+for function bodies you need to edit and can't locate from the above.
 
-EXPLORATION RULES — STRICTLY ENFORCED:
-- If a symbol is listed in "Context file symbols" above, you already have its line number — do NOT call orient for it.
-- Finding a field in ONE struct is not enough — always call check_wiring to verify the full chain.
-- check_wiring's WITHOUT list = your plan steps. Do not generate steps for structs already in the WITH list.
-- Maximum 8 tool calls total. Stop as soon as you have file:line refs for everything the plan touches.
-
-OUTPUT: When you have all locations, immediately output the JSON plan (no markdown fences, no prose):
+OUTPUT: When you have all locations, immediately output JSON (no markdown fences, no prose):
 
 {
   "steps": [
     {
       "description": "human-readable one-liner shown to user",
-      "instruction": "precise instruction with EVERY file:line ref — never say 'find X' or 'locate Y'",
+      "instruction": "exact file:line refs — never say 'find X' or 'locate Y'",
       "files": ["src/foo.rs", "src/bar.rs"],
       "verify": "none",
       "tool_budget": 15
@@ -254,16 +247,16 @@ OUTPUT: When you have all locations, immediately output the JSON plan (no markdo
 }
 
 STEP RULES:
-- Each step runs in TOTAL ISOLATION — the executor sees ONLY files listed in "files"
-- List EVERY file the step needs to read OR modify (max 10 per step)
+- Each step runs in TOTAL ISOLATION — executor sees ONLY listed files (max 10 per step)
 - Every instruction MUST contain exact file paths and line numbers
-- Prefer 4–8 steps; do not split naturally-coupled changes into micro-steps
+- Prefer 4–8 steps; don't split naturally-coupled changes into micro-steps
 - verify: "none" | "command:CMD" | "changed:FILE" | "absent:FILE:PATTERN"
-- EXACT LINES REQUIRED: If you lack exact line numbers for a file a step must edit, add it to your read_files batch BEFORE writing the step. Never write "around line N" or "similar to line N" — either you know the exact location or you read it first.
-- NO REDUNDANT PARAMETERS: Before adding a parameter to a function, check whether an existing struct argument (e.g. AppState, AgentConfig) already carries that data. Read the field from the existing argument — do not add parameters that duplicate data already passed in.
-- RUST VERIFY: Any step that adds/removes a struct field OR changes a function signature MUST set verify: "command:cargo check". Field propagation across multiple files will silently break without this.
-
-PRE-LOADED SYMBOLS: If the first user message contains a "Pre-loaded symbols" block, those symbols already contain their exact source code with line numbers. Do NOT call read_files for them — you already have everything you need. Use their line numbers directly in step instructions."#;
+- EXACT LINES: If you lack a line number for something a step must edit, add it to read_files
+  BEFORE writing the step. Never write "around line N" — either you know it or you read it first.
+- NO REDUNDANT PARAMS: Check if an existing struct argument already carries the data before
+  adding a new parameter. Read from the existing arg — don't duplicate data already passed.
+- RUST VERIFY: Any step adding/removing a struct field OR changing a function signature
+  MUST set verify: "command:cargo check"."#;
 
 /// Response from the model during plan generation.
 #[derive(Debug, Deserialize)]
@@ -325,18 +318,26 @@ fn planner_tools() -> Vec<Tool> {
         .collect()
 }
 
-fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
+fn execute_planner_tool(
+    call: &ToolCall,
+    graph: &ProjectGraph,
+    delivered: &mut crate::tools::pie_tool::DeliveredRanges,
+) -> String {
     let args: serde_json::Value =
         serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
     match call.name.as_str() {
-        "orient" => crate::tools::pie_tool::orient_execute(&args, graph),
-        "find_symbol" => crate::tools::pie_tool::execute(&args, graph),
-        "trace_calls" => crate::tools::pie_tool::trace_calls_execute(&args, graph),
-        "check_wiring" => crate::tools::pie_tool::check_wiring_execute(&args, graph),
-        "read_files" => {
-            crate::tools::pie_tool::read_files_execute(&args, graph)
+        "orient" => crate::tools::pie_tool::orient_execute(&args, graph, delivered),
+        "find_symbol" | "trace_calls" => {
+            let name = args["name"].as_str().unwrap_or("?");
+            format!(
+                "[find_symbol/trace_calls not available in the planner — \
+                 use orient(query=\"{name}\") instead. orient returns struct layouts, \
+                 line numbers, and call connections in one call.]"
+            )
         }
-        // Keep read_file as a fallback in case the model uses the old name
+        "check_wiring" => crate::tools::pie_tool::check_wiring_execute(&args, graph),
+        "read_files" => crate::tools::pie_tool::read_files_execute(&args, graph, delivered),
+        // Fallback for models that use the old single-read name
         "read_file" => {
             let has_range = args["line_range"].as_array()
                 .map_or(false, |a| !a.is_empty());
@@ -344,9 +345,8 @@ fn execute_planner_tool(call: &ToolCall, graph: &ProjectGraph) -> String {
                 return "[planner: use read_files([{path, line_range}]) to batch all reads in one call]"
                     .to_string();
             }
-            // Wrap as single-entry read_files call
             let wrapped = serde_json::json!({"reads": [{"path": args["path"], "line_range": args["line_range"]}]});
-            crate::tools::pie_tool::read_files_execute(&wrapped, graph)
+            crate::tools::pie_tool::read_files_execute(&wrapped, graph, delivered)
         }
         other => format!("[unknown planner tool: {other}]"),
     }
@@ -543,6 +543,10 @@ pub async fn generate_plan(
     // Write the full prompt to .parecode/last_plan_prompt.txt for tuning/inspection.
     dump_plan_prompt(PLANNER_PROMPT, &messages);
 
+    // ── Delivered ranges — gates redundant read_files calls ───────────────────
+    // Pre-populate from user-attached symbols so the model can't re-read them.
+    let mut delivered = crate::tools::pie_tool::DeliveredRanges::from_symbols(attached_symbols);
+
     // ── Unified exploration + output loop ─────────────────────────────────────
     let tools = planner_tools();
     const MAX_TURNS: usize = 20;
@@ -685,7 +689,7 @@ pub async fn generate_plan(
 
             log_append(&mut session_log, &format!("\n\n◆ {} {}\n", tc.name, args_summary));
 
-            let result = execute_planner_tool(tc, graph);
+            let result = execute_planner_tool(tc, graph, &mut delivered);
             let result_summary: String = result.lines().next().unwrap_or("").chars().take(80).collect();
             let _ = ui_tx.send(UiEvent::ToolResult { summary: result_summary });
 

@@ -1,0 +1,70 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile struct",
+      "instruction": "Add a new field `pub cost_per_mtok_output: Option<f64>,` after line 44 in src/config.rs (after cost_per_mtok_input). This mirrors the input cost field and allows users to configure output pricing.",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost info to AgentConfig struct",
+      "instruction": "Add fields `_cost_per_mtok_input: Option<f64>` and `_cost_per_mtok_output: Option<f64>` to the AgentConfig struct at src/agent.rs:474-496 (add after line 479 near _model). These store the pricing from the profile for use in cost calculations.\n[index: `AgentConfig` at line 468 in src/agent.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to UiEvent::AgentDone",
+      "instruction": "Add `input_cost_usd: Option<f64>` and `output_cost_usd: Option<f64>` fields to the AgentDone variant in src/tui/mod.rs:74-81. These will carry calculated costs to the UI for display.",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Calculate and send cost in run_tui AgentDone event",
+      "instruction": "In src/agent.rs:442-449, calculate cost using the formula: input_cost = (total_input_tokens as f64 / 1_000_000.0) * cost_per_mtok_input, similarly for output. Pass these as new fields when constructing UiEvent::AgentDone. The config reference provides access to cost fields.\n[index: `UiEvent` at line 56 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update TUI display to show cost information",
+      "instruction": "In src/tui/mod.rs, find where AgentDone is handled (search for AgentDone in render.rs or similar). Add display logic to show cost when cost fields are Some, formatted as USD. If both input and output costs exist, show total cost.",
+      "files": [
+        "src/tui/mod.rs",
+        "src/tui/render.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774024218,
+  "project": "forge"
+}

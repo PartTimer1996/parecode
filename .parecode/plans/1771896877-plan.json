@@ -1,0 +1,107 @@
+{
+  "task": "Add unit tests to these tools - so they work better with all version of LLMs - catching points of potential failure",
+  "steps": [
+    {
+      "description": "Add comprehensive unit tests to edit_file tool",
+      "instruction": "Append a `#[cfg(test)] mod tests` block to src/tools/edit.rs. Include these test functions: test_definition (assert definition()['name'] == 'edit_file'); test_append (create temp file 'test_edit_append.txt' with 'line1\\nline2\\n', call execute(json!({'path': path, 'new_str': 'appended', 'append': true})), verify file ends with 'appended' and output contains 'Appended', then delete file); test_edit_exact (file 'hello world', old_str='hello', new_str=' goodbye', expect one replacement); test_edit_old_str_too_short (old_str='a', error contains 'too short'); test_edit_multiple_matches (file 'foo bar foo', old_str='foo', error about multiple locations); test_edit_anchor_mismatch_but_unique (provide anchor='xxxx' not matching actual hash, old_str unique, expect success and output contains '(anchor mismatch'); test_edit_fuzzy_crlf (file with CRLF, old_str with LF, success); test_edit_fuzzy_trim_trailing (file lines with trailing spaces, old_str trimmed, success); test_edit_not_found (old_str absent, error contains 'string not found' and 'Nearest match'); test_invalid_path (nonexistent path, error). Use `use super::*; use serde_json::json;`. Ensure unique temp filenames and cleanup.",
+      "files": [
+        "src/tools/edit.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 300,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add comprehensive unit tests to patch_file tool",
+      "instruction": "Append a `#[cfg(test)] mod tests` block to src/tools/patch.rs. Include tests: test_definition (name 'patch_file'); test_parse_hunks (parse patch with two @@ headers, verify Hunk count and before/additions lengths); test_apply_hunk_simple (apply simple change, verify content); test_apply_hunk_multiple (apply multiple hunks sequentially); test_apply_hunk_pure_insertion (only '+' lines, insert at line_hint); test_apply_hunk_context_not_found (missing context, error 'context lines not found'); test_execute_success (create file, execute simple @@ patch, verify file changed and success message); test_execute_no_hunks (patch without '@@' gives error); test_fuzzy_matching (context has extra spaces, file has single spaces, still match); also test parse_hunk_start with various headers. Use temp files and cleanup.",
+      "files": [
+        "src/tools/patch.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 300,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add unit tests to search tool",
+      "instruction": "Append a `#[cfg(test)] mod tests` block to src/tools/search.rs. Tests: test_definition (name 'search'); test_execute_no_matches (create temp file, search for 'xyz123', output contains 'No matches'); test_execute_with_matches (create file with lines containing 'needle', search 'needle', output includes filename and line numbers); test_context_lines (use context_lines=3, verify context lines present); test_truncation (create file with >50 matches, output truncated and contains truncation message); test_glob (create two files, only one matches pattern, ensure others excluded). Note: relies on 'rg' or 'grep' being available. Cleanup temp files.",
+      "files": [
+        "src/tools/search.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 300,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add unit tests to read_file tool",
+      "instruction": "Append a `#[cfg(test)] mod tests` block to src/tools/read.rs. Tests: test_definition (name 'read_file'); test_line_hash (hash of 'hello' stable, different from ' world'); test_format_line (format_line(1, 'fn main() {}') yields correct line number and 4-char hash); test_execute_basic (create small file, execute, output includes correct line numbers, hashes, content); test_preamble_and_tail (long file, output shows only PREAMBLE_LINES and TAIL_LINES with separator); test_collect_symbols (provide Rust code with functions, collect_symbols returns correct SymbolKind, name, line); test_build_symbol_index (similar); test_symbol_to_prompt (SymbolIndex::to_prompt_section expected format). Use temp files and cleanup.",
+      "files": [
+        "src/tools/read.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 400,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add unit tests to list_files tool",
+      "instruction": "Append a `#[cfg(test)] mod tests` block to src/tools/list.rs. Tests: test_definition (correct tool name); test_walk_simple (create temp dir with files/subdirs, call walk, verify entries count and paths); test_walk_depth_limit (depth=1, no nested files); test_walk_max_entries (max_entries=2, at most 2 entries); test_execute (call execute with path, check result JSON has 'entries' array). Cleanup temp dirs.",
+      "files": [
+        "src/tools/list.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 300,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add unit tests to tools module (mod.rs)",
+      "instruction": "Append a `#[cfg(test)] mod tests` block to src/tools/mod.rs. Tests: test_is_native (assert is_native('bash'), 'edit_file', 'patch_file', 'read_file', 'list_files', 'search', 'write_file', 'recall' are true; 'unknown' false); test_def (for each native name, def(name) returns definition with that name); test_dispatch_native (dispatch('bash', json!({'command':'true'})) returns Ok; optionally test dispatch for another native); test_dispatch_unknown (dispatch('unknown', args) returns error). Use `use super::*;`.",
+      "files": [
+        "src/tools/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 300,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add unit tests to bash, write, and recall tools",
+      "instruction": "For each file in [src/tools/bash.rs, src/tools/write.rs, src/tools/recall.rs], append a `#[cfg(test)] mod tests` block.\n\nBash (src/tools/bash.rs):\n- test_definition: name 'bash'.\n- test_execute_success: execute(json!({'command':'echo hello'})) output contains 'hello'.\n- test_execute_failure: execute(json!({'command':'false'})) returns error.\n\nWrite (src/tools/write.rs):\n- test_definition: name 'write_file'.\n- test_execute_creates_file: execute({'path': temp_path, 'content': 'data'}), file exists with exact content.\n- test_execute_overwrites: run twice with different content, final content is latest.\n- test_execute_invalid_path: directory doesn't exist, error.\n\nRecall (src/tools/recall.rs):\n- test_definition: definition()['name'] == 'recall' (or actual name). If execute exists, add a basic test.\n\nEach test uses unique temp paths and cleans up.",
+      "files": [
+        "src/tools/bash.rs",
+        "src/tools/write.rs",
+        "src/tools/recall.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 300,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Run full test suite to verify added tests",
+      "instruction": "From the project root, execute the command: cargo test --workspace. This will run all unit tests, including the newly added ones. Expect exit code 0.",
+      "files": [],
+      "verify": {
+        "CommandSuccess": "cargo test --workspace"
+      },
+      "status": "Pending",
+      "tool_budget": 100,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1771896877,
+  "project": "forge"
+}

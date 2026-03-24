@@ -1,0 +1,84 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile config",
+      "instruction": "In src/config.rs:24 (Profile struct), add field `pub cost_per_mtok_output: Option<f64>` after line 44 (cost_per_mtok_input). Add serde default attribute.\n[index: `Profile` at line 518 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `def` at line 134 in src/tools/mod.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 5,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to AgentConfig",
+      "instruction": "In src/agent.rs:474-498, add `pub cost_per_mtok_input: Option<f64>` and `pub cost_per_mtok_output: Option<f64>` fields to AgentConfig struct. These will be populated from ResolvedConfig.\n[index: `AgentConfig` at line 474 in src/agent.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 5,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Propagate cost config to AgentConfig in run_tui",
+      "instruction": "In src/agent.rs:106 (run_tui function signature), ensure config parameter has access to the cost fields. The caller (plan.rs:683 or main.rs:172) must populate AgentConfig.cost_per_mtok_input and cost_per_mtok_output from ResolvedConfig.\n[index: `run_tui` at line 106 in src/agent.rs]\n[index: `AgentConfig` at line 474 in src/agent.rs]\n[index: `caller` at line 399 in src/callgraph.rs]\n[index: `caller` at line 424 in src/callgraph.rs]\n[index: `caller` at line 441 in src/callgraph.rs]\n[index: `caller` at line 458 in src/callgraph.rs]\n[index: `caller` at line 479 in src/callgraph.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]\n[index: `main` at line 90 in src/main.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs",
+        "src/plan.rs",
+        "src/main.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 8,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Calculate and send cost in UiEvent::TokenStats",
+      "instruction": "In src/agent.rs:281-293, calculate cost: input_cost = total_input_tokens as f64 * config.cost_per_mtok_input / 1_000_000.0 (similar for output). Update the UiEvent::TokenStats at line 287 to include total_cost field.\n[index: `UiEvent` at line 535 in src/callgraph.rs]\n[index: `UiEvent` at line 56 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 8,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost field to UiEvent TokenStats variant",
+      "instruction": "In src/tui/mod.rs:56-132, find TokenStats variant in UiEvent enum and add `total_cost: Option<f64>` field to the variant.\n[index: `UiEvent` at line 535 in src/callgraph.rs]\n[index: `UiEvent` at line 56 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 5,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Display cost in TUI stats view",
+      "instruction": "In src/tui/stats_view.rs (if exists) or src/tui/mod.rs, find where TokenStats is handled for display. Add cost rendering next to the token counts. If stats_view.rs doesn't exist, find the draw/render function that displays token stats.\n[index: `draw` at line 18 in src/tui/config_view.rs]\n[index: `draw` at line 22 in src/tui/git_view.rs]\n[index: `draw` at line 12 in src/tui/plan_view.rs]\n[index: `draw` at line 106 in src/tui/render.rs]\n[index: `draw` at line 177 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/stats_view.rs",
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 8,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774223766,
+  "project": "forge"
+}

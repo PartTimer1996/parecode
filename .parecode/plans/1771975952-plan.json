@@ -1,0 +1,81 @@
+{
+  "task": "we need to update chat to be more user friendly, some examples, allow copy paste which just show [Copy Pasted Lines +2] this is passed to the model - this also has to be able to fit more content and have the ability to scroll with additional height and formatting for a nice to use text box",
+  "steps": [
+    {
+      "description": "Examine input handling and state in tui/mod.rs",
+      "instruction": "Examine src/tui/mod.rs to understand the AppState structure, input field handling, and how user text is captured. Look for: 1) The input field definition (String or similar), 2) How input events are processed (UiEvent variants), 3) The Mode enum to understand different UI states, 4) Any existing paste or clipboard handling. Focus on understanding how to add copy/paste detection and expand the input area.",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Examine input rendering in tui/render.rs",
+      "instruction": "Examine src/tui/render.rs to understand how the input box is currently drawn. Look for the draw_input function, understand the current input area height, text wrapping, and any scroll offset handling. This will help understand how to make the input taller and scrollable.",
+      "files": [
+        "src/tui/render.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Implement copy/paste detection and indicator in tui/mod.rs",
+      "instruction": "Modify src/tui/mod.rs to: 1) Add a field to track pasted line count (e.g., `pasted_lines: Option<usize>` in AppState), 2) Add UiEvent::Paste variant for paste events, 3) Add logic to detect when text contains newlines (indicating paste) and track the count. When text is submitted with pasted content, prepend \"[Copied Lines +N]\" to the message before passing to the model.",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 20,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Make input area larger and scrollable in tui/render.rs",
+      "instruction": "Modify src/tui/render.rs: 1) Increase the input area height from current (likely 1-3 lines) to 6-8 lines minimum, 2) Add vertical scroll offset handling (scroll_offset: u16 in AppState), 3) Modify draw_input to render a scrollable multi-line text area with scroll indicators when content exceeds visible area, 4) Add scroll handling in input mode (e.g., Ctrl+Up/Down or Shift+Up/Down to scroll). Use ratatui's Scrollbar widget if available.",
+      "files": [
+        "src/tui/render.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 25,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add example prompts below input box",
+      "instruction": "Modify src/tui/render.rs to display example prompts below the input box (in the status area or as ghost text). Add 2-3 contextual example prompts that appear when input is empty, such as: \"Try: explain this function\", \"Try: refactor the auth module\", \"Try: write tests for calculator\". These should be visually distinct (dimmed/gray) and non-interactive - just displayed as hints.",
+      "files": [
+        "src/tui/render.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add scroll keybindings in tui/mod.rs",
+      "instruction": "Modify src/tui/mod.rs to add keybindings for scrolling the input: 1) Add scroll handling in the input mode event processing, 2) Bind Shift+Up/Down or Ctrl+Up/Down to scroll the input text, 3) Ensure scroll position resets when input content changes. Test that scroll works smoothly with multi-line pasted content.",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1771975952,
+  "project": "forge"
+}

@@ -47,22 +47,42 @@ fn read_symbol_source(file: &str, start: usize, end: usize) -> Option<String> {
 }
 
 /// Build the pre-loaded symbol block injected into the planner's task message.
-/// The model receives actual source code for each picked symbol before it
-/// makes any tool call — eliminating read_files calls for those locations.
+/// Formatted to match read_files output exactly — the model treats each block as a
+/// completed read and will not re-request those ranges.
 pub fn build_symbol_preload(symbols: &[AttachedSymbol]) -> String {
     if symbols.is_empty() {
         return String::new();
     }
+
+    // ── Manifest: upfront index of every pre-read range ──────────────────────
     let mut out = String::from(
-        "Pre-loaded symbols — these contain actual source code. \
-         Do NOT call read_files for them. Use their line numbers directly in plan steps.\n\n"
+        "=== CONTEXT MAP — file ranges already read into your session ===\n\
+         Each range below is a COMPLETED READ. Do not call read_files for them.\n\
+         orient and check_wiring results also emit [file — lines X-Y] blocks — those are\n\
+         completed reads too. Only call read_files for ranges NOT shown anywhere above.\n\n"
     );
     for sym in symbols {
+        out.push_str(&format!(
+            "  [{}:{}-{}]  {} {}  (user attached)\n",
+            sym.file, sym.start_line, sym.end_line, sym.kind, sym.name
+        ));
+    }
+    out.push_str("=== END CONTEXT MAP ===\n\n");
+
+    // ── Source blocks: same format as read_files output ──────────────────────
+    for sym in symbols {
         if let Some(code) = read_symbol_source(&sym.file, sym.start_line, sym.end_line) {
+            let total = std::fs::read_to_string(&sym.file)
+                .map(|c| c.lines().count())
+                .unwrap_or(0);
             out.push_str(&format!(
-                "#{} {} ({}:{}-{}):\n{}\n\n",
-                sym.kind, sym.name, sym.file, sym.start_line, sym.end_line, code
+                "[{} — lines {}-{} of {}]\n\n",
+                sym.file, sym.start_line, sym.end_line, total
             ));
+            for (i, line) in code.lines().enumerate() {
+                out.push_str(&format!("{:>4} | {}\n", sym.start_line + i, line));
+            }
+            out.push_str("\n\n");
         }
     }
     out

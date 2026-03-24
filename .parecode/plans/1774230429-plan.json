@@ -1,0 +1,58 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_input field to AgentConfig",
+      "instruction": "Add field `cost_per_mtok_input: Option<f64>` to struct AgentConfig at src/agent.rs:474. The struct currently shows `... (+2 more)` meaning there are 2 missing fields. Add the cost field there.\n[index: `AgentConfig` at line 474 in src/agent.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Find AgentConfig construction site and pass cost",
+      "instruction": "Find where AgentConfig is constructed (likely in main.rs or tui/mod.rs where run_tui is called), and pass cost_per_mtok_input from ResolvedConfig. Search for `AgentConfig {` or `AgentConfig::new`.\n[index: `run_tui` at line 106 in src/agent.rs]\n[index: `AgentConfig` at line 474 in src/agent.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]\n[index: `main` at line 90 in src/main.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/main.rs",
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_input to AppState if missing",
+      "instruction": "If AppState (src/tui/mod.rs:363) doesn't have cost_per_mtok_input field, add it. The stats_view.rs:181 shows it's accessed as `state.cost_per_mtok_input`. If missing, add `cost_per_mtok_input: Option<f64>` to AppState.\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Wire cost from ResolvedConfig to AppState via UiEvent",
+      "instruction": "When AppState is initialized or updated, populate cost_per_mtok_input from the resolved config. This likely happens in the initialization of AppState or in event handling where config is loaded.\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774230429,
+  "project": "forge"
+}

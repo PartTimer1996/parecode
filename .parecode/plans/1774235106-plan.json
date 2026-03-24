@@ -1,0 +1,81 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_input field to AgentConfig struct",
+      "instruction": "Add `cost_per_mtok_input: Option<f64>` field to AgentConfig struct at src/agent.rs:473-504 (add after git_context field around line 490)\n[index: `AgentConfig` at line 473 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1274), launch_agent (src/tui/mod.rs:2993), launch_plan (src/tui/mod.rs:3211), launch_quick (src/tui/mod.rs:3075)",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Pass cost_per_mtok_input to AgentConfig in launch_quick",
+      "instruction": "At src/tui/mod.rs:3097-3113, add `cost_per_mtok_input: resolved.cost_per_mtok_input,` to the AgentConfig struct construction\n[index: `AgentConfig` at line 473 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1274), launch_agent (src/tui/mod.rs:2993), launch_plan (src/tui/mod.rs:3211), launch_quick (src/tui/mod.rs:3075)",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Pass cost_per_mtok_input to AgentConfig in launch_agent",
+      "instruction": "At src/tui/mod.rs:2993 (launch_agent function), add `cost_per_mtok_input: resolved.cost_per_mtok_input,` to the AgentConfig construction\n[index: `AgentConfig` at line 473 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1274), launch_agent (src/tui/mod.rs:2993), launch_plan (src/tui/mod.rs:3211), launch_quick (src/tui/mod.rs:3075)\n[index: `launch_agent` at line 2993 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Pass cost_per_mtok_input to AgentConfig in launch_plan",
+      "instruction": "At src/tui/mod.rs:3211 (launch_plan function), add `cost_per_mtok_input: resolved.cost_per_mtok_input,` to the AgentConfig construction\n[index: `AgentConfig` at line 473 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1274), launch_agent (src/tui/mod.rs:2993), launch_plan (src/tui/mod.rs:3211), launch_quick (src/tui/mod.rs:3075)\n[index: `launch_plan` at line 3211 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Pass cost_per_mtok_input to AgentConfig in main.rs quick mode",
+      "instruction": "At src/main.rs:320-379 (run_single_shot_quick), add `cost_per_mtok_input: resolved.cost_per_mtok_input,` to AgentConfig construction\n[index: `AgentConfig` at line 473 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1274), launch_agent (src/tui/mod.rs:2993), launch_plan (src/tui/mod.rs:3211), launch_quick (src/tui/mod.rs:3075)\n[index: `main` at line 90 in src/main.rs]\n[index: `run_single_shot_quick` at line 320 in src/main.rs]",
+      "files": [
+        "src/main.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update draw_stats_bar in render.rs to display cost",
+      "instruction": "At src/tui/render.rs:379-478 (draw_stats_bar function), use AppState.cost_per_mtok_input to calculate and display cost alongside token counts. The function receives state: &AppState which has cost_per_mtok_input field.\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `draw_stats_bar` at line 379 in src/tui/render.rs]",
+      "files": [
+        "src/tui/render.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774235106,
+  "project": "forge"
+}

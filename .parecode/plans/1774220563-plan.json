@@ -1,0 +1,106 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output to Profile in config.rs",
+      "instruction": "Add field `pub cost_per_mtok_output: Option<f64>` to struct Profile at src/config.rs:44 (after cost_per_mtok_input), with serde default and documentation comment like the input field.\n[index: `Profile` at line 518 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `def` at line 128 in src/tools/mod.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_output to ResolvedConfig in config.rs",
+      "instruction": "Add field `pub cost_per_mtok_output: Option<f64>` to struct ResolvedConfig at src/config.rs:187 (after cost_per_mtok_input), matching the Profile field.\n[index: `Profile` at line 518 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Copy cost fields in ResolvedConfig::resolve",
+      "instruction": "In src/config.rs:resolve function, copy both cost_per_mtok_input and cost_per_mtok_output from Profile to ResolvedConfig.\n[index: `Profile` at line 518 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to AgentConfig in agent.rs",
+      "instruction": "Add fields `pub cost_per_mtok_input: Option<f64>` and `pub cost_per_mtok_output: Option<f64>` to struct AgentConfig at src/agent.rs:474-498 (after _model field around line 479).\n[index: `AgentConfig` at line 472 in src/agent.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Wire cost config through to AgentConfig in main.rs or setup.rs",
+      "instruction": "Find where AgentConfig is constructed (likely in src/main.rs or src/setup.rs) and pass the cost fields from ResolvedConfig to AgentConfig.\n[index: `AgentConfig` at line 472 in src/agent.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]\n[index: `main` at line 90 in src/main.rs]",
+      "files": [
+        "src/main.rs",
+        "src/setup.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost field to UiEvent::TokenStats in tui/mod.rs",
+      "instruction": "Add field `total_cost_usd: f64` to enum variant TokenStats at src/tui/mod.rs around line 110 (find exact location with find_symbol TokenStats).",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Calculate and send cost in run_tui",
+      "instruction": "In src/agent.rs after line 282 (where tokens are incremented), add a `total_cost` variable and calculate cost using: (input_tokens * cost_per_mtok_input / 1_000_000.0) + (output_tokens * cost_per_mtok_output / 1_000_000.0). Send this in UiEvent::TokenStats at lines 287-294 and 391-397.\n[index: `UiEvent` at line 535 in src/callgraph.rs]\n[index: `UiEvent` at line 56 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost display to config_view in tui",
+      "instruction": "In src/tui/config_view.rs, add UI to display and edit cost_per_mtok_input and cost_per_mtok_output fields (similar to how model and context_tokens are displayed).",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774220563,
+  "project": "forge"
+}

@@ -1,0 +1,13 @@
+CORE
+1. PIE V2! - Major improvements here to the overall proposition
+3. Plan mode - want to toggle this on/off easier with agent mode
+4. Git integration is very bad - not in the TUI but the auto commit and general tracking of changes made is really bad - needs renovation
+
+Minor - integration 
+1. Opencode is unbelievable with how many providers it gives - i.e. opencode zen, minimax 2.5 free etc. - just needs bridged a bit - we can't match this
+
+Minor - hyper efficiency 
+1, Tokens are wasted on summaries and the "STOP" mechanism - we tried to work around this to no avail - revisit
+
+Good example for parecode - NOT Claude
+#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in agent.rs::run_tui() agent.rs::AgentConfig config.rs::Profile config.rs::ConfigFile config.rs::ResolvedConfig config_view.rs::draw()

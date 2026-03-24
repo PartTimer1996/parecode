@@ -1,0 +1,57 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile and ResolvedConfig in src/config.rs",
+      "instruction": "In src/config.rs line 44 (after cost_per_mtok_input), add: pub cost_per_mtok_output: Option<f64>, and in src/config.rs line 187 (after cost_per_mtok_input in ResolvedConfig), add: pub cost_per_mtok_output: Option<f64>,\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to UiEvent::TokenStats and AgentDone in src/tui/mod.rs",
+      "instruction": "In src/tui/mod.rs lines 85-91, add cost_input: f64 and cost_output: f64 fields to TokenStats enum variant. In src/tui/mod.rs lines 74-81, add cost_input: f64 and cost_output: f64 fields to AgentDone enum variant.",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update AgentConfig to carry pricing info and modify run_tui to calculate cost",
+      "instruction": "In src/agent.rs line 479 (_model field), add after it: pub cost_per_mtok_input: Option<f64>, pub cost_per_mtok_output: Option<f64>,. Then modify src/agent.rs lines 391-397 to include cost calculation: calculate cost_input and cost_output using total_input_tokens * cost_per_mtok_input / 1_000_000.0 and total_output_tokens * cost_per_mtok_output / 1_000_000.0, and send these in UiEvent::TokenStats. Also update src/agent.rs lines 442-449 to send cost in UiEvent::AgentDone.\n[index: `UiEvent` at line 56 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Display cost info in config_view.rs",
+      "instruction": "In src/tui/config_view.rs around line 58 (after model display), add cost display: if cost_per_mtok_input or cost_per_mtok_output is Some, display the cost per 1M tokens.",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774024708,
+  "project": "forge"
+}

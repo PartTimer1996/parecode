@@ -1,0 +1,23 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_input field to AgentConfig struct",
+      "instruction": "Add field `cost_per_mtok_input: Option<f64>` to struct AgentConfig at src/agent.rs:473 (add after git_context field). Update any struct initialization that uses AgentConfig to include this new field.\n[index: `AgentConfig` at line 473 in src/agent.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": {
+        "FileChanged": "src/agent.rs"
+      },
+      "status": "Pending",
+      "tool_budget": 10,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774230715,
+  "project": "forge"
+}

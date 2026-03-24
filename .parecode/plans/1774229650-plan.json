@@ -1,0 +1,111 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile struct",
+      "instruction": "In src/config.rs:24-61 (Profile struct), add after line 44 (after cost_per_mtok_input): `/// Optional: cost per 1M output tokens in USD. pub cost_per_mtok_output: Option<f64>,`\n[index: `Profile` at line 518 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": {
+        "FileChanged": "src/config.rs:44"
+      },
+      "status": "Pending",
+      "tool_budget": 5,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_output to ResolvedConfig struct",
+      "instruction": "In src/config.rs:175-205 (ResolvedConfig struct), add `cost_per_mtok_output: Option<f64>,` after cost_per_mtok_input field at line 183\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": {
+        "FileChanged": "src/config.rs:183"
+      },
+      "status": "Pending",
+      "tool_budget": 5,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to AgentConfig struct",
+      "instruction": "In src/agent.rs:474-497 (AgentConfig struct), add after line 496 (before closing brace): `/// Cost per 1M input tokens in USD. pub cost_per_mtok_input: Option<f64>, /// Cost per 1M output tokens in USD. pub cost_per_mtok_output: Option<f64>,`\n[index: `AgentConfig` at line 474 in src/agent.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": {
+        "FileChanged": "src/agent.rs:496"
+      },
+      "status": "Pending",
+      "tool_budget": 5,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Propagate cost fields from Profile to ResolvedConfig in resolve_config",
+      "instruction": "Find the resolve_config function in src/config.rs and add cost_per_mtok_output to the ResolvedConfig construction, copying from Profile.cost_per_mtok_output\n[index: `Profile` at line 518 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 5,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to UiEvent::AgentDone variant",
+      "instruction": "In src/tui/mod.rs:56-132 (UiEvent enum), find AgentDone variant and add cost_usd: f64 field to calculate and display actual cost\n[index: `UiEvent` at line 535 in src/callgraph.rs]\n[index: `UiEvent` at line 56 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 5,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Calculate and send cost in run_tui AgentDone event",
+      "instruction": "In src/agent.rs:441-448 (UiEvent::AgentDone emission), calculate cost: let cost = config.cost_per_mtok_input.map(|r| (total_input_tokens as f64 / 1_000_000.0) * r).unwrap_or(0.0) + config.cost_per_mtok_output.map(|r| (total_output_tokens as f64 / 1_000_000.0) * r).unwrap_or(0.0); and add cost_usd field to UiEvent::AgentDone\n[index: `UiEvent` at line 535 in src/callgraph.rs]\n[index: `UiEvent` at line 56 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 5,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Display cost in TUI conversation/task complete",
+      "instruction": "Find where TaskComplete ConversationEntry is created (likely in src/tui/mod.rs run function handling AgentDone), add cost_usd field, and display it in the status area showing 'tokens (X input, Y output) - $Z.ZZ'\n[index: `Entry` at line 23 in src/cache.rs]\n[index: `ConversationEntry` at line 133 in src/tui/mod.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 5,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Show cost in config_view.rs profile display",
+      "instruction": "In src/tui/config_view.rs, find where profile cost info is displayed (kv function or similar), add cost_per_mtok_output to the displayed fields so users can see and configure it\n[index: `kv` at line 202 in src/tui/config_view.rs]",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 5,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774229650,
+  "project": "forge"
+}

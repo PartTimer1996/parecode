@@ -1,0 +1,21 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_input field to config_view.rs TUI editor",
+      "instruction": "In src/tui/config_view.rs, add a new configuration row for `cost_per_mtok_input` in the profile editing section. Use the existing kv() function to display it as 'cost per 1M tok' with the same styling as other profile fields. The field should be editable as a string that parses to Option<f64>.\n[index: `kv` at line 202 in src/tui/config_view.rs]",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774219414,
+  "project": "forge"
+}

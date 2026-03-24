@@ -1,0 +1,108 @@
+{
+  "task": "run_tui() currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in \n agent.rs::run_tui() agent.rs::AgentConfig  config.rs::ResolvedConfig config.rs::ConfigFile config.rs::Profile  config_view.rs::draw()",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile, ResolvedConfig",
+      "instruction": "Add `pub cost_per_mtok_output: Option<f64>` field to struct Profile at src/config.rs:24 (after cost_per_mtok_input line 44) and struct ResolvedConfig at src/config.rs:175 (after cost_per_mtok_input line 187)\n[index: `Profile` at line 24 in src/config.rs] — constructed by: DEFAULT_CONFIG_TOML (src/config.rs:281)\n[index: `ResolvedConfig` at line 175 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to AgentConfig",
+      "instruction": "Add to struct AgentConfig at src/agent.rs:474-501: `pub cost_per_mtok_input: Option<f64>` and `pub cost_per_mtok_output: Option<f64>` after the context_tokens field\n[index: `AgentConfig` at line 474 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1278), launch_agent (src/tui/mod.rs:3210), launch_plan (src/tui/mod.rs:3444), launch_quick (src/tui/mod.rs:3294)",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update launch_agent to pass cost fields",
+      "instruction": "In launch_agent at src/tui/mod.rs:3233-3250, add cost_per_mtok_input: resolved.cost_per_mtok_input and cost_per_mtok_output: resolved.cost_per_mtok_output to the AgentConfig construction\n[index: `AgentConfig` at line 474 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1278), launch_agent (src/tui/mod.rs:3210), launch_plan (src/tui/mod.rs:3444), launch_quick (src/tui/mod.rs:3294)\n[index: `launch_agent` at line 3210 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update launch_quick to pass cost fields",
+      "instruction": "In launch_quick at src/tui/mod.rs:3316-3333, add cost_per_mtok_input: resolved.cost_per_mtok_input and cost_per_mtok_output: resolved.cost_per_mtok_output to the AgentConfig construction\n[index: `AgentConfig` at line 474 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1278), launch_agent (src/tui/mod.rs:3210), launch_plan (src/tui/mod.rs:3444), launch_quick (src/tui/mod.rs:3294)\n[index: `launch_quick` at line 3294 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update launch_plan to pass cost fields",
+      "instruction": "In launch_plan at src/tui/mod.rs:3458-3475, add cost_per_mtok_input: resolved.cost_per_mtok_input and cost_per_mtok_output: resolved.cost_per_mtok_output to the AgentConfig construction\n[index: `AgentConfig` at line 474 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1278), launch_agent (src/tui/mod.rs:3210), launch_plan (src/tui/mod.rs:3444), launch_quick (src/tui/mod.rs:3294)\n[index: `launch_plan` at line 3444 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost calculation in run_tui and send in AgentDone event",
+      "instruction": "In run_tui at src/agent.rs:442-449, before sending UiEvent::AgentDone, calculate: let input_cost = config.cost_per_mtok_input.map(|c| (total_input_tokens as f64 / 1_000_000.0) * c); let output_cost = config.cost_per_mtok_output.map(|c| (total_output_tokens as f64 / 1_000_000.0) * c); let total_cost = input_cost.unwrap_or(0.0) + output_cost.unwrap_or(0.0); Then add cost: total_cost to UiEvent::AgentDone (you may need to add cost field to AgentDone enum in src/tui/mod.rs:57)\n[index: `run_tui` at line 105 in src/agent.rs]\n[index: `UiEvent` at line 57 in src/tui/mod.rs] — constructed by: event_loop (src/tui/mod.rs:1107), execute (src/tools/ask.rs:6), execute_one_tool_call (src/agent.rs:624), generate_plan (src/plan.rs:493)",
+      "files": [
+        "src/agent.rs",
+        "src/tui/mod.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Display cost in config view or stats view",
+      "instruction": "Add cost display to src/tui/config_view.rs:56-80 in the Settings section. After displaying context_tokens, add: if let (Some(input_cost), Some(output_cost)) = (state.cost_per_mtok_input, state.cost_per_mtok_output) { items.push(kv(\"cost_per_mtok\", &format!(\"${} input, ${} output\", input_cost, output_cost))); }\n[index: `kv` at line 202 in src/tui/config_view.rs]",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774393613,
+  "project": "forge"
+}

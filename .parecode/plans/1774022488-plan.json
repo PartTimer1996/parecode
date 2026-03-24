@@ -1,0 +1,81 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile struct in config.rs",
+      "instruction": "In src/config.rs:44, after the cost_per_mtok_input field (line 44), add a new field: `pub cost_per_mtok_output: Option<f64>,` with documentation comment: `/// Optional: cost per 1M output tokens in USD.` Also add `cost_per_mtok_output: None,` in the Default impl at line 84.",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to UiEvent enum variants in tui/mod.rs",
+      "instruction": "In src/tui/mod.rs:74-81 (AgentDone), add `cost_input_usd: f64, cost_output_usd: f64,` after output_tokens. In src/tui/mod.rs:85-91 (TokenStats), add `cost_input_usd: f64, cost_output_usd: f64,` after total_output.",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to AppState struct in tui/mod.rs",
+      "instruction": "In src/tui/mod.rs:416 (after cost_per_mtok_input field), add: `pub cost_per_mtok_output: Option<f64>,`",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost display in config_view.rs",
+      "instruction": "In src/tui/config_view.rs:58-59, after displaying the model, add display for cost_per_mtok_input and cost_per_mtok_output using the kv helper. Read state.cost_per_mtok_input and state.cost_per_mtok_output, display as formatted string like '$0.25/M' or 'N/A' if None.\n[index: `kv` at line 202 in src/tui/config_view.rs]",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Populate cost fields in AppState from config",
+      "instruction": "Find where AppState is constructed/populated (likely in launch_agent or near where cost_per_mtok_input is set) and add the cost_per_mtok_output from the profile config. Also need to populate the output cost from config.Profile into AppState.\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 503 in src/tui/mod.rs]\n[index: `AppState` at line 902 in src/tui/mod.rs]\n[index: `launch_agent` at line 2986 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Calculate and send cost in UiEvent from run_tui in agent.rs",
+      "instruction": "In src/agent.rs:385-391 (TokenStats event), calculate cost using config.cost_per_mtok_input and config.cost_per_mtok_output (which now exist in Profile). Formula: cost = (tokens / 1,000,000.0) * cost_per_mtok. Pass the calculated costs. Similarly in src/agent.rs:436-443 (AgentDone event), calculate and pass cost_input_usd and cost_output_usd.\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774022488,
+  "project": "forge"
+}

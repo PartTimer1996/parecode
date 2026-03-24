@@ -1,0 +1,59 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add output cost field to Profile and ResolvedConfig",
+      "instruction": "Add `cost_per_mtok_output: Option<f64>` field to struct Profile at src/config.rs:24 and struct ResolvedConfig at src/config.rs:175. Add a display line in config_view.rs:56-79 (in the Settings section) showing both input and output cost rates, using the existing kv() helper. The field should be placed next to cost_per_mtok_input for logical grouping.\n[index: `Profile` at line 639 in src/callgraph.rs]\n[index: `ResolvedConfig` at line 725 in src/callgraph.rs]\n[index: `ResolvedConfig` at line 726 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]\n[index: `kv` at line 202 in src/tui/config_view.rs]",
+      "files": [
+        "src/config.rs:24",
+        "src/config.rs:175",
+        "src/tui/config_view.rs:56"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add output cost to AppState",
+      "instruction": "Add `cost_per_mtok_output: Option<f64>` field to struct AppState at src/tui/mod.rs:363 (near cost_per_mtok_input). Find where AppState is constructed (likely in launch_agent or event_loop) and propagate the output cost from ResolvedConfig.\n[index: `ResolvedConfig` at line 725 in src/callgraph.rs]\n[index: `ResolvedConfig` at line 726 in src/callgraph.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]\n[index: `event_loop` at line 1045 in src/tui/mod.rs]\n[index: `launch_agent` at line 2993 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs:363"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Display cost in stats bar",
+      "instruction": "In src/tui/render.rs:379-478 (draw_stats_bar function), add cost calculation and display. Use state.cost_per_mtok_input and state.cost_per_mtok_output (which you'll add in step 2) to calculate: input_cost = total_input_tokens * cost_per_mtok_input / 1_000_000, output_cost = total_output_tokens * cost_per_mtok_output / 1_000_000. Display this near the token_str around line 412, formatted as currency.\n[index: `draw` at line 18 in src/tui/config_view.rs]\n[index: `draw` at line 22 in src/tui/git_view.rs]\n[index: `draw` at line 12 in src/tui/plan_view.rs]\n[index: `draw` at line 106 in src/tui/render.rs]\n[index: `draw_stats_bar` at line 379 in src/tui/render.rs]\n[index: `bar` at line 17 in src/tui/stats_view.rs]\n[index: `draw` at line 177 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/render.rs:412"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Propagate output cost through config resolution",
+      "instruction": "Find where ResolvedConfig is constructed (likely in src/config.rs) and ensure cost_per_mtok_output is read from the profile and properly resolved. This mirrors how cost_per_mtok_input is handled. Check DEFAULT_CONFIG_TOML at src/config.rs:281 for default values.\n[index: `ResolvedConfig` at line 725 in src/callgraph.rs]\n[index: `ResolvedConfig` at line 726 in src/callgraph.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]\n[index: `DEFAULT_CONFIG_TOML` at line 281 in src/config.rs]\n[index: `def` at line 128 in src/tools/mod.rs]",
+      "files": [
+        "src/config.rs:175"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774234249,
+  "project": "forge"
+}

@@ -1,0 +1,611 @@
+=== SYSTEM PROMPT ===
+You are PareCode, a coding assistant. Produce a structured edit plan — not an explanation.
+
+COMPLETED READS — use these directly:
+Any block formatted as [path — lines X-Y] in your context is a COMPLETED READ. Treat it
+exactly like a read_files result. This includes user-attached symbols and orient output.
+Line numbers from these blocks are authoritative — use them in plan steps without re-reading.
+
+DISCOVERY FLOW — follow in order, skip steps you don't need:
+1. SCAN the context above. If it already shows all types the task touches → go to OUTPUT now.
+2. orient(query="task keywords") — ONE call. Returns struct layouts, line numbers, and
+   construction sites in pipeline order. Call only if context map does NOT already cover the task.
+3. check_wiring(field="X") — REQUIRED when the task adds/modifies a field. The WITHOUT list
+   from the result = the structs your plan must update. Call once per new field.
+4. read_files(reads=[{path, line_range=[N,M]}, ...]) — ONE batch call for any remaining gaps.
+   Only if you need exact lines not already shown above. Batch all reads in a single call.
+
+LIMITS: 6 tool calls total. orient + check_wiring is almost always enough — read_files only
+for function bodies you need to edit and can't locate from the above.
+
+OUTPUT: When you have all locations, immediately output JSON (no markdown fences, no prose):
+
+{
+  "steps": [
+    {
+      "description": "human-readable one-liner shown to user",
+      "instruction": "exact file:line refs — never say 'find X' or 'locate Y'",
+      "files": ["src/foo.rs", "src/bar.rs"],
+      "verify": "none",
+      "tool_budget": 15
+    }
+  ]
+}
+
+STEP RULES:
+- Each step runs in TOTAL ISOLATION — executor sees ONLY listed files (max 10 per step)
+- Every instruction MUST contain exact file paths and line numbers
+- Prefer 4–8 steps; don't split naturally-coupled changes into micro-steps
+- verify: "none" | "command:CMD" | "changed:FILE" | "absent:FILE:PATTERN"
+- EXACT LINES: If you lack a line number for something a step must edit, add it to read_files
+  BEFORE writing the step. Never write "around line N" — either you know it or you read it first.
+- NO REDUNDANT PARAMS: Check if an existing struct argument already carries the data before
+  adding a new parameter. Read from the existing arg — don't duplicate data already passed.
+- RUST VERIFY: Any step adding/removing a struct field OR changing a function signature
+  MUST set verify: "command:cargo check".
+
+
+--- MESSAGE 0 (assistant) ---
+
+
+--- MESSAGE 1 (user) ---
+[ToolResult id=pie_ctx_0]
+# Project index — forge
+## Architecture
+A terminal-based AI coding assistant that provides a TUI for interacting with LLM agents. Features include file editing, patching, and reading tools executed by the agent, fuzzy search capabilities, git integration, and project convention loading.
+
+## Clusters
+- **src** [agent.rs, budget.rs, cache.rs, callgraph.rs, client.rs, config.rs, context_weights.rs, flowpaths.rs, git.rs, history.rs, hooks.rs, index.rs, init.rs, main.rs, mcp.rs, narrative.rs, pie.rs, plan.rs, sessions.rs, setup.rs, task_memory.rs, telemetry.rs, ui.rs] — Core runtime: API client, git integration, project mapping, agent configuration, convention loading, …
+- **tui** [chat.rs, config_view.rs, git_view.rs, input_box.rs, mod.rs, overlays.rs, plan_view.rs, render.rs, sidebar.rs, stats_view.rs] — Terminal UI framework: chat interface, input boxes, spinner animations, history display, chip/tag …
+- **tools** [ask.rs, bash.rs, edit.rs, mod.rs, patch.rs, pie_tool.rs, read.rs, write.rs] — Agent tool implementations: patch, read, and edit operations with fuzzy matching, line …
+- **root** [Cargo.lock, Cargo.toml]
+
+## Key files
+- src/tui/mod.rs (3825 lines)
+- Cargo.lock (3256 lines)
+- src/tools/pie_tool.rs (1886 lines)
+- src/agent.rs (1735 lines)
+- src/plan.rs (1520 lines)
+
+## Key symbols
+**src:** AgentConfig, ThinkParser, ToolKind, BudgetConfig, Budget, run_quick, run_tui, load_conventions, build_system_prompt, build_user_message
+**tui:** InputAction, InputBox, UiEvent, ConversationEntry, Mode, spinner_frame, tool_color, build_items, build_plan_card_items, draw_history
+**tools:** TurnThresholds, Hunk, execute, definition, execute, definition, execute
+
+Use `orient(query="keyword")` to get struct layouts, line numbers, and call connections for any task — one call covers discovery. Use `check_wiring(field="name")` to verify field propagation gaps across the pipeline.
+
+--- MESSAGE 2 (user) ---
+=== CONTEXT MAP — file ranges already read into your session ===
+Each range below is a COMPLETED READ. Do not call read_files for them.
+orient and check_wiring results also emit [file — lines X-Y] blocks — those are
+completed reads too. Only call read_files for ranges NOT shown anywhere above.
+
+  [src/agent.rs:474-508]  struct AgentConfig  (user attached)
+  [src/agent.rs:105-456]  fn run_tui  (user attached)
+  [src/config.rs:97-115]  struct ConfigFile  (user attached)
+  [src/config.rs:24-62]  struct Profile  (user attached)
+  [src/config.rs:175-205]  struct ResolvedConfig  (user attached)
+  [src/config.rs:63-66]  fn default_context_tokens  (user attached)
+  [src/tui/config_view.rs:18-201]  fn draw  (user attached)
+=== END CONTEXT MAP ===
+
+[src/agent.rs — lines 474-508 of 1735]
+
+ 474 | pub struct AgentConfig {
+ 475 |     pub verbose: bool,
+ 476 |     pub dry_run: bool,
+ 477 |     pub context_tokens: u32,
+ 478 |     pub _profile_name: String,
+ 479 |     pub _model: String,
+ 480 |     pub _show_timestamps: bool,
+ 481 |     pub mcp: Arc<McpClient>,
+ 482 |     /// Resolved hook commands (may be from explicit config or auto-detected).
+ 483 |     pub hooks: Arc<HookConfig>,
+ 484 |     /// When false, all hooks are suppressed for this run (set by `/hooks off`).
+ 485 |     pub hooks_enabled: bool,
+ 486 |     /// Auto-commit all changes after successful task completion.
+ 487 |     pub auto_commit: bool,
+ 488 |     /// Prefix for auto-commit messages (e.g. "parecode: ").
+ 489 |     pub auto_commit_prefix: String,
+ 490 |     /// Enable git integration: checkpoint before task, git status in system prompt, diff after.
+ 491 |     pub git_context: bool,
+ 492 |     /// Project graph for PIE injection and graph intercept. None for executor plan steps.
+ 493 |     pub project_graph: Option<std::sync::Arc<crate::pie::ProjectGraph>>,
+ 494 |     /// Project narrative for PIE injection. None for executor plan steps.
+ 495 |     pub project_narrative: Option<std::sync::Arc<crate::narrative::ProjectNarrative>>,
+ 496 |     /// Pre-computed flow paths for proactive context delivery. None for executor plan steps.
+ 497 |     pub flow_paths: Option<std::sync::Arc<crate::flowpaths::FlowPathIndex>>,
+ 498 |     /// Symbols pre-selected by the user via `#` drill-down. Source code is injected
+ 499 |     /// before the task message so the model skips redundant reads.
+ 500 |     pub attached_symbols: Vec<crate::pie::AttachedSymbol>,
+ 501 | }
+ 502 | 
+ 503 | // ── Pure prompt-assembly helpers ──────────────────────────────────────────────
+ 504 | 
+ 505 | /// Assemble the full system prompt from base + conventions + git status.
+ 506 | /// PIE context is no longer injected here — it goes into the message history
+ 507 | /// as a synthetic tool result via `pie_injection_messages()`.
+ 508 | /// `git_status` is pre-fetched by the caller so this function stays pure and testable.
+
+
+[src/agent.rs — lines 105-456 of 1735]
+
+ 105 | pub async fn run_tui(
+ 106 |     task: &str,
+ 107 |     client: &Client,
+ 108 |     config: &AgentConfig,
+ 109 |     attached: Vec<String>,
+ 110 |     prior_turns: Vec<crate::sessions::ConversationTurn>,
+ 111 |     ui_tx: mpsc::UnboundedSender<UiEvent>,
+ 112 |     shared_cache: std::sync::Arc<tokio::sync::Mutex<crate::cache::FileCache>>,
+ 113 | ) -> Result<()> {
+ 114 |     let task_start = std::time::Instant::now();
+ 115 |     let task_cwd = std::env::current_dir()
+ 116 |         .ok()
+ 117 |         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+ 118 |         .unwrap_or_else(|| "unknown".to_string());
+ 119 |     // MCP tools are appended alongside native tools each turn
+ 120 |     let mcp_tools = config.mcp.all_tools().await;
+ 121 |     let mcp_tool_defs: Vec<Tool> = mcp_tools.iter().map(|mt| Tool {
+ 122 |         name: mt.qualified_name.clone(),
+ 123 |         description: mt.description.clone(),
+ 124 |         parameters: mt.input_schema.clone(),
+ 125 |     }).collect();
+ 126 | 
+ 127 |     let mut messages: Vec<Message> = Vec::new();
+ 128 |     let mut total_input_tokens = 0u32;
+ 129 |     let mut total_output_tokens = 0u32;
+ 130 |     let mut tool_call_count = 0usize;
+ 131 |     let mut turn: usize = 0;
+ 132 |     // Cache the tool list — only rebuild when the phase actually changes.
+ 133 |     // Tool schemas are ~2,600 tokens; rebuilding every turn wastes nothing but
+ 134 |     // the Vec alloc — the real saving is sending the same bytes as a pointer.
+ 135 |     // More importantly this makes the phase key explicit and auditable.
+ 136 |     let mut cached_tools: Option<(/*key:*/ (usize, bool), Vec<Tool>)> = None;
+ 137 | 
+ 138 |     let budget = Budget::new(config.context_tokens);
+ 139 |     let mut history = History::default();
+ 140 |     let mut cache = shared_cache.lock().await;
+ 141 |     cache.next_turn(); // advance turn counter at task boundary
+ 142 |     let mut loop_detector = LoopDetector::default();
+ 143 | 
+ 144 |     // Fetch git status once so build_system_prompt stays pure.
+ 145 |     let git_status: Option<String> = if config.git_context {
+ 146 |         std::env::current_dir()
+ 147 |             .ok()
+ 148 |             .and_then(|cwd| crate::git::GitRepo::open(&cwd))
+ 149 |             .and_then(|repo| repo.status_short().ok())
+ 150 |             .filter(|s| !s.trim().is_empty())
+ 151 |     } else {
+ 152 |         None
+ 153 |     };
+ 154 |     let system_prompt = build_system_prompt(config, git_status.as_deref());
+ 155 |     let system_prompt = system_prompt.as_str();
+ 156 |     let system_tokens = crate::budget::estimate_tokens(system_prompt);
+ 157 | 
+ 158 |     // ── PIE context assembly ─────────────────────────────────────────────────
+ 159 |     // One call builds everything: injection messages, user-message symbol prefix,
+ 160 |     // flow-path match flag, and focus files. Consistent with the planner path.
+ 161 |     let pie_ctx = config.project_graph.as_ref()
+ 162 |         .map(|graph| crate::pie::build_pie_context(
+ 163 |             task,
+ 164 |             &attached,
+ 165 |             graph,
+ 166 |             config.project_narrative.as_deref(),
+ 167 |             config.flow_paths.as_deref(),
+ 168 |         ))
+ 169 |         .unwrap_or_else(crate::pie::PieContext::empty);
+ 170 | 
+ 171 |     let symbol_preload = crate::pie::build_symbol_preload(&config.attached_symbols);
+ 172 |     let user_content = format!("{}{}{}", symbol_preload, pie_ctx.user_prefix, build_user_message(task, &attached));
+ 173 |     messages.extend(pie_ctx.injection_messages);
+ 174 | 
+ 175 |     // ── Git checkpoint ────────────────────────────────────────────────────────
+ 176 |     // Create a checkpoint before the task starts. If the tree is dirty, this
+ 177 |     // commits all pending changes as a WIP checkpoint so /undo can restore them.
+ 178 |     // Skips silently if not in a git repo or git_context is disabled.
+ 179 |     let checkpoint_hash: Option<String> = if config.git_context {
+ 180 |         std::env::current_dir().ok().and_then(|cwd| {
+ 181 |             crate::git::GitRepo::open(&cwd).and_then(|repo| {
+ 182 |                 let summary: String = task
+ 183 |                     .lines()
+ 184 |                     .next()
+ 185 |                     .unwrap_or(task)
+ 186 |                     .chars()
+ 187 |                     .take(60)
+ 188 |                     .collect();
+ 189 |                 repo.checkpoint(&summary).ok()
+ 190 |             })
+ 191 |         })
+ 192 |     } else {
+ 193 |         None
+ 194 |     };
+ 195 | 
+ 196 |     // ── Prior turn pairs ─────────────────────────────────────────────────────
+ 197 |     // Inject the last few turns as lean user/assistant pairs so the model has
+ 198 |     // session continuity for follow-up tasks. No tool results — just what was
+ 199 |     // asked and what was answered. Capped to avoid token bloat.
+ 200 |     const MAX_PRIOR_TURNS: usize = 3;
+ 201 |     let prior_start = prior_turns.len().saturating_sub(MAX_PRIOR_TURNS);
+ 202 |     for turn in &prior_turns[prior_start..] {
+ 203 |         let user_text: String = turn.user_message.chars().take(300).collect();
+ 204 |         let assistant_text: String = turn.agent_response.chars().take(500).collect();
+ 205 |         messages.push(Message {
+ 206 |             role: "user".to_string(),
+ 207 |             content: MessageContent::from(user_text),
+ 208 |             tool_calls: vec![],
+ 209 |         });
+ 210 |         messages.push(Message {
+ 211 |             role: "assistant".to_string(),
+ 212 |             content: MessageContent::from(assistant_text),
+ 213 |             tool_calls: vec![],
+ 214 |         });
+ 215 |     }
+ 216 | 
+ 217 |     messages.push(Message {
+ 218 |         role: "user".to_string(),
+ 219 |         content: MessageContent::from(user_content),
+ 220 |         tool_calls: vec![],
+ 221 |     });
+ 222 | 
+ 223 |     loop {
+ 224 |         cache.next_turn();
+ 225 |         turn += 1;
+ 226 | 
+ 227 |         // ── Hard tool-call budget ─────────────────────────────────────────────
+ 228 |         if tool_call_count >= MAX_TOOL_CALLS {
+ 229 |             let _ = ui_tx.send(UiEvent::ToolBudgetHit { limit: MAX_TOOL_CALLS });
+ 230 |             break;
+ 231 |         }
+ 232 | 
+ 233 |         // ── Proactive token budget enforcement ────────────────────────────────
+ 234 |         let (est, compressed) = budget.enforce(&mut messages, system_tokens);
+ 235 |         if compressed {
+ 236 |             let _ = ui_tx.send(UiEvent::BudgetWarning);
+ 237 |         }
+ 238 |         let _ = ui_tx.send(UiEvent::ContextUpdate {
+ 239 |             used: est,
+ 240 |             total: budget.total_context(),
+ 241 |             compressed,
+ 242 |         });
+ 243 | 
+ 244 |         // ── Phase-adaptive tool selection ────────────────────────────────────
+ 245 |         // Only rebuild the tool list when the phase key changes — saves ~50µs of
+ 246 |         // Vec allocation per turn. The tool schemas themselves are not re-sent
+ 247 |         // (HTTP body is built fresh each call); this just avoids redundant work.
+ 248 |         let has_graph = config.project_graph.is_some();
+ 249 |         let tool_key = (turn, has_graph);
+ 250 |         let tools = match &cached_tools {
+ 251 |             Some((key, t)) if *key == tool_key => t.clone(),
+ 252 |             _ => {
+ 253 |                 let mut t = tools::tools_for_turn(turn, has_graph);
+ 254 |                 t.extend(mcp_tool_defs.iter().cloned());
+
+
+[src/config.rs — lines 97-115 of 558]
+
+  97 | pub struct ConfigFile {
+  98 |     /// Which profile to use when none is specified
+  99 |     #[serde(default = "default_profile_name")]
+ 100 |     pub default_profile: String,
+ 101 | 
+ 102 |     #[serde(default)]
+ 103 |     pub profiles: HashMap<String, Profile>,
+ 104 | 
+ 105 |     /// Named hook configurations switchable at runtime via `/hooks <name>`.
+ 106 |     /// Example: [hooks.rust] / [hooks.typescript]
+ 107 |     #[serde(default)]
+ 108 |     pub hooks: HashMap<String, crate::hooks::HookConfig>,
+ 109 | 
+ 110 |     /// The currently active hook configuration name (persisted across restarts).
+ 111 |     /// None means no hooks are active.
+ 112 |     #[serde(default)]
+ 113 |     pub active_hooks: Option<String>,
+ 114 | }
+
+
+[src/config.rs — lines 24-62 of 558]
+
+  24 | pub struct Profile {
+  25 |     /// OpenAI-compatible endpoint URL
+  26 |     pub endpoint: String,
+  27 |     /// Model identifier
+  28 |     pub model: String,
+  29 |     /// Context window size in tokens. Used for proactive budget enforcement.
+  30 |     #[serde(default = "default_context_tokens")]
+  31 |     pub context_tokens: u32,
+  32 |     /// Optional API key (sent as Bearer token)
+  33 |     pub api_key: Option<String>,
+  34 |     /// Optional separate model for plan generation.
+  35 |     /// If set, PareCode uses this model to think/plan and `model` for step execution.
+  36 |     /// Example: planner_model = "claude-opus-4-6" with model = "claude-haiku-4-5"
+  37 |     #[serde(default)]
+  38 |     pub planner_model: Option<String>,
+  39 |     /// MCP servers to connect for this profile
+  40 |     #[serde(default)]
+  41 |     pub mcp_servers: Vec<McpServerConfig>,
+  42 |     /// Optional: cost per 1M input tokens in USD, used for plan cost estimates.
+  43 |     /// Example: 0.25 for Haiku, 3.0 for Sonnet, 15.0 for Opus.
+  44 |     pub cost_per_mtok_input: Option<f64>,
+  45 |     /// Explicit hook commands per event. If all empty, auto-detection kicks in.
+  46 |     #[serde(default)]
+  47 |     pub hooks: crate::hooks::HookConfig,
+  48 |     /// Set to true to disable all hooks for this profile, including auto-detected ones.
+  49 |     #[serde(default)]
+  50 |     pub hooks_disabled: bool,
+  51 |     /// Auto-commit all changes after each successful task. Default: false.
+  52 |     #[serde(default)]
+  53 |     pub auto_commit: bool,
+  54 |     /// Prefix for auto-commit messages. Default: "parecode: ".
+  55 |     #[serde(default = "default_auto_commit_prefix")]
+  56 |     pub auto_commit_prefix: String,
+  57 |     /// Inject `git status` into system prompt and create checkpoints before tasks.
+  58 |     /// Set to false to disable all git integration. Default: true.
+  59 |     #[serde(default = "default_git_context")]
+  60 |     pub git_context: bool,
+  61 | }
+
+
+[src/config.rs — lines 175-205 of 558]
+
+ 175 | pub struct ResolvedConfig {
+ 176 |     pub endpoint: String,
+ 177 |     pub model: String,
+ 178 |     pub context_tokens: u32,
+ 179 |     pub api_key: Option<String>,
+ 180 |     /// Profile name that was resolved (for display)
+ 181 |     pub profile_name: String,
+ 182 |     /// Optional separate model for plan generation (None = use `model` for both)
+ 183 |     pub planner_model: Option<String>,
+ 184 |     /// MCP servers configured for this profile
+ 185 |     pub mcp_servers: Vec<McpServerConfig>,
+ 186 |     /// Optional cost per 1M input tokens in USD (for plan estimates)
+ 187 |     pub cost_per_mtok_input: Option<f64>,
+ 188 |     /// Hook commands from profile config (may be empty — auto-detect handles that)
+ 189 |     pub hooks: crate::hooks::HookConfig,
+ 190 |     /// When true, all hooks are suppressed including auto-detected ones
+ 191 |     pub hooks_disabled: bool,
+ 192 |     /// Auto-commit all changes after each successful task
+ 193 |     pub auto_commit: bool,
+ 194 |     /// Prefix for auto-commit messages
+ 195 |     pub auto_commit_prefix: String,
+ 196 |     /// Enable git integration (checkpoints, status injection, post-task diffs)
+ 197 |     pub git_context: bool,
+ 198 |     /// Names of available hook configs from config (for `/hooks list` display)
+ 199 |     pub available_hooks: Vec<String>,
+ 200 |     /// The currently active hook config name (from config file, persisted)
+ 201 |     pub active_hooks: Option<String>,
+ 202 |     /// The resolved HookConfig for the active named hook (empty if none active)
+ 203 |     pub active_hook_config: crate::hooks::HookConfig,
+ 204 | }
+
+
+[src/config.rs — lines 63-66 of 558]
+
+  63 | fn default_context_tokens() -> u32 {
+  64 |     32_768
+  65 | }
+
+
+[src/tui/config_view.rs — lines 18-201 of 233]
+
+  18 | pub fn draw(f: &mut Frame, state: &AppState, area: Rect) {
+  19 |     // Split area into scrollable content + fixed footer
+  20 |     let chunks = Layout::default()
+  21 |         .direction(Direction::Vertical)
+  22 |         .constraints([Constraint::Min(1), Constraint::Length(2)])
+  23 |         .split(area);
+  24 | 
+  25 |     let content_area = chunks[0];
+  26 |     let footer_area = chunks[1];
+  27 | 
+  28 |     // ── Build content items ───────────────────────────────────────────────────
+  29 |     let mut items: Vec<ListItem<'static>> = Vec::new();
+  30 | 
+  31 |     let heading = |s: &str| -> ListItem<'static> {
+  32 |         ListItem::new(Line::from(vec![
+  33 |             Span::raw("  "),
+  34 |             Span::styled(
+  35 |                 s.to_string(),
+  36 |                 Style::default()
+  37 |                     .fg(Color::Cyan)
+  38 |                     .add_modifier(Modifier::BOLD),
+  39 |             ),
+  40 |         ]))
+  41 |     };
+  42 |     let dim = |s: String| -> ListItem<'static> {
+  43 |         ListItem::new(Line::from(vec![
+  44 |             Span::raw("    "),
+  45 |             Span::styled(s, Style::default().fg(Color::Rgb(65, 60, 95))),
+  46 |         ]))
+  47 |     };
+  48 |     let blank = || ListItem::new(Line::raw(""));
+  49 | 
+  50 |     // ── Profile header ────────────────────────────────────────────────────────
+  51 |     items.push(blank());
+  52 |     items.push(heading(&format!("Profile: {}  (active)", state.profile)));
+  53 |     items.push(blank());
+  54 | 
+  55 |     // ── Settings ──────────────────────────────────────────────────────────────
+  56 |     items.push(heading("Settings"));
+  57 |     items.push(kv("endpoint", &state.endpoint));
+  58 |     items.push(kv("model", &state.model));
+  59 |     items.push(kv("context_tokens", &state.context_tokens.to_string()));
+  60 |     items.push(kv(
+  61 |         "api_key",
+  62 |         if state.endpoint.contains("localhost") || state.endpoint.contains("127.0.0.1") {
+  63 |             "(not required)"
+  64 |         } else {
+  65 |             "(set via config/env)"
+  66 |         },
+  67 |     ));
+  68 |     items.push(kv(
+  69 |         "auto_commit",
+  70 |         if state.auto_commit { "true" } else { "false" },
+  71 |     ));
+  72 |     items.push(kv(
+  73 |         "git_context",
+  74 |         if state.git_context_enabled {
+  75 |             "true"
+  76 |         } else {
+  77 |             "false"
+  78 |         },
+  79 |     ));
+  80 |     items.push(blank());
+  81 | 
+  82 |     // ── Hooks ─────────────────────────────────────────────────────────────────
+  83 |     items.push(heading("Hooks"));
+  84 | 
+  85 |     let hook_status = if state.hooks_disabled_profile {
+  86 |         "disabled (hooks_disabled = true in profile)"
+  87 |     } else if !state.hooks_enabled {
+  88 |         "off  (press h to re-enable)"
+  89 |     } else {
+  90 |         "on  (press h to disable)"
+  91 |     };
+  92 |     items.push(kv("status", hook_status));
+  93 | 
+  94 |     let preset_display = match &state.active_hook_preset {
+  95 |         Some(p) => format!("{p}  (use /hooks <preset> to switch)"),
+  96 |         None => {
+  97 |             if state.available_hook_presets.is_empty() {
+  98 |                 "none  (add [hook_presets.rust] to config.toml)".to_string()
+  99 |             } else {
+ 100 |                 format!("none active  — available: {}", state.available_hook_presets.join(", "))
+ 101 |             }
+ 102 |         }
+ 103 |     };
+ 104 |     items.push(kv("preset", &preset_display));
+ 105 | 
+ 106 |     let hc = &state.hooks_config;
+ 107 |     items.push(hook_line("on_edit", &hc.on_edit));
+ 108 |     items.push(hook_line("on_task_done", &hc.on_task_done));
+ 109 |     items.push(hook_line("on_plan_step_done", &hc.on_plan_step_done));
+ 110 |     items.push(hook_line("on_session_start", &hc.on_session_start));
+ 111 |     items.push(hook_line("on_session_end", &hc.on_session_end));
+ 112 |     items.push(blank());
+ 113 | 
+ 114 |     // ── MCP Servers ───────────────────────────────────────────────────────────
+ 115 |     items.push(heading("MCP Servers"));
+ 116 |     if state.mcp_server_names.is_empty() {
+ 117 |         items.push(dim("(none configured)".to_string()));
+ 118 |     } else {
+ 119 |         for name in &state.mcp_server_names {
+ 120 |             items.push(kv(name, "configured"));
+ 121 |         }
+ 122 |     }
+ 123 |     items.push(blank());
+ 124 | 
+ 125 |     // ── Conventions ───────────────────────────────────────────────────────────
+ 126 |     items.push(heading("Conventions"));
+ 127 |     let cwd = super::cwd_str();
+ 128 |     let conv_path = std::path::Path::new(&cwd).join(".parecode/conventions.md");
+ 129 |     if conv_path.exists() {
+ 130 |         items.push(kv("file", &conv_path.display().to_string()));
+ 131 |         // Show first few lines as preview
+ 132 |         if let Ok(content) = std::fs::read_to_string(&conv_path) {
+ 133 |             for line in content.lines().take(8) {
+ 134 |                 items.push(dim(format!("  {line}")));
+ 135 |             }
+ 136 |         }
+ 137 |     } else {
+ 138 |         items.push(dim(format!(
+ 139 |             "{} — not found",
+ 140 |             conv_path.display()
+ 141 |         )));
+ 142 |         items.push(dim("  Use /init to generate one.".to_string()));
+ 143 |     }
+ 144 |     items.push(blank());
+ 145 | 
+ 146 |     // ── Clamp scroll ──────────────────────────────────────────────────────────
+ 147 |     let total = items.len();
+ 148 |     let visible = content_area.height as usize;
+ 149 |     let max_scroll = total.saturating_sub(visible);
+ 150 |     let scroll = state.config_scroll.min(max_scroll);
+ 151 | 
+ 152 |     // Apply scroll offset
+ 153 |     let visible_items: Vec<ListItem<'static>> = items
+ 154 |         .into_iter()
+ 155 |         .skip(scroll)
+ 156 |         .take(visible)
+ 157 |         .collect();
+ 158 | 
+ 159 |     let list = List::new(visible_items).block(
+ 160 |         Block::default().style(Style::default().bg(Color::Rgb(8, 8, 14))),
+ 161 |     );
+ 162 |     f.render_widget(list, content_area);
+ 163 | 
+ 164 |     // ── Scroll indicator ──────────────────────────────────────────────────────
+ 165 |     if max_scroll > 0 && scroll < max_scroll {
+ 166 |         let indicator = Paragraph::new(Line::from(vec![
+ 167 |             Span::styled(
+
+
+
+Known locations — signatures included; read_file only for imperative logic:
+  struct McpServerConfig — src/config.rs:11-23
+    { name: String, command: Vec<String>, env: std::collections::HashMap<String, String> }
+  struct Profile — src/config.rs:24-62
+    { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool }
+  fn default_context_tokens — src/config.rs:63-66
+  fn default_auto_commit_prefix — src/config.rs:67-70
+  fn default_git_context — src/config.rs:71-74
+  struct ConfigFile — src/config.rs:97-115
+    { default_profile: String, profiles: HashMap<String, Profile>, hooks: HashMap<String, crate::hooks::HookConfig>, active_hooks: Option<String> }
+  fn default_profile_name — src/config.rs:116-119
+  struct ResolvedConfig — src/config.rs:175-205
+    { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, profile_name: String, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool, available_hooks: Vec<String>, active_hooks: Option<String>, active_hook_config: crate::hooks::HookConfig }
+  fn config_path — src/config.rs:260-266
+  fn dirs_config_dir — src/config.rs:267-280
+  struct HookConfig — src/hooks.rs:14-32
+    { on_edit: Vec<String>, on_task_done: Vec<String>, on_plan_step_done: Vec<String>, on_session_start: Vec<String>, on_session_end: Vec<String> }
+  struct HookResult — src/hooks.rs:86-98
+    { cmd: String, output: String, exit_code: i32 }
+  fn write_config_hooks — src/hooks.rs:99-146
+  fn write_active_hooks — src/hooks.rs:147-191
+  fn run_hook — src/hooks.rs:197-247
+  fn run_edit_hooks — src/hooks.rs:248-262
+  fn run_task_done_hooks — src/hooks.rs:263-638
+  fn run_quick — src/agent.rs:28-104
+  fn run_tui — src/agent.rs:105-456
+  fn load_conventions — src/agent.rs:457-473
+  struct AgentConfig — src/agent.rs:474-508
+    { verbose: bool, dry_run: bool, context_tokens: u32, _profile_name: String, _model: String, _show_timestamps: bool, mcp: Arc<McpClient>, hooks: Arc<HookConfig>, hooks_enabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool, project_graph: Option<std::sync::Arc<crate::pie::ProjectGraph>>, project_narrative: Option<std::sync::Arc<crate::narrative::ProjectNarrative>>, flow_paths: Option<std::sync::Arc<crate::flowpaths::FlowPathIndex>>, attached_symbols: Vec<crate::pie::AttachedSymbol> }
+  fn build_system_prompt — src/agent.rs:509-527
+  fn build_user_message — src/agent.rs:528-551
+  struct ThinkParser — src/agent.rs:552-556
+    { buf: String, in_think: bool }
+  fn execute_one_tool_call — src/agent.rs:624-830
+  fn strip_cot_from_last_assistant — src/agent.rs:831-875
+  fn should_protect_tool_result — src/agent.rs:876-899
+  fn compress_tool_result_to_stub — src/agent.rs:900-932
+  fn evict_stale_content — src/agent.rs:933-974
+  enum ToolKind — src/agent.rs:975-983
+    { Read { path: String, has_range: bool, is_symbols: bool }, Mutate { path: String }, Other { is_bash: bool } }
+  fn dispatch_tool — src/agent.rs:1006-1111
+  fn bash_graph_intercept — src/agent.rs:1112-1178
+  fn extract_grep_target_file — src/agent.rs:1179-1203
+  fn extract_grep_pattern — src/agent.rs:1204-1231
+  fn format_args_summary — src/agent.rs:1232-1277
+  fn _should_skip_done_turn — src/agent.rs:1278-1735
+  struct BudgetConfig — src/budget.rs:19-24
+    { total_context: u32, response_headroom: u32 }
+  fn estimate_tokens — src/budget.rs:48-53
+  fn estimate_messages — src/budget.rs:54-57
+  fn estimate_message — src/budget.rs:58-72
+  struct Budget — src/budget.rs:73-76
+    { config: BudgetConfig }
+  fn compress_tool_content — src/budget.rs:189-212
+  fn has_tool_call_id — src/budget.rs:213-221
+  struct LoopDetector — src/budget.rs:222-225
+    { recent: Vec<(String, String)> }
+  fn draw_palette — src/tui/overlays.rs:16-78
+  fn draw_slash_complete — src/tui/overlays.rs:79-140
+  fn draw_file_picker — src/tui/overlays.rs:141-229
+  fn draw_session_browser — src/tui/overlays.rs:230-352
+  fn draw_diff_overlay — src/tui/overlays.rs:353-429
+  fn draw_profile_picker — src/tui/overlays.rs:430-500
+  fn draw_symbol_picker — src/tui/overlays.rs:501-630
+  fn draw_hook_wizard — src/tui/overlays.rs:631-907
+
+Task: run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in  agent.rs::run_tui() agent.rs::AgentConfig  config.rs::Profile config.rs::default_context_tokens() config.rs::ConfigFile config.rs::ResolvedConfig  config_view.rs::draw()

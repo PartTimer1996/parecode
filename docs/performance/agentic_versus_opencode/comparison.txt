@@ -1,0 +1,13 @@
+Amazing preliminary results on an agentic task! 
+
+Metric                           PareCode     OpenCode    Improvement
+----------------------------------------------------------------------
+API calls (tool turns)                 17           22     1.3x fewer
+Total cost ($)                     0.0142       0.0527     3.7x cheaper
+Prompt tokens                     197,377      720,896     3.7x fewer
+Completion tokens                   1,971        4,881     2.5x fewer
+Reasoning tokens                      994        3,069     3.1x fewer
+Total tokens                      200,342      728,846     3.6x fewer
+Wall time (s)                        39.6        191.1     4.8x faster
+Peak context window                16,376       43,712     2.7x smaller peak
+Avg context per call               11,610       32,768     2.8x smaller avg

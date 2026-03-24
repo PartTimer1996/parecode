@@ -1,0 +1,23 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost display to stats bar in render.rs",
+      "instruction": "In src/tui/render.rs:379-478 (draw_stats_bar function), add cost calculation and display. After the token_str calculation (lines 409-416), add: 1) Get cost_per_mtok_input from state (AppState has this field); 2) Calculate cost using formula: (input_tokens + output_tokens) * cost_per_mtok_input / 1000.0; 3) Format as cost string (e.g., '$0.05'); 4) Add cost_str Span to the line at line 465, before inflight_str. Use the same pattern as other stats displays (Span::styled with appropriate color).\n[index: `AppState` at line 363 in src/tui/mod.rs] — constructed by: event_loop (src/tui/mod.rs:1045)\n[index: `draw_stats_bar` at line 379 in src/tui/render.rs]\n[index: `cost_str` at line 56 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/render.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774307342,
+  "project": "forge"
+}

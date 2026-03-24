@@ -1,0 +1,105 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile config struct",
+      "instruction": "In src/config.rs:24, add `cost_per_mtok_output: Option<f64>` field to the Profile struct, next to cost_per_mtok_input\n[index: `Profile` at line 604 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_output field to ResolvedConfig",
+      "instruction": "In src/config.rs:175, add `cost_per_mtok_output: Option<f64>` field to the ResolvedConfig struct\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_output to AppState",
+      "instruction": "In src/tui/mod.rs:363, add `cost_per_mtok_output: Option<f64>` field to AppState struct\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update config resolution to propagate output cost",
+      "instruction": "Find the function that creates ResolvedConfig from Profile (around line 175-205 in src/config.rs) and add the propagation of cost_per_mtok_output from Profile to ResolvedConfig\n[index: `Profile` at line 604 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update AppState initialization to include output cost",
+      "instruction": "Find where AppState is constructed (likely in src/tui/mod.rs event loop or run function) and ensure cost_per_mtok_output is populated from ResolvedConfig\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update cost_str to use actual output cost",
+      "instruction": "In src/tui/stats_view.rs:56-69, modify cost_str function to accept cost_per_mtok_output parameter and use it instead of hardcoded 3x multiplier\n[index: `cost_str` at line 56 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/stats_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Display cost configuration in config view",
+      "instruction": "In src/tui/config_view.rs:55-80, add kv rows to display cost_per_mtok_input and cost_per_mtok_output values (similar to how model/context_tokens are shown)\n[index: `kv` at line 202 in src/tui/config_view.rs]",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update DEFAULT_CONFIG_TOML with cost examples",
+      "instruction": "In src/config.rs around line 281 where DEFAULT_CONFIG_TOML is defined, add example cost_per_mtok_input and cost_per_mtok_output values to the default profile\n[index: `def` at line 128 in src/tools/mod.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774232489,
+  "project": "forge"
+}

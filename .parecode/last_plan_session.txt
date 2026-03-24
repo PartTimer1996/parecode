@@ -1,0 +1,836 @@
+=== PLAN SESSION ===
+Task: run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in  agent.rs::run_tui() agent.rs::AgentConfig  config.rs::Profile config.rs::default_context_tokens() config.rs::ConfigFile config.rs::ResolvedConfig  config_view.rs::draw()
+
+
+╔═══ TURN 1  ═══╗
+The user wants to add cost tracking to the run_tui function. Currently it tracks input/output tokens, but they want to also show the actual cost based on the model's pricing.
+
+Looking at the context map:
+- `AgentConfig` has `context_tokens` but no cost info
+- `Profile` has `cost_per_mtok_input` which is exactly what we need (optional cost per 1M input tokens)
+- `ResolvedConfig` also has `cost_per_mtok_input`
+- `run_tui` tracks `total_input_tokens` and `total_output_tokens`
+
+I need to check if there's also output token cost - looking at Profile, I only see `cost_per_mtok_input`. The user will probably need `cost_per_mtok_output` too.
+
+Let me use check_wiring to see what fields exist for cost tracking, then figure out what needs to be added.
+
+
+◆ check_wiring {"field": "cost_per_mtok"}
+→ check_wiring: 'cost_per_mtok'
+
+[config] struct Profile (src/config.rs:24)
+  layout: { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool }
+  has: cost_per_mtok_input: Option<f64>
+  constructed by:
+    DEFAULT_CONFIG_TOML (src/config.rs:388)
+  fns in file: config_path (line 260)
+
+[config] struct ResolvedConfig (src/config.rs:175)
+  layout: { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, profile_name: String, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool, available_hooks: Vec<String>, active_hooks: Option<String>, active_hook_config: crate::hooks::HookConfig }
+  has: cost_per_mtok_input: Option<f64>
+  fns in file: config_path (line 260)
+
+[ui]     struct AppState (src/tui/mod.rs:405)
+  layout: { entries: Vec<ConversationEntry>, input_box: InputBox, input: String, cursor: usize, mode: Mode, scroll: usize, profile: String, model: String, context_tokens: u32, ctx_used: usize, ctx_compressed: bool, show_timestamps: bool, palette_query: String, file_picker: Option<FilePickerState>, slash_complete_selected: usize, cancel_tx: Option<tokio::sync::oneshot::Sender<()>>, attached_files: Vec<AttachedFile>, focused_chip: Option<usize>, spinner_tick: u32, conversation_turns: Vec<ConversationTurn>, session: Option<Session>, collecting_response: String, collecting_tools: Vec<String>, session_resumed: bool, session_browser: Option<SessionBrowserState>, plan_review: Option<PlanReviewState>, plan_running_step: usize, mcp: Arc<McpClient>, stats: SessionStats, current_task_preview: String, cost_per_mtok_input: Option<f64>, last_stream_text: String, stream_in_think: bool, hooks_enabled: bool, sidebar_visible: bool, sidebar_focused: bool, sidebar_selected: usize, sidebar_scroll: usize, sidebar_entries: Vec<SidebarEntry>, active_tab: Tab, plan_ever_active: bool, stats_scroll: usize, telemetry_history: Vec<crate::telemetry::TaskRecord>, endpoint: String, hooks_config: crate::hooks::HookConfig, hooks_disabled_profile: bool, mcp_server_names: Vec<String>, auto_commit: bool, auto_commit_prefix: String, git_context_enabled: bool, git_available: bool, last_checkpoint_hash: Option<String>, git_stat_content: String, git_diff_content: String, diff_overlay_scroll: usize, diff_overlay_visible: bool, git_checkpoints: Vec<crate::git::CheckpointInfo>, undo_picker_selected: usize, wants_editor: bool, config_scroll: usize, profile_picker_selected: usize, profile_picker_entries: Vec<(String, String)>, pending_ask_reply: Option<tokio::sync::oneshot::Sender<String>>, active_hook_preset: Option<String>, available_hook_presets: Vec<String>, hook_wizard: Option<HookWizardState>, symbol_picker: Option<FileSymbolPickerState>, attached_symbols: Vec<crate::pie::AttachedSymbol>, project_graph: Option<crate::pie::ProjectGraph>, project_narrative: Option<crate::narrative::ProjectNarrative>, flow_paths: Option<crate::flowpaths::FlowPathIndex>, context_weights: crate::context_weights::ContextWeights, file_cache: std::sync::Arc<tokio::sync::Mutex<crate::cache::FileCache>> }
+  has: cost_per_mtok_input: Option<f64>
+  constructed by:
+    event_loop (src/tui/mod.rs:1118)
+  fns in file: gather_files (line 297), slash_filtered (line 1048), run (line 1074), event_loop (line 1107), handle_key (line 1506)
+
+Gaps — structs needing 'cost_per_mtok':
+  [init]   Args (src/main.rs:36)
+  [init]   ProfileForm (src/setup.rs:55)
+    constructed by: PROFILE_EXAMPLES (src/setup.rs:783)
+      profile_name: "test".to_string(),
+      endpoint: "http://example.com".to_string(),
+      model: "test-model".to_string(),
+      context_tokens: 12345,
+      … +2 more fields
+    constructed by: wizard_cloud_api (src/setup.rs:345)
+      profile_name: preset.profile_name.to_string(),
+      endpoint: preset.endpoint.to_string(),
+      model: preset.model.to_string(),
+      context_tokens: preset.context_tokens,
+    constructed by: wizard_custom_endpoint (src/setup.rs:436)
+      profile_name: "custom".to_string(),
+  [init]   ProviderPreset (src/setup.rs:231)
+    constructed by: PRESETS (src/setup.rs:241)
+      profile_name: "claude",
+      endpoint: "https://api.anthropic.com/v1/chat/completions",
+      model: "claude-sonnet-4-6",
+      context_tokens: 200_000,
+      … +2 more fields
+
+
+╔═══ TURN 2  ═══╗
+The check_wiring shows:
+1. `Profile` has `cost_per_mtok_input: Option<f64>` - this exists
+2. `ResolvedConfig` has `cost_per_mtok_input: Option<f64>` - this exists
+3. `AppState` in tui/mod.rs also has `cost_per_mtok_input: Option<f64>` - this exists
+
+So input cost is already available in the pipeline! But I need to check if there's output cost too. The user probably wants both input and output costs.
+
+Let me check for output token cost field:
+
+
+◆ check_wiring {"field": "cost_per_mtok_output"}
+→ No structs found with exact 'cost_per_mtok_output' field.
+Try find_symbol(name="cost_per_mtok_output") to locate it as a top-level symbol.
+
+╔═══ TURN 3  ═══╗
+No `cost_per_mtok_output` field exists. The task needs to:
+1. Add output cost field to the config structs
+2. Pass cost info through to AgentConfig  
+3. Calculate and display cost in run_tui / UI
+
+Let me check how stats are displayed and how the config flows to see what else needs updating:
+
+
+
+◆ orient {"query": "stats view SessionStats token
+→ # orient: "stats view SessionStats token display"
+
+## Types (pipeline order)
+[src/tui/mod.rs — lines 342-347] ([ui]     struct SessionBrowserState — orient result)
+  struct SessionBrowserState
+  {
+      entries: Vec<(String, std::path::PathBuf, usize, String)>,
+      selected: usize,
+  }
+  // Layout authoritative — do not re-read this range.
+
+[src/sessions.rs — lines 38-53] ([core]   struct Session — orient result)
+  struct Session
+  {
+      id: String,
+      _cwd: String,
+      _turns: Vec<ConversationTurn>,
+      active_turn: usize,
+      path: PathBuf,
+  }
+  // constructed by: new_session (src/sessions.rs:187), open_session (src/sessions.rs:74)
+  // Layout authoritative — do not re-read this range.
+
+[src/telemetry.rs — lines 56-84] ([core]   struct SessionStats — orient result)
+  struct SessionStats
+  {
+      tasks_completed: usize,
+      total_input_tokens: u32,
+      total_output_tokens: u32,
+      total_tool_calls: usize,
+      total_compressed: usize,
+      budget_enforcements: usize,
+      peak_context_pct: u32,
+      records: Vec<TaskRecord>,
+      inflight_input_tokens: u32,
+      inflight_output_tokens: u32,
+      inflight_tool_calls: usize,
+      last_flush_ts: i64,
+  }
+  // constructed by: AppState (src/tui/mod.rs:405)
+  // Layout authoritative — do not re-read this range.
+
+[src/client.rs — lines 113-120] ([core]   struct UsageStats — orient result)
+  struct UsageStats
+  {
+      prompt_tokens: Option<u32>,
+      completion_tokens: Option<u32>,
+  }
+  // Layout authoritative — do not re-read this range.
+
+[src/tui/mod.rs — lines 373-383] ([ui]     struct PlanReviewState — orient result)
+  struct PlanReviewState
+  {
+      plan: Plan,
+      selected: usize,
+      annotating: bool,
+      annotation_input: String,
+  }
+  // constructed by: AppState (src/tui/mod.rs:405)
+  // Layout authoritative — do not re-read this range.
+
+[src/config.rs — lines 175-205] ([config] struct ResolvedConfig — orient result)
+  struct ResolvedConfig
+  {
+      endpoint: String,
+      model: String,
+      context_tokens: u32,
+      api_key: Option<String>,
+      profile_name: String,
+      planner_model: Option<String>,
+      mcp_servers: Vec<McpServerConfig>,
+      cost_per_mtok_input: Option<f64>,
+      hooks: crate::hooks::HookConfig,
+      hooks_disabled: bool,
+      auto_commit: bool,
+      auto_commit_prefix: String,
+      git_context: bool,
+      available_hooks: Vec<String>,
+      active_hooks: Option<String>,
+      active_hook_config: crate::hooks::HookConfig,
+  }
+  // Layout authoritative — do not re-read this range.
+
+[src/config.rs — lines 24-62] ([config] struct Profile — orient result)
+  struct Profile
+  {
+      endpoint: String,
+      model: String,
+      context_tokens: u32,
+      api_key: Option<String>,
+      planner_model: Option<String>,
+      mcp_servers: Vec<McpServerConfig>,
+      cost_per_mtok_input: Option<f64>,
+      hooks: crate::hooks::HookConfig,
+      hooks_disabled: bool,
+      auto_commit: bool,
+      auto_commit_prefix: String,
+      git_context: bool,
+  }
+  // constructed by: DEFAULT_CONFIG_TOML (src/config.rs:281)
+  // Layout authoritative — do not re-read this range.
+
+[src/setup.rs — lines 55-64] ([init]   struct ProfileForm — orient result)
+  struct ProfileForm
+  {
+      profile_name: String,
+      endpoint: String,
+      model: String,
+      context_tokens: u32,
+      api_key: Option<String>,
+      key_source: Option<String>,
+  }
+  // constructed by: PROFILE_EXAMPLES (src/setup.rs:687), wizard_cloud_api (src/setup.rs:327), wizard_custom_endpoint (src/setup.rs:412), wizard_local_ollama (src/setup.rs:357)
+  // Layout authoritative — do not re-read this range.
+
+[src/setup.rs — lines 231-239] ([init]   struct ProviderPreset — orient result)
+  struct ProviderPreset
+  {
+      profile_name: &'static str,
+      endpoint: &'static str,
+      model: &'static str,
+      context_tokens: u32,
+      env_var: &'static str,
+      display_name: &'static str,
+  }
+  // constructed by: PRESETS (src/setup.rs:240)
+  // Layout authoritative — do not re-read this range.
+
+[src/plan.rs — lines 173-182] ([agent]  struct PlanMetrics — orient result)
+  struct PlanMetrics
+  {
+      total_input_tokens: u32,
+      total_output_tokens: u32,
+      turns: usize,
+      tool_calls: HashMap<String, usize>,
+      elapsed_secs: u32,
+  }
+  // constructed by: generate_plan (src/plan.rs:493)
+  // Layout authoritative — do not re-read this range.
+
+Struct/enum layouts above are [file — lines X-Y] blocks = completed reads.
+Do NOT call read_files for any struct range shown above.
+
+## Key functions
+[ui]     fn draw_session_browser (src/tui/overlays.rs:230-352)
+
+[ui]     fn load_sidebar_session (src/tui/mod.rs:3665-3705)
+  calls: load_session_turns (src/sessions.rs:125), load_sidebar_entries (src/tui/mod.rs:3706)
+  constructs: sessions::Session
+
+[ui]     fn draw_stats_bar (src/tui/render.rs:385-484)
+
+[core]   fn new_session (src/sessions.rs:187-212)
+  calls: sessions_dir (src/sessions.rs:54), cwd_basename (src/sessions.rs:64)
+  constructs: Session
+
+[core]   fn open_session (src/sessions.rs:74-113)
+  calls: sessions_dir (src/sessions.rs:54), find_latest_for_cwd (src/sessions.rs:213), load_session_turns (src/sessions.rs:125), cwd_basename (src/sessions.rs:64)
+  constructs: Session
+
+[core]   fn load_session_turns (src/sessions.rs:125-136)
+
+[core]   fn display_summarise (src/history.rs:70-97)
+  calls: first_line (src/history.rs:312), summarise (src/history.rs:100)
+
+[config] fn default_context_tokens (src/config.rs:63-66)
+
+Suggested: check_wiring(field="task_preview") to verify full pipeline propagation.
+
+
+╔═══ TURN 4  ═══╗
+Now I understand the pipeline:
+- `Profile` has `cost_per_mtok_input` → needs output cost too
+- `ResolvedConfig` has `cost_per_mtok_input` → needs output cost too  
+- `AgentConfig` has NO cost fields → needs both input and output
+- `AppState` already has `cost_per_mtok_input` → needs output cost
+- `SessionStats` tracks tokens → could calculate cost there
+
+Let me trace how cost flows from config → agent → UI to see what's missing:
+
+
+◆ check_wiring {"field": "cost_per_mtok_input", "struct
+→ check_wiring: 'cost_per_mtok_input'
+
+[ui]     struct AppState (src/tui/mod.rs:405)
+  layout: { entries: Vec<ConversationEntry>, input_box: InputBox, input: String, cursor: usize, mode: Mode, scroll: usize, profile: String, model: String, context_tokens: u32, ctx_used: usize, ctx_compressed: bool, show_timestamps: bool, palette_query: String, file_picker: Option<FilePickerState>, slash_complete_selected: usize, cancel_tx: Option<tokio::sync::oneshot::Sender<()>>, attached_files: Vec<AttachedFile>, focused_chip: Option<usize>, spinner_tick: u32, conversation_turns: Vec<ConversationTurn>, session: Option<Session>, collecting_response: String, collecting_tools: Vec<String>, session_resumed: bool, session_browser: Option<SessionBrowserState>, plan_review: Option<PlanReviewState>, plan_running_step: usize, mcp: Arc<McpClient>, stats: SessionStats, current_task_preview: String, cost_per_mtok_input: Option<f64>, last_stream_text: String, stream_in_think: bool, hooks_enabled: bool, sidebar_visible: bool, sidebar_focused: bool, sidebar_selected: usize, sidebar_scroll: usize, sidebar_entries: Vec<SidebarEntry>, active_tab: Tab, plan_ever_active: bool, stats_scroll: usize, telemetry_history: Vec<crate::telemetry::TaskRecord>, endpoint: String, hooks_config: crate::hooks::HookConfig, hooks_disabled_profile: bool, mcp_server_names: Vec<String>, auto_commit: bool, auto_commit_prefix: String, git_context_enabled: bool, git_available: bool, last_checkpoint_hash: Option<String>, git_stat_content: String, git_diff_content: String, diff_overlay_scroll: usize, diff_overlay_visible: bool, git_checkpoints: Vec<crate::git::CheckpointInfo>, undo_picker_selected: usize, wants_editor: bool, config_scroll: usize, profile_picker_selected: usize, profile_picker_entries: Vec<(String, String)>, pending_ask_reply: Option<tokio::sync::oneshot::Sender<String>>, active_hook_preset: Option<String>, available_hook_presets: Vec<String>, hook_wizard: Option<HookWizardState>, symbol_picker: Option<FileSymbolPickerState>, attached_symbols: Vec<crate::pie::AttachedSymbol>, project_graph: Option<crate::pie::ProjectGraph>, project_narrative: Option<crate::narrative::ProjectNarrative>, flow_paths: Option<crate::flowpaths::FlowPathIndex>, context_weights: crate::context_weights::ContextWeights, file_cache: std::sync::Arc<tokio::sync::Mutex<crate::cache::FileCache>> }
+  has: cost_per_mtok_input: Option<f64>
+  constructed by:
+    event_loop (src/tui/mod.rs:1118)
+  fns in file: gather_files (line 297), slash_filtered (line 1048), run (line 1074), event_loop (line 1107), handle_key (line 1506)
+
+Gaps — structs needing 'cost_per_mtok_input':
+  [agent]  AgentConfig (src/agent.rs:474)
+    constructed by: _should_skip_done_turn (src/agent.rs:1330)
+      verbose: false,
+      dry_run: false,
+      context_tokens: 8000,
+      _profile_name: String::new(),
+      … +11 more fields
+    constructed by: launch_agent (src/tui/mod.rs:3233)
+      context_tokens: resolved.context_tokens,
+      _profile_name: resolved.profile_name.clone(),
+      _model: resolved.model.clone(),
+      _show_timestamps: state.show_timestamps,
+      … +10 more fields
+    constructed by: launch_plan (src/tui/mod.rs:3458)
+      context_tokens: resolved.context_tokens,
+      _profile_name: resolved.profile_name.clone(),
+      _model: resolved.model.clone(),
+      _show_timestamps: state.show_timestamps,
+      … +10 more fields
+
+
+╔═══ TURN 5  ═══╗
+Now I see the gaps clearly:
+- `AgentConfig` is MISSING cost fields (needs both input and output cost)
+- The pipeline: Profile → ResolvedConfig → AgentConfig (but AgentConfig doesn't receive cost!)
+- AppState already has cost_per_mtok_input but needs output cost too
+
+Let me check where AgentConfig is constructed and where stats are displayed:
+
+
+
+◆ read_files src/tui/mod.rs[3225–3260], src/tui/mod.rs[3450–3485], src/tui/render.rs[380–430]
+→ [Graph overlay for src/tui/mod.rs:3225-3260]
+fn launch_agent (src/tui/mod.rs:3210-3293):
+  calls: resolve_hooks_with_state (src/tui/mod.rs:3197)
+  called by: src/tui/mod.rs::handle_submit
+Key types in this file:
+  enum UiEvent (line 57): { Chunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult { summary: String }, CacheHit { path: String, lines: usize }, LoopWarning { tool_name: String }, BudgetWarning, ToolBudgetHit { limit: usize }, AgentDone { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize, duration_secs: u32, cwd: String }, AgentError(String), TokenStats { _input: u32, _output: u32, total_input: u32, total_output: u32, tool_calls: usize }, ContextUpdate { used: usize, total: u32, compressed: bool }, PlanReady(crate::plan::Plan), PlanGenerateFailed(String), PlanStepStart { index: usize, total: usize, desc: String }, PlanStepDone { index: usize, passed: bool, error: Option<String> }, PlanComplete { total: usize }, PlanFailed { step: usize, error: String }, HookOutput { event: String, output: String, exit_code: i32 }, GitChanges { stat: String, checkpoint_hash: Option<String>, files_changed: usize }, GitAutoCommit { message: String }, GitError(String), SystemMsg(String), AskUser { question: String, reply_tx: tokio::sync::oneshot::Sender<String> }, IndexReady { graph: crate::pie::ProjectGraph, narrative: Option<crate::narrative::ProjectNarrative> } }
+  enum ConversationEntry (line 134): { UserMessage(String), AssistantChunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult(String), CacheHit { path: String, lines: usize }, SystemMsg(String), HookOutput { event: String, output: String, success: bool }, TaskComplete { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize }, PlanCard, GitNotification { files_changed: usize, _checkpoint_hash: Option<String> }, AskUser(String), AskReply(String) }
+  enum Mode (line 164): { Normal, AgentRunning, Palette, FilePicker, SlashComplete, SessionBrowser, PlanReview, PlanRunning, SymbolPicker, UndoPicker, ProfilePicker, AskingUser, HookWizard }
+  enum WizardStep (line 184): { EnterName, EnterOnEdit, EnterOnTaskDone, EnterOnPlanStepDone, EnterOnSessionStart, EnterOnSessionEnd, Confirm }
+  struct HookWizardState (line 195): { step: WizardStep, name_input: String, on_edit_input: String, on_task_done_input: String, on_plan_step_done_input: String, on_session_start_input: String, on_session_end_input: String }
+  struct FileSymbolPickerState (line 210): { file: String, query: String, selected: usize, all_symbols: Vec<crate::pie::AttachedSymbol>, picked: Vec<crate::pie::AttachedSymbol> }
+[/Graph overlay]
+
+[src/tui/mod.rs — lines 3225-3260 of 3825]
+
+3225 [7acb] |     state.cancel_tx = Some(cancel_tx);
+3226 [ntfp] | 
+3227 [5l3v] |     // Build client + config
+3228 [umd3] |     let mut client = Client::new(resolved.endpoint.clone(), resolved.model.clone());
+3229 [57wb] |     if let Some(key) = &resolved.api_key {
+3230 [229k] |         client.set_api_key(key.clone());
+3231 [zoqg] |     }
+3232 [fh1x] |     let resolved_hooks = resolve_hooks_with_state(resolved, state);
+3233 [ujl7] |     let agent_config = AgentConfig {
+3234 [h2df] |         verbose,
+3235 [huiw] |         dry_run,
+3236 [zeq5] |         context_tokens: resolved.context_tokens,
+3237 [w5t8] |         _profile_name: resolved.profile_name.clone(),
+3238 [iqse] |         _model: resolved.model.clone(),
+3239 [mfdz] |         _show_timestamps: state.show_timestamps,
+3240 [1mio] |         mcp: state.mcp.clone(),
+3241 [8jfn] |         hooks: std::sync::Arc::new(resolved_hooks),
+3242 [su1s] |         hooks_enabled: state.hooks_enabled,
+3243 [nd39] |         auto_commit: resolved.auto_commit,
+3244 [ot2x] |         auto_commit_prefix: resolved.auto_commit_prefix.clone(),
+3245 [arw5] |         git_context: resolved.git_context,
+3246 [mwqh] |         project_graph: state.project_graph.as_ref().map(|g| std::sync::Arc::new(g.clone())),
+3247 [ahvb] |         project_narrative: state.project_narrative.as_ref().map(|n| std::sync::Arc::new(n.clone())),
+3248 [7ugx] |         flow_paths: state.flow_paths.as_ref().map(|fp| std::sync::Arc::new(fp.clone())),
+3249 [4yge] |         attached_symbols: state.attached_symbols.clone(),
+3250 [r6d5] |     };
+3251 [ntfp] | 
+3252 [ho7l] |     let attached: Vec<String> = state.attached_files
+3253 [wwaw] |         .iter()
+3254 [eb85] |         .map(|f| f.path.clone())
+3255 [1qa3] |         .collect();
+3256 [ntfp] | 
+3257 [ulbk] |     // Pass the last few completed turns for session continuity (capped in agent.rs).
+3258 [7e2h] |     let active_limit = state.session.as_ref().map(|s| s.active_turn + 1).unwrap_or(usize::MAX);
+3259 [cgj3] |     let prior_turns: Vec<crate::sessions::ConversationTurn> = state.conversation_turns
+3260 [wwaw] |         .iter()
+
+
+---
+
+[Graph overlay for src/tui/mod.rs:3450-3485]
+fn launch_plan (src/tui/mod.rs:3444-3664):
+  calls: resolve_hooks_with_state (src/tui/mod.rs:3197), execute_step (src/plan.rs:872), verify_step (src/plan.rs:1044), summarise_completed_step (src/plan.rs:910), run_hook (src/hooks.rs:197), save_plan (src/plan.rs:200)
+  called by: src/tui/mod.rs::handle_key
+Key types in this file:
+  enum UiEvent (line 57): { Chunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult { summary: String }, CacheHit { path: String, lines: usize }, LoopWarning { tool_name: String }, BudgetWarning, ToolBudgetHit { limit: usize }, AgentDone { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize, duration_secs: u32, cwd: String }, AgentError(String), TokenStats { _input: u32, _output: u32, total_input: u32, total_output: u32, tool_calls: usize }, ContextUpdate { used: usize, total: u32, compressed: bool }, PlanReady(crate::plan::Plan), PlanGenerateFailed(String), PlanStepStart { index: usize, total: usize, desc: String }, PlanStepDone { index: usize, passed: bool, error: Option<String> }, PlanComplete { total: usize }, PlanFailed { step: usize, error: String }, HookOutput { event: String, output: String, exit_code: i32 }, GitChanges { stat: String, checkpoint_hash: Option<String>, files_changed: usize }, GitAutoCommit { message: String }, GitError(String), SystemMsg(String), AskUser { question: String, reply_tx: tokio::sync::oneshot::Sender<String> }, IndexReady { graph: crate::pie::ProjectGraph, narrative: Option<crate::narrative::ProjectNarrative> } }
+  enum ConversationEntry (line 134): { UserMessage(String), AssistantChunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult(String), CacheHit { path: String, lines: usize }, SystemMsg(String), HookOutput { event: String, output: String, success: bool }, TaskComplete { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize }, PlanCard, GitNotification { files_changed: usize, _checkpoint_hash: Option<String> }, AskUser(String), AskReply(String) }
+  enum Mode (line 164): { Normal, AgentRunning, Palette, FilePicker, SlashComplete, SessionBrowser, PlanReview, PlanRunning, SymbolPicker, UndoPicker, ProfilePicker, AskingUser, HookWizard }
+  enum WizardStep (line 184): { EnterName, EnterOnEdit, EnterOnTaskDone, EnterOnPlanStepDone, EnterOnSessionStart, EnterOnSessionEnd, Confirm }
+  struct HookWizardState (line 195): { step: WizardStep, name_input: String, on_edit_input: String, on_task_done_input: String, on_plan_step_done_input: String, on_session_start_input: String, on_session_end_input: String }
+  struct FileSymbolPickerState (line 210): { file: String, query: String, selected: usize, all_symbols: Vec<crate::pie::AttachedSymbol>, picked: Vec<crate::pie::AttachedSymbol> }
+[/Graph overlay]
+
+[src/tui/mod.rs — lines 3450-3485 of 3825]
+
+3450 [ln6y] |     dry_run: bool,
+3451 [dnai] |     ui_tx: mpsc::UnboundedSender<UiEvent>,
+3452 [6qk5] | ) {
+3453 [umd3] |     let mut client = Client::new(resolved.endpoint.clone(), resolved.model.clone());
+3454 [57wb] |     if let Some(key) = &resolved.api_key {
+3455 [229k] |         client.set_api_key(key.clone());
+3456 [zoqg] |     }
+3457 [fh1x] |     let resolved_hooks = resolve_hooks_with_state(resolved, state);
+3458 [ujl7] |     let agent_config = AgentConfig {
+3459 [h2df] |         verbose,
+3460 [huiw] |         dry_run,
+3461 [zeq5] |         context_tokens: resolved.context_tokens,
+3462 [w5t8] |         _profile_name: resolved.profile_name.clone(),
+3463 [iqse] |         _model: resolved.model.clone(),
+3464 [mfdz] |         _show_timestamps: state.show_timestamps,
+3465 [1mio] |         mcp: state.mcp.clone(),
+3466 [8jfn] |         hooks: std::sync::Arc::new(resolved_hooks),
+3467 [su1s] |         hooks_enabled: state.hooks_enabled,
+3468 [nd39] |         auto_commit: resolved.auto_commit,
+3469 [ot2x] |         auto_commit_prefix: resolved.auto_commit_prefix.clone(),
+3470 [arw5] |         git_context: resolved.git_context,
+3471 [8qf3] |         project_graph: None,     // executor steps have pre-digested instructions — no graph needed
+3472 [hyxx] |         project_narrative: None,
+3473 [y5de] |         flow_paths: None,
+3474 [tgn5] |         attached_symbols: vec![], // executor steps use pre-digested instructions
+3475 [r6d5] |     };
+3476 [ntfp] | 
+3477 [hxsc] |     tokio::spawn(async move {
+3478 [833r] |         // Use a shared cancellation flag so we can check it between steps
+3479 [qcbj] |         // without consuming the oneshot receiver more than once.
+3480 [0nd4] |         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+3481 [um8c] |         let cancelled_clone = cancelled.clone();
+3482 [2xid] |         let ui_tx_cancel = ui_tx.clone();
+3483 [0n5o] |         tokio::spawn(async move {
+3484 [flzm] |             let _ = cancel_rx.await;
+3485 [41ut] |             cancelled_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+
+
+---
+
+[Graph overlay for src/tui/render.rs:380-430]
+fn draw_status_bar (src/tui/render.rs:262-384):
+  calls: cwd_str (src/tui/mod.rs:3748), truncate_path (src/tui/chat.rs:613)
+  called by: src/tui/render.rs::draw
+fn draw_stats_bar (src/tui/render.rs:385-484):
+  called by: src/tui/render.rs::draw
+[/Graph overlay]
+
+[src/tui/render.rs — lines 380-430 of 492]
+
+ 380 [chwd] |     );
+ 381 [ok2w] | }
+ 382 [ntfp] | 
+ 383 [lt1v] | // ── Stats bar (always-visible session telemetry) ──────────────────────────────
+ 384 [ntfp] | 
+ 385 [ryc6] | fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
+ 386 [ixz3] |     let s = &state.stats;
+ 387 [ntfp] | 
+ 388 [7wa2] |     // In-flight token indicator (shown while agent is running)
+ 389 [jnpb] |     let inflight_str = if s.inflight_input_tokens > 0 || s.inflight_output_tokens > 0 {
+ 390 [kjmo] |         let total_inf = s.inflight_input_tokens + s.inflight_output_tokens;
+ 391 [r9dx] |         let tools_part = if s.inflight_tool_calls > 0 {
+ 392 [fuks] |             format!("  {}tools", s.inflight_tool_calls)
+ 393 [gi2o] |         } else {
+ 394 [i8dx] |             String::new()
+ 395 [or2h] |         };
+ 396 [betc] |         format!("  ▶ {}tok (i:{} o:{}){}",
+ 397 [4lrs] |             fmt_k(total_inf), fmt_k(s.inflight_input_tokens), fmt_k(s.inflight_output_tokens),
+ 398 [eje3] |             tools_part)
+ 399 [99e8] |     } else {
+ 400 [i8at] |         String::new()
+ 401 [r6d5] |     };
+ 402 [ntfp] | 
+ 403 [sai3] |     // Only show meaningful data once at least one task has run
+ 404 [cm30] |     let (task_str, token_str, tool_str, ratio_str) = if s.tasks_completed == 0 {
+ 405 [mv1z] |         (
+ 406 [s1p8] |             String::from("no tasks yet"),
+ 407 [wxwb] |             String::new(),
+ 408 [wxwb] |             String::new(),
+ 409 [wxwb] |             String::new(),
+ 410 [n9d0] |         )
+ 411 [99e8] |     } else {
+ 412 [jy6i] |         let total_tok = s.total_tokens();
+ 413 [xy6i] |         let avg_tok = s.avg_tokens_per_task();
+ 414 [nbu9] |         let ratio = s.compression_ratio();
+ 415 [ntfp] | 
+ 416 [mv1z] |         (
+ 417 [l88j] |             format!("{} task{}", s.tasks_completed, if s.tasks_completed == 1 { "" } else { "s" }),
+ 418 [clo2] |             format!("  {}tok  avg {}/task", fmt_k(total_tok), fmt_k(avg_tok)),
+ 419 [spkb] |             format!("  {} tool calls", s.total_tool_calls),
+ 420 [7gd7] |             if s.total_tool_calls > 0 {
+ 421 [o1yo] |                 format!("  {:.0}% compressed", ratio * 100.0)
+ 422 [rhf4] |             } else {
+ 423 [grqd] |                 String::new()
+ 424 [mx24] |             },
+ 425 [n9d0] |         )
+ 426 [r6d5] |     };
+ 427 [ntfp] | 
+ 428 [4tyn] |     // Peak context colour
+ 429 [yfp2] |     let peak_color = match s.peak_context_pct {
+ 430 [xguk] |         0..=50  => Color::DarkGray,
+
+
+╔═══ TURN 6  ═══╗
+Now I have full picture. Let me check the exact lines of Profile, ResolvedConfig, and how stats display works to know exact insertion points:
+
+
+
+◆ read_files src/config.rs[24–62], src/config.rs[175–205], src/telemetry.rs[56–84], src/tui/mod.rs[405–415]
+→ [src/config.rs — lines 24-62]
+↑ Already in context (pre-loaded struct Profile).
+Find the [file — lines X-Y] block above — do not re-read.
+
+
+---
+
+[src/config.rs — lines 175-205]
+↑ Already in context (pre-loaded struct ResolvedConfig).
+Find the [file — lines X-Y] block above — do not re-read.
+
+
+---
+
+[src/telemetry.rs — lines 56-84]
+↑ Already in context (orient: struct SessionStats).
+Find the [file — lines X-Y] block above — do not re-read.
+
+
+---
+
+[src/tui/mod.rs — lines 405-415 (struct/enum layout served from project index)]
+
+  line 405: struct AppState
+  {
+      entries: Vec<ConversationEntry>,
+      input_box: InputBox,
+      input: String,
+      cursor: usize,
+      mode: Mode,
+      scroll: usize,
+      profile: String,
+      model: String,
+      context_tokens: u32,
+      ctx_used: usize,
+      ctx_compressed: bool,
+      show_timestamps: bool,
+      palette_query: String,
+      file_picker: Option<FilePickerState>,
+      slash_complete_selected: usize,
+      cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+      attached_files: Vec<AttachedFile>,
+      focused_chip: Option<usize>,
+      spinner_tick: u32,
+      conversation_turns: Vec<ConversationTurn>,
+      session: Option<Session>,
+      collecting_response: String,
+      collecting_tools: Vec<String>,
+      session_resumed: bool,
+      session_browser: Option<SessionBrowserState>,
+      plan_review: Option<PlanReviewState>,
+      plan_running_step: usize,
+      mcp: Arc<McpClient>,
+      stats: SessionStats,
+      current_task_preview: String,
+      cost_per_mtok_input: Option<f64>,
+      last_stream_text: String,
+      stream_in_think: bool,
+      hooks_enabled: bool,
+      sidebar_visible: bool,
+      sidebar_focused: bool,
+      sidebar_selected: usize,
+      sidebar_scroll: usize,
+      sidebar_entries: Vec<SidebarEntry>,
+      active_tab: Tab,
+      plan_ever_active: bool,
+      stats_scroll: usize,
+      telemetry_history: Vec<crate::telemetry::TaskRecord>,
+      endpoint: String,
+      hooks_config: crate::hooks::HookConfig,
+      hooks_disabled_profile: bool,
+      mcp_server_names: Vec<String>,
+      auto_commit: bool,
+      auto_commit_prefix: String,
+      git_context_enabled: bool,
+      git_available: bool,
+      last_checkpoint_hash: Option<String>,
+      git_stat_content: String,
+      git_diff_content: String,
+      diff_overlay_scroll: usize,
+      diff_overlay_visible: bool,
+      git_checkpoints: Vec<crate::git::CheckpointInfo>,
+      undo_picker_selected: usize,
+      wants_editor: bool,
+      config_scroll: usize,
+      profile_picker_selected: usize,
+      profile_picker_entries: Vec<(String, String)>,
+      pending_ask_reply: Option<tokio::sync::oneshot::Sender<String>>,
+      active_hook_preset: Option<String>,
+      available_hook_presets: Vec<String>,
+      hook_wizard: Option<HookWizardState>,
+      symbol_picker: Option<FileSymbolPickerState>,
+      attached_symbols: Vec<crate::pie::AttachedSymbol>,
+      project_graph: Option<crate::pie::ProjectGraph>,
+      project_narrative: Option<crate::narrative::ProjectNarrative>,
+      flow_paths: Option<crate::flowpaths::FlowPathIndex>,
+      context_weights: crate::context_weights::ContextWeights,
+      file_cache: std::sync::Arc<tokio::sync::Mutex<crate::cache::FileCache>>,
+  }
+
+Layout is authoritative (matches file). Use check_wiring(field="name") to trace where a field flows.
+
+
+╔═══ TURN 7  ═══╗
+Now I have the complete picture. Let me check the stats display to see where cost would be shown:
+
+
+◆ read_files src/tui/render.rs[430–485]
+→ [Graph overlay for src/tui/render.rs:430-485]
+fn draw_stats_bar (src/tui/render.rs:385-484):
+  called by: src/tui/render.rs::draw
+fn fmt_k (src/tui/render.rs:485-492):
+  called by: src/tui/stats_view.rs::draw
+[/Graph overlay]
+
+[src/tui/render.rs — lines 430-485 of 492]
+
+ 430 [xguk] |         0..=50  => Color::DarkGray,
+ 431 [g2wa] |         51..=75 => Color::Rgb(140, 120, 40),
+ 432 [da06] |         76..=90 => Color::Rgb(180, 100, 20),
+ 433 [igq3] |         _       => Color::Rgb(180, 60, 60),
+ 434 [r6d5] |     };
+ 435 [k8ty] |     let peak_str = if s.peak_context_pct > 0 {
+ 436 [sdfo] |         format!("  peak {}%", s.peak_context_pct)
+ 437 [99e8] |     } else {
+ 438 [i8at] |         String::new()
+ 439 [r6d5] |     };
+ 440 [ntfp] | 
+ 441 [6j4a] |     let budget_str = if s.budget_enforcements > 0 {
+ 442 [t941] |         format!("  {} compressions", s.budget_enforcements)
+ 443 [99e8] |     } else {
+ 444 [i8at] |         String::new()
+ 445 [r6d5] |     };
+ 446 [ntfp] | 
+ 447 [ky0u] |     // PIE graph status — shown on the right of the stats bar
+ 448 [wv13] |     let pie_str = if let Some(graph) = &state.project_graph {
+ 449 [0vv7] |         let cluster_count = graph.clusters.len();
+ 450 [nb7b] |         if cluster_count > 0 {
+ 451 [m8s6] |             let mins_ago = (chrono::Utc::now().timestamp() - graph.last_indexed).max(0) / 60;
+ 452 [vtle] |             let age = if mins_ago < 1 {
+ 453 [d48x] |                 "just now".to_string()
+ 454 [6x3y] |             } else if mins_ago < 60 {
+ 455 [4or9] |                 format!("{mins_ago}m ago")
+ 456 [rhf4] |             } else {
+ 457 [pxjl] |                 format!("{}h ago", mins_ago / 60)
+ 458 [to9l] |             };
+ 459 [p6d5] |             format!("  ◈ {cluster_count} clusters · indexed {age}")
+ 460 [gi2o] |         } else {
+ 461 [i8dx] |             String::new()
+ 462 [7xag] |         }
+ 463 [99e8] |     } else {
+ 464 [i8at] |         String::new()
+ 465 [r6d5] |     };
+ 466 [ntfp] | 
+ 467 [vznp] |     let line = Line::from(vec![
+ 468 [dkmb] |         Span::styled("  ∑ ", Style::default().fg(Color::Rgb(60, 55, 100))),
+ 469 [dd10] |         Span::styled(task_str, Style::default().fg(Color::Rgb(120, 110, 180))),
+ 470 [5cox] |         Span::styled(token_str, Style::default().fg(Color::Rgb(80, 80, 120))),
+ 471 [bbfb] |         Span::styled(inflight_str, Style::default().fg(Color::Cyan)),
+ 472 [1bzl] |         Span::styled(tool_str, Style::default().fg(Color::Rgb(70, 70, 110))),
+ 473 [xpmj] |         Span::styled(ratio_str, Style::default().fg(Color::Rgb(60, 100, 80))),
+ 474 [aw1q] |         Span::styled(peak_str, Style::default().fg(peak_color)),
+ 475 [1i3f] |         Span::styled(budget_str, Style::default().fg(Color::Rgb(80, 70, 60))),
+ 476 [7d81] |         Span::styled(pie_str, Style::default().fg(Color::Rgb(80, 70, 140))),
+ 477 [alhk] |     ]);
+ 478 [ntfp] | 
+ 479 [s5za] |     f.render_widget(
+ 480 [n3rf] |         Paragraph::new(line).style(Style::default().bg(Color::Rgb(7, 7, 14))),
+ 481 [6ic8] |         area,
+ 482 [chwd] |     );
+ 483 [ok2w] | }
+ 484 [ntfp] | 
+ 485 [7r34] | fn fmt_k(n: u32) -> String {
+
+
+╔═══ TURN 8  ═══╗
+Now I have the complete picture. Let me check where DEFAULT_CONFIG_TOML is defined (to add the new field default):
+
+
+
+◆ read_files src/config.rs[281–320]
+→ [Graph overlay for src/config.rs:281-320]
+fn dirs_config_dir (src/config.rs:267-280):
+  called by: src/config.rs::config_path, src/config.rs::DEFAULT_CONFIG_TOML
+Key types in this file:
+  struct McpServerConfig (line 11): { name: String, command: Vec<String>, env: std::collections::HashMap<String, String> }
+  struct Profile (line 24): { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool }
+  struct ConfigFile (line 97): { default_profile: String, profiles: HashMap<String, Profile>, hooks: HashMap<String, crate::hooks::HookConfig>, active_hooks: Option<String> }
+  struct ResolvedConfig (line 175): { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, profile_name: String, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool, available_hooks: Vec<String>, active_hooks: Option<String>, active_hook_config: crate::hooks::HookConfig }
+[/Graph overlay]
+
+[src/config.rs — lines 281-320 of 558]
+
+ 281 [xbms] | const DEFAULT_CONFIG_TOML: &str = r#"# PareCode configuration
+ 282 [iqcf] | # Run `parecode --init` to regenerate this file.
+ 283 [ntfp] | 
+ 284 [hxve] | default_profile = "local"
+ 285 [ntfp] | 
+ 286 [wee3] | # ── Local Ollama (default) ────────────────────────────────────────────────────
+ 287 [lmj4] | [profiles.local]
+ 288 [l3ly] | endpoint      = "http://localhost:11434/v1/chat/completions"
+ 289 [tmf8] | model         = "qwen3:14b"
+ 290 [zdz8] | context_tokens = 32768
+ 291 [jyaf] | # api_key is not needed for Ollama
+ 292 [ntfp] | 
+ 293 [45qb] | # ── Another local model example ───────────────────────────────────────────────
+ 294 [ij97] | # [profiles.small]
+ 295 [7ke1] | # endpoint      = "http://localhost:11434/v1/chat/completions"
+ 296 [596g] | # model         = "qwen3:8b"
+ 297 [p8zj] | # context_tokens = 32768
+ 298 [ntfp] | 
+ 299 [mr8i] | # ── Anthropic Claude ─────────────────────────────────────────────────────────
+ 300 [emrq] | # [profiles.claude]
+ 301 [sndt] | # endpoint             = "https://api.anthropic.com/v1/chat/completions"
+ 302 [ynyq] | # model                = "claude-sonnet-4-6"
+ 303 [knyr] | # context_tokens       = 200000
+ 304 [y31o] | # api_key              = "sk-ant-..."
+ 305 [3q07] | # cost_per_mtok_input  = 3.0   # USD per 1M input tokens — enables cost estimates in /plan
+ 306 [ntfp] | 
+ 307 [aoyp] | # ── Anthropic Claude — Opus planner + Haiku executor ─────────────────────────
+ 308 [jov4] | # Uses Opus for planning (high reasoning, low token count) and Haiku for
+ 309 [e02j] | # executing each step (fast, cheap). Best cost/quality ratio for large tasks.
+ 310 [j5y1] | # [profiles.claude-split]
+ 311 [fp5l] | # endpoint       = "https://api.anthropic.com/v1/chat/completions"
+ 312 [wk62] | # model          = "claude-haiku-4-5-20251001"
+ 313 [olyz] | # planner_model  = "claude-opus-4-6"
+ 314 [yqgj] | # context_tokens = 200000
+ 315 [c94s] | # api_key        = "sk-ant-..."
+ 316 [ntfp] | 
+ 317 [yruy] | # ── OpenAI ───────────────────────────────────────────────────────────────────
+ 318 [qiua] | # [profiles.openai]
+ 319 [mj2t] | # endpoint       = "https://api.openai.com/v1/chat/completions"
+ 320 [v5eh] | # model          = "gpt-4o"
+
+
+╔═══ TURN 9 (output — no tools) ═══╗
+{
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile struct in config.rs",
+      "instruction": "src/config.rs:44 — add after cost_per_mtok_input field: `    /// Optional cost per 1M output tokens in USD\n    #[serde(default)]\n    pub cost_per_mtok_output: Option<f64>,",
+      "files": ["src/config.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Add cost_per_mtok_output field to ResolvedConfig struct in config.rs",
+      "instruction": "src/config.rs:187 — add after cost_per_mtok_input field: `    /// Optional cost per 1M output tokens in USD (for cost estimates)\n    pub cost_per_mtok_output: Option<f64>,",
+      "files": ["src/config.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Add cost fields to AgentConfig struct in agent.rs",
+      "instruction": "src/config.rs:489 — add after auto_commit_prefix field: `    /// Cost per 1M input tokens in USD (from profile config)\n    pub cost_per_mtok_input: Option<f64>,\n    /// Cost per 1M output tokens in USD (from profile config)\n    pub cost_per_mtok_output: Option<f64>,",
+      "files": ["src/agent.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Add cost_per_mtok_output field to AppState struct in tui/mod.rs",
+      "instruction": "src/tui/mod.rs:425 — add after cost_per_mtok_input field: `      cost_per_mtok_output: Option<f64>,",
+      "files": ["src/tui/mod.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Pass cost fields to AgentConfig in launch_agent function",
+      "instruction": "src/tui/mod.rs:3244 — add to AgentConfig construction: `        cost_per_mtok_input: resolved.cost_per_mtok_input,\n        cost_per_mtok_output: resolved.cost_per_mtok_output,",
+      "files": ["src/tui/mod.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Pass cost fields to AgentConfig in launch_plan function",
+      "instruction": "src/tui/mod.rs:3469 — add to AgentConfig construction: `        cost_per_mtok_input: resolved.cost_per_mtok_input,\n        cost_per_mtok_output: resolved.cost_per_mtok_output,",
+      "files": ["src/tui/mod.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Pass cost fields to AppState in event_loop function",
+      "instruction": "src/tui/mod.rs:1118 — find AppState construction and add: `            cost_per_mtok_input: resolved.cost_per_mtok_input,\n            cost_per_mtok_output: resolved.cost_per_mtok_output,",
+      "files": ["src/tui/mod.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Display cost in stats bar based on token counts and cost rates",
+      "instruction": "src/tui/render.rs:418 — add cost calculation after token_str: calculate input_cost = total_input_tokens * cost_per_mtok_input / 1_000_000, output_cost similarly, then display as cost_str with format like \"$X.XX\"",
+      "files": ["src/tui/render.rs"],
+      "verify": "command:cargo check"
+    }
+  ]
+}
+
+=== FINAL PLAN ===
+{
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile struct in config.rs",
+      "instruction": "src/config.rs:44 — add after cost_per_mtok_input field: `    /// Optional cost per 1M output tokens in USD\n    #[serde(default)]\n    pub cost_per_mtok_output: Option<f64>,",
+      "files": ["src/config.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Add cost_per_mtok_output field to ResolvedConfig struct in config.rs",
+      "instruction": "src/config.rs:187 — add after cost_per_mtok_input field: `    /// Optional cost per 1M output tokens in USD (for cost estimates)\n    pub cost_per_mtok_output: Option<f64>,",
+      "files": ["src/config.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Add cost fields to AgentConfig struct in agent.rs",
+      "instruction": "src/config.rs:489 — add after auto_commit_prefix field: `    /// Cost per 1M input tokens in USD (from profile config)\n    pub cost_per_mtok_input: Option<f64>,\n    /// Cost per 1M output tokens in USD (from profile config)\n    pub cost_per_mtok_output: Option<f64>,",
+      "files": ["src/agent.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Add cost_per_mtok_output field to AppState struct in tui/mod.rs",
+      "instruction": "src/tui/mod.rs:425 — add after cost_per_mtok_input field: `      cost_per_mtok_output: Option<f64>,",
+      "files": ["src/tui/mod.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Pass cost fields to AgentConfig in launch_agent function",
+      "instruction": "src/tui/mod.rs:3244 — add to AgentConfig construction: `        cost_per_mtok_input: resolved.cost_per_mtok_input,\n        cost_per_mtok_output: resolved.cost_per_mtok_output,",
+      "files": ["src/tui/mod.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Pass cost fields to AgentConfig in launch_plan function",
+      "instruction": "src/tui/mod.rs:3469 — add to AgentConfig construction: `        cost_per_mtok_input: resolved.cost_per_mtok_input,\n        cost_per_mtok_output: resolved.cost_per_mtok_output,",
+      "files": ["src/tui/mod.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Pass cost fields to AppState in event_loop function",
+      "instruction": "src/tui/mod.rs:1118 — find AppState construction and add: `            cost_per_mtok_input: resolved.cost_per_mtok_input,\n            cost_per_mtok_output: resolved.cost_per_mtok_output,",
+      "files": ["src/tui/mod.rs"],
+      "verify": "command:cargo check"
+    },
+    {
+      "description": "Display cost in stats bar based on token counts and cost rates",
+      "instruction": "src/tui/render.rs:418 — add cost calculation after token_str: calculate input_cost = total_input_tokens * cost_per_mtok_input / 1_000_000, output_cost similarly, then display as cost_str with format like \"$X.XX\"",
+      "files": ["src/tui/render.rs"],
+      "verify": "command:cargo check"
+    }
+  ]
+}

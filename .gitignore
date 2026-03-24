@@ -1,7 +1,5 @@
 /target
-.parecode/
 *.env
 .env.*
-*.txt
 .claude
 .parecode/project.graph

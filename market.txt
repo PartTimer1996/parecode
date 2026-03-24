@@ -1,0 +1,57 @@
+The audience sizes (rough, honest)
+Segment	Relative size	Growth trajectory
+Developers using cloud APIs who care about cost	Largest	Growing fast — AI spend is becoming a line item
+Developers who bounced off OpenCode/Aider setup complexity	Large	Constant — every new user hits this
+Anti-lock-in (use any provider, own your workflow)	Large	Growing — Claude Code lock-in backlash is real
+Local model users (Ollama, privacy, air-gap)	Smallest	Growing, but from a tiny base
+Leading with local models is leading with your smallest audience. It's like a car company leading with "great off-road" when 90% of buyers never leave pavement.
+
+The better positioning
+Primary headline: "The coding agent that doesn't waste your money or lock you in."
+
+That single line speaks to segments 1, 2, and 3 simultaneously. Here's how I'd stack the pitch:
+
+Tier 1 — The lead (everyone sees this)
+"Works with any model. Uses 5-10x fewer tokens. Installs in 30 seconds."
+
+This is your three-punch combo. Each part disqualifies a competitor:
+
+"Any model" kills Claude Code (Anthropic only) and kills the lock-in fear
+"5-10x fewer tokens" kills OpenCode/Aider on cost — and this matters whether you're on OpenRouter at $3/Mtok or Claude at $15/Mtok
+"Installs in 30 seconds" kills Aider (Python, config, git setup) and OpenCode (Node, oh-my-opencode ecosystem confusion)
+The beauty: all three claims are provable and demonstrable. They're not opinions — they're measurements.
+
+Tier 2 — The "why it's efficient" proof (for those who dig deeper)
+Proactive token budget (not reactive at 90%)
+Plan isolation (model sees one step, not the whole conversation)
+Hash-anchored edits (no wasted re-reads)
+Hooks inject errors inline (no extra round-trip)
+Diff-based edits for multi-hunk changes
+This is the technical credibility layer. It answers "how?" for the skeptics.
+
+Tier 3 — The audience-specific hooks (landing page sections or separate pitch docs)
+Audience	Hook	Proof point
+OpenRouter / cost-conscious	"A task that costs $0.40 in OpenCode costs $0.04 in Forge"	Benchmark numbers
+Setup-fatigued	"curl, run, code. No Node. No Python. No config files to write."	First-run wizard auto-detects everything
+Anti-lock-in	"Switch from Claude to GPT to Qwen to local with one line. Your workflow doesn't change."	Profile system, any OpenAI-compatible endpoint
+Local model	"The only agent that actually works on 14B models"	Lean schemas, tested on Qwen3 14B
+Enterprise	"Single binary. Self-hosted. Nothing leaves your network."	Air-gap capable, local telemetry only
+Tier 4 — Local models
+Still part of the story, but as a capability, not the identity. "Oh and by the way, it also runs entirely offline on a 14B model" is a powerful add-on that reinforces the "no lock-in" and "you're in control" narrative. It just shouldn't be the first thing people read.
+
+The positioning I'd actually write
+Forge — A terminal coding agent that works with any model and doesn't burn your tokens.
+
+Use Claude, GPT, Qwen, Ollama, or anything OpenAI-compatible. Forge uses 5-10x fewer tokens than alternatives through proactive context management — not reactive compression when the window fills.
+
+One binary. No Node. No Python. curl | sh and you're coding.
+
+Compare that to "A terminal coding agent built for token efficiency and local model reliability" (your current README tagline). The new version speaks to 10x the audience while still being true.
+
+Where "local models" fits strategically
+Local model support is your moat, not your message. Here's why:
+
+If OpenCode or Claude Code wanted to match your token efficiency, they'd need architectural rewrites (reactive → proactive budget, full-file reads → excerpting, bloated schemas → lean). That's 6-12 months of work.
+But supporting local models well is even harder for them — it requires the efficiency work plus schema redesign plus testing on models they don't control. They'll never prioritize it.
+So local model quality is your defensible differentiation, but cost efficiency + ease of setup is your go-to-market.
+Think of it like this: Tesla's moat is battery technology, but they sell cars on "fast, good-looking, low maintenance." The moat protects the business; the message sells the product.

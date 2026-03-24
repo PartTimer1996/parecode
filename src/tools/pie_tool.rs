@@ -8,6 +8,50 @@
 /// before reaching for read_file, which costs real tokens.
 use std::collections::HashSet;
 
+// ── DeliveredRanges ───────────────────────────────────────────────────────────
+
+/// Tracks which file ranges have already been delivered to the planner model.
+/// Used to gate redundant read_files calls — fully-covered ranges return a stub
+/// instead of re-sending content the model already has.
+pub struct DeliveredRanges {
+    // file → [(start_line, end_line, source_label)]
+    ranges: std::collections::HashMap<String, Vec<(usize, usize, String)>>,
+}
+
+impl DeliveredRanges {
+    pub fn new() -> Self {
+        Self { ranges: std::collections::HashMap::new() }
+    }
+
+    /// Initialise from user-attached symbols (pre-loaded at session start).
+    pub fn from_symbols(symbols: &[crate::pie::AttachedSymbol]) -> Self {
+        let mut dr = Self::new();
+        for sym in symbols {
+            dr.add(&sym.file, sym.start_line, sym.end_line,
+                   &format!("pre-loaded {} {}", sym.kind, sym.name));
+        }
+        dr
+    }
+
+    pub fn add(&mut self, file: &str, start: usize, end: usize, label: &str) {
+        self.ranges.entry(file.to_string())
+            .or_default()
+            .push((start, end, label.to_string()));
+    }
+
+    /// Returns Some(label) if (file, req_start, req_end) is fully covered.
+    /// Margin of ±20 lines handles off-by-one line number estimates and cases
+    /// where a pre-loaded function range ends a few lines before what the model requests.
+    pub fn covered_by(&self, file: &str, req_start: usize, req_end: usize) -> Option<&str> {
+        const MARGIN: usize = 20;
+        self.ranges.get(file)?.iter()
+            .find(|(s, e, _)| {
+                s.saturating_sub(MARGIN) <= req_start && *e + MARGIN >= req_end
+            })
+            .map(|(_, _, label)| label.as_str())
+    }
+}
+
 use serde_json::Value;
 
 use crate::index::SymbolKind;
@@ -989,7 +1033,7 @@ pub fn orient_definition() -> Value {
     })
 }
 
-pub fn orient_execute(args: &Value, graph: &ProjectGraph) -> String {
+pub fn orient_execute(args: &Value, graph: &ProjectGraph, delivered: &mut DeliveredRanges) -> String {
     let query = args["query"].as_str().unwrap_or("").trim();
     if query.is_empty() {
         return "Provide query= for orient. Example: orient(query=\"cost tracking\")".to_string();
@@ -1083,11 +1127,17 @@ pub fn orient_execute(args: &Value, graph: &ProjectGraph) -> String {
         out.push_str("## Types (pipeline order)\n");
         for (_, sym) in &type_syms {
             let layer = pipeline_layer(sym.file.as_str());
-            out.push_str(&format!("{} {} {} ({}:{})\n", layer, sym.kind.label(), sym.name, sym.file, sym.line));
+            // Emit as a read-files block — model treats [file — lines X-Y] as a completed read
+            let layer_label = format!("{layer} {}", sym.kind.label());
+            out.push_str(&format!(
+                "[{} — lines {}-{}] ({} {} — orient result)\n",
+                sym.file, sym.line, sym.end_line, layer_label, sym.name
+            ));
             if let Some(sig) = &sym.signature {
-                out.push_str(&format!("  {sig}\n"));
+                out.push_str(&format!("  {} {}\n", sym.kind.label(), sym.name));
+                out.push_str(&expand_compact_sig(sig, "  "));
             }
-            // Callers: functions that call this type (by name reference in call edges)
+            // Callers
             let callers: Vec<String> = graph.call_edges.iter()
                 .filter_map(|(caller_key, edges)| {
                     if edges.iter().any(|e| e.callee == sym.name) {
@@ -1105,15 +1155,14 @@ pub fn orient_execute(args: &Value, graph: &ProjectGraph) -> String {
                 .take(6)
                 .collect();
             if !callers.is_empty() {
-                out.push_str(&format!("  used by: {}\n", callers.join(", ")));
+                out.push_str(&format!("  // used by: {}\n", callers.join(", ")));
             }
-            // Functions that construct this type or any of its variants
+            // Constructors
             let enum_prefix = format!("{}::", sym.name);
             let mut constructors: Vec<String> = graph.construct_edges.iter()
                 .filter_map(|(caller_key, edges)| {
                     if edges.iter().any(|e| e.callee == sym.name || e.callee.starts_with(&enum_prefix)) {
                         let caller_name = caller_key.split("::").last().unwrap_or(caller_key);
-                        // Skip self-referential entries
                         if caller_name == sym.name { return None; }
                         let caller_file = caller_key.split("::").next().unwrap_or("");
                         let loc = graph.symbols.iter()
@@ -1130,18 +1179,20 @@ pub fn orient_execute(args: &Value, graph: &ProjectGraph) -> String {
             constructors.dedup();
             constructors.truncate(6);
             if !constructors.is_empty() {
-                out.push_str(&format!("  constructed by: {}\n", constructors.join(", ")));
+                out.push_str(&format!("  // constructed by: {}\n", constructors.join(", ")));
             }
-            out.push('\n');
+            out.push_str("  // Layout authoritative — do not re-read this range.\n\n");
+
+            // Register as delivered so gated read_files can block re-reads
+            delivered.add(&sym.file, sym.line, sym.end_line,
+                          &format!("orient: {} {}", sym.kind.label(), sym.name));
         }
     }
 
-    // Explicit note: struct/enum layouts above are complete — no confirmation read needed.
     if !type_syms.is_empty() {
         out.push_str(
-            "Struct/enum layouts above are authoritative — \
-             do not read_file to confirm them. \
-             Proceed to check_wiring or targeted function reads only.\n\n"
+            "Struct/enum layouts above are [file — lines X-Y] blocks = completed reads.\n\
+             Do NOT call read_files for any struct range shown above.\n\n"
         );
     }
 
@@ -1420,8 +1471,9 @@ pub fn build_compact_summary(
     }
 
     out.push_str(
-        "Use `find_symbol(name=\"SymbolName\")` to locate any symbol or file by name — \
-         always call this before grep or bash.",
+        "Use `orient(query=\"keyword\")` to get struct layouts, line numbers, and call connections \
+         for any task — one call covers discovery. Use `check_wiring(field=\"name\")` to verify \
+         field propagation gaps across the pipeline.",
     );
 
     out
@@ -1496,7 +1548,8 @@ pub fn read_files_definition() -> Value {
 }
 
 /// Execute `read_files` — iterate the `reads` array and call smart_read for each entry.
-pub fn read_files_execute(args: &Value, graph: &ProjectGraph) -> String {
+/// `delivered` tracks already-seen ranges; fully-covered requests return a stub.
+pub fn read_files_execute(args: &Value, graph: &ProjectGraph, delivered: &mut DeliveredRanges) -> String {
     let reads = match args["reads"].as_array() {
         Some(r) if !r.is_empty() => r,
         _ => return "[read_files: provide a non-empty 'reads' array]".to_string(),
@@ -1512,20 +1565,35 @@ pub fn read_files_execute(args: &Value, graph: &ProjectGraph) -> String {
             }
         };
         // Require line_range
-        let has_range = entry["line_range"].as_array().map_or(false, |a| a.len() == 2);
-        if !has_range {
+        let range_arr = entry["line_range"].as_array().filter(|a| a.len() == 2);
+        let Some(range_arr) = range_arr else {
             parts.push(format!(
                 "[read_files: {path} — line_range required. \
                  You have line numbers from orient/check_wiring — use them.]"
             ));
             continue;
+        };
+        let req_start = range_arr[0].as_u64().unwrap_or(0) as usize;
+        let req_end   = range_arr[1].as_u64().unwrap_or(0) as usize;
+
+        // Gate: if range is fully covered by a previous read, return a stub
+        if let Some(label) = delivered.covered_by(path, req_start, req_end) {
+            parts.push(format!(
+                "[{path} — lines {req_start}-{req_end}]\n\
+                 ↑ Already in context ({label}).\n\
+                 Find the [file — lines X-Y] block above — do not re-read.\n"
+            ));
+            continue;
         }
-        // Build a synthetic args Value for smart_read
+
+        // Build args for smart_read, execute, then register as delivered
         let read_args = serde_json::json!({
             "path": path,
             "line_range": entry["line_range"]
         });
-        parts.push(smart_read(&read_args, graph));
+        let result = smart_read(&read_args, graph);
+        delivered.add(path, req_start, req_end, &format!("read_files {path}:{req_start}-{req_end}"));
+        parts.push(result);
     }
 
     parts.join("\n\n---\n\n")
@@ -1699,7 +1767,7 @@ mod tests {
         assert!(summary.contains("## Clusters"));
         assert!(summary.contains("## Key files"));
         assert!(summary.contains("## Key symbols"));
-        assert!(summary.contains("find_symbol"));
+        assert!(summary.contains("orient"));
     }
 
     #[test]

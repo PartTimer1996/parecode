@@ -1,0 +1,70 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output to config structs",
+      "instruction": "Add `cost_per_mtok_output: Option<f64>` field to struct Profile at src/config.rs:~30 and struct ResolvedConfig at src/config.rs:~185, next to the existing cost_per_mtok_input field\n[index: `Profile` at line 518 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_input to AgentConfig and propagate to AppState",
+      "instruction": "Add `cost_per_mtok_input: Option<f64>` field to AgentConfig at src/agent.rs:~493 (after git_context). Then in run_tui at src/agent.rs:~106-456, pass this value when creating AppState at the location where other config fields like profile, model, context_tokens are passed\n[index: `run_tui` at line 106 in src/agent.rs]\n[index: `AgentConfig` at line 474 in src/agent.rs]\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs",
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Initialize cost_per_mtok_input in AppState constructor",
+      "instruction": "Find where AppState is constructed (likely in run_tui or a new() function) and ensure cost_per_mtok_input is initialized from the resolved config. Add to AppState::new() or wherever it's created at src/tui/mod.rs\n[index: `run_tui` at line 106 in src/agent.rs]\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update stats_view to use output cost field if available",
+      "instruction": "Modify src/tui/stats_view.rs:56-69 (cost_str function) to accept an optional separate output cost parameter, and update calls at lines 191, 220, 250, 266 to pass both input and output cost values from state.cost_per_mtok_input and state.cost_per_mtok_output\n[index: `cost_str` at line 56 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/stats_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to config view for user editing",
+      "instruction": "Add input fields for cost_per_mtok_input and cost_per_mtok_output in the profile configuration view at src/tui/config_view.rs, similar to how context_tokens is displayed and edited",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774227042,
+  "project": "forge"
+}

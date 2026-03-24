@@ -1,0 +1,46 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add model pricing fields to Profile and ResolvedConfig in config.rs",
+      "instruction": "Add pricing fields (input_cost_per_mtok, output_cost_per_mtok) to struct Profile at src/config.rs:24 and struct ResolvedConfig at src/config.rs:175. Also add a helper method to look up pricing by model name.\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Calculate cost in run_tui and include in AgentDone/TokenStats events",
+      "instruction": "In src/agent.rs run_tui (line 102), after total_input_tokens (line 125) and total_output_tokens (line 126) are tracked, add cost calculation using the model's pricing from config. Pass the cost to UiEvent::AgentDone (src/tui/mod.rs:74) and UiEvent::TokenStats (src/tui/mod.rs:85) events.\n[index: `UiEvent` at line 56 in src/tui/mod.rs]\n[index: `run` at line 1008 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs",
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Display cost in config_view.rs stats or draw function",
+      "instruction": "In src/tui/config_view.rs, update the draw function (line 18) or add cost display near the kv function (line 202) to show model pricing/cost information when displaying stats to the user.\n[index: `draw` at line 22 in src/tui/git_view.rs]\n[index: `draw` at line 12 in src/tui/plan_view.rs]\n[index: `draw` at line 106 in src/tui/render.rs]\n[index: `draw` at line 177 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774022816,
+  "project": "forge"
+}

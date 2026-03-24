@@ -1,0 +1,22 @@
+{
+  "task": "We want to make a few tweaks to file picker we want to change how this works fundamentally \\",
+  "steps": [
+    {
+      "description": "Examine current file picker implementation",
+      "instruction": "Read the file picker implementation to understand how it currently works. Examine src/tui/mod.rs for FilePickerState struct, filtered, gather_files, and walk_dir functions. Also read src/tui/overlays.rs for draw_file_picker function. Note the current behavior, filtering logic, file collection approach, and any configuration options.",
+      "files": [
+        "src/tui/mod.rs",
+        "src/tui/overlays.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1771961184,
+  "project": "forge"
+}

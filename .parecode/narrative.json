@@ -1,0 +1,16 @@
+{
+    "schema_version": 1,
+    "architecture_summary": "A terminal-based AI coding assistant that provides a TUI for interacting with LLM agents. Features include file editing, patching, and reading tools executed by the agent, fuzzy search capabilities, git integration, and project convention loading. The client communicates with an API using configurable prompts and tool call limits.",
+    "cluster_summaries": {
+        "tools": "Agent tool implementations: patch, read, and edit operations with fuzzy matching, line normalization, and context-aware best-match selection for code modifications",
+        "tui": "Terminal UI framework: chat interface, input boxes, spinner animations, history display, chip/tag rendering, token formatting, and plan card visualization",
+        "src": "Core runtime: API client, git integration, project mapping, agent configuration, convention loading, and TUI/CLI entry points with system prompts and path collection"
+    },
+    "conventions": [
+        "4 source clusters: src, tools, tui, root",
+        "597 symbols total (458 functions, 61 structs/types)",
+        "40 indexed source files"
+    ],
+    "last_synthesized": 1772480780,
+    "patches": []
+}

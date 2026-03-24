@@ -1,0 +1,71 @@
+{
+  "task": "We calculate input and output tokens in run_tui during a run, however, what this actually costs is unknown - can we create a new file that tracks the model used and provided in the users config based on cost per M tokens input and output to show real cost?",
+  "steps": [
+    {
+      "description": "Add token cost configuration fields to AppConfig",
+      "instruction": "In src/config.rs, add fields to AppConfig struct for tracking token costs:\n1. Add `model_name: String` field to store which model was used\n2. Add `input_cost_per_million_tokens: f64` field for input token cost\n3. Add `output_cost_per_million_tokens: f64` field for output token cost\n4. Add these fields to the Default implementation with reasonable defaults (empty string for model_name, 0.0 for costs)\n5. Add these fields to the AppConfig::load_from_file method parsing logic\nFile location: src/config.rs contains struct AppConfig with fields like api_base, max_tool_calls, etc.",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check --lib"
+      },
+      "status": "Pending",
+      "tool_budget": 10,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Create a TokenCostTracker struct in new file",
+      "instruction": "Create a new file src/token_tracker.rs with a TokenCostTracker struct that:\n1. Has fields: total_input_tokens: u64, total_output_tokens: u64, model_name: String, input_cost_per_million: f64, output_cost_per_million: f64\n2. Implements a new() method that takes config: &AppConfig\n3. Implements add_tokens(&mut self, input_tokens: u64, output_tokens: u64)\n4. Implements calculate_cost(&self) -> f64 that returns (input_tokens as f64 * input_cost_per_million / 1_000_000.0) + (output_tokens as f64 * output_cost_per_million / 1_000_000.0)\n5. Implements reset(&mut self)\n6. Add proper imports for AppConfig\nAlso update src/lib.rs to re-export TokenCostTracker or mod token_tracker",
+      "files": [
+        "src/token_tracker.rs",
+        "src/lib.rs",
+        "src/config.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check --lib"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update RunState to include TokenCostTracker",
+      "instruction": "In src/run_state.rs:\n1. Add import for TokenCostTracker from crate::token_tracker\n2. Add field token_tracker: TokenCostTracker to RunState struct\n3. Update RunState::new() to initialize token_tracker using TokenCostTracker::new(config)\n4. Add a method get_token_cost(&self) -> f64 that calls token_tracker.calculate_cost()\n5. Add a method reset_token_tracker(&mut self) that calls token_tracker.reset()\nFile location: src/run_state.rs contains struct RunState with fields like messages, current_dir, etc.",
+      "files": [
+        "src/run_state.rs",
+        "src/token_tracker.rs",
+        "src/config.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check --lib"
+      },
+      "status": "Pending",
+      "tool_budget": 10,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Track token usage in run_tui function",
+      "instruction": "In src/tui/mod.rs in the run_tui function:\n1. Find where input_tokens and output_tokens are calculated (search for 'input_tokens' and 'output_tokens')\n2. After calculating these values, add code to update the token tracker: state.token_tracker.add_tokens(input_tokens, output_tokens)\n3. Add a display of the running cost in the TUI - find where other stats are displayed (look for 'tokens/sec' or similar metrics display)\n4. Add formatted cost display using: format!(\"Cost: ${:.4}\", state.get_token_cost())\n5. Ensure the display updates on each token calculation\nFile contains run_tui function around line 500-600 with loop handling API calls and token counting",
+      "files": [
+        "src/tui/mod.rs",
+        "src/run_state.rs",
+        "src/token_tracker.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check --bin pare"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1772581994,
+  "project": "forge"
+}

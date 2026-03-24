@@ -1044,7 +1044,7 @@ async fn dispatch_tool(
         }
         "orient" => {
             match &config.project_graph {
-                Some(g) => tools::pie_tool::orient_execute(args, g),
+                Some(g) => tools::pie_tool::orient_execute(args, g, &mut tools::pie_tool::DeliveredRanges::new()),
                 None => "[orient: no project graph available for this session]".to_string(),
             }
         }

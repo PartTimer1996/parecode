@@ -1,0 +1,83 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output to Profile and ResolvedConfig structs",
+      "instruction": "Add field `pub cost_per_mtok_output: Option<f64>` to struct Profile at src/config.rs:44 (after cost_per_mtok_input), and add the same field to struct ResolvedConfig at src/config.rs:175 (after cost_per_mtok_input)\n[index: `Profile` at line 518 in src/callgraph.rs]\n[index: `Profile` at line 24 in src/config.rs]\n[index: `Profile` at line 75 in src/config.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to AgentConfig struct",
+      "instruction": "Add fields `pub cost_per_mtok_input: Option<f64>` and `pub cost_per_mtok_output: Option<f64>` to struct AgentConfig at src/agent.rs:497 (after flow_paths field)\n[index: `AgentConfig` at line 474 in src/agent.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update AgentConfig construction to include cost fields from ResolvedConfig",
+      "instruction": "Find where AgentConfig is constructed (likely in main.rs or run_tui), add cost_per_mtok_input and cost_per_mtok_output from ResolvedConfig to the AgentConfig constructor\n[index: `run_tui` at line 106 in src/agent.rs]\n[index: `AgentConfig` at line 474 in src/agent.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]\n[index: `main` at line 90 in src/main.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/main.rs",
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost fields to AppState struct in TUI",
+      "instruction": "Add fields `cost_per_mtok_input: Option<f64>` and `cost_per_mtok_output: Option<f64>` to struct AppState at src/tui/mod.rs:363\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Pass cost config from AgentConfig to AppState in run_tui",
+      "instruction": "In run_tui function at src/agent.rs:106, where AppState is initialized, pass cost_per_mtok_input and cost_per_mtok_output from the AgentConfig to the AppState constructor\n[index: `run_tui` at line 106 in src/agent.rs]\n[index: `AgentConfig` at line 474 in src/agent.rs]\n[index: `AppState` at line 363 in src/tui/mod.rs]\n[index: `AppState` at line 506 in src/tui/mod.rs]\n[index: `AppState` at line 906 in src/tui/mod.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update draw_stats_bar in render.rs to display cost",
+      "instruction": "At src/tui/render.rs:379, modify draw_stats_bar to call cost_str(state.cost_per_mtok_input, state.cost_per_mtok_output, total_input_tokens, total_output_tokens) and display the cost string alongside token counts. Use the existing cost_str from src/tui/stats_view.rs:56\n[index: `draw` at line 18 in src/tui/config_view.rs]\n[index: `draw` at line 22 in src/tui/git_view.rs]\n[index: `draw` at line 12 in src/tui/plan_view.rs]\n[index: `draw` at line 106 in src/tui/render.rs]\n[index: `draw_stats_bar` at line 379 in src/tui/render.rs]\n[index: `bar` at line 17 in src/tui/stats_view.rs]\n[index: `cost_str` at line 56 in src/tui/stats_view.rs]\n[index: `draw` at line 177 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/render.rs",
+        "src/tui/stats_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774226296,
+  "project": "forge"
+}

@@ -1,0 +1,59 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in #src/config.rs #src/tui/config_view.rs",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_input field to AgentConfig",
+      "instruction": "In src/agent.rs:473-504 (struct AgentConfig), add field `cost_per_mtok_input: Option<f64>` to the struct definition. The field should be placed near other config fields like `context_tokens`.\n[index: `AgentConfig` at line 473 in src/agent.rs]\n[index: `definition` at line 22 in src/tools/ask.rs]\n[index: `definition` at line 9 in src/tools/bash.rs]\n[index: `definition` at line 5 in src/tools/edit.rs]\n[index: `def` at line 128 in src/tools/mod.rs]\n[index: `definition` at line 18 in src/tools/patch.rs]\n[index: `definition` at line 42 in src/tools/read.rs]\n[index: `definition` at line 6 in src/tools/write.rs]",
+      "files": [
+        "src/agent.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Pass cost config to AgentConfig in launch_agent",
+      "instruction": "In src/tui/mod.rs:3016-3032, add `cost_per_mtok_input: resolved.cost_per_mtok_input,` to the AgentConfig construction (around line 3032, before the closing brace). This propagates cost from ResolvedConfig to AgentConfig.\n[index: `AgentConfig` at line 473 in src/agent.rs]\n[index: `ResolvedConfig` at line 175 in src/config.rs]\n[index: `ResolvedConfig` at line 206 in src/config.rs]",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost calculation to run_tui and emit in TokenStats",
+      "instruction": "In src/agent.rs:128-130, after the token counters are initialized, add a cost accumulator: `let mut total_cost: f64 = 0.0;`. Then in src/agent.rs around line 450 (end of run_tui, near where AgentDone is emitted), calculate cost using: `let cost = config.cost_per_mtok_input.map(|rate| (total_input_tokens as f64 * rate) + (total_output_tokens as f64 * rate)).unwrap_or(0.0);`. Modify UiEvent::TokenStats in src/tui/mod.rs:56 to include `cost: f64` field, and emit the updated event with cost value.\n[index: `run_tui` at line 105 in src/agent.rs]\n[index: `UiEvent` at line 621 in src/callgraph.rs]\n[index: `run_tui` at line 653 in src/callgraph.rs]\n[index: `UiEvent` at line 56 in src/tui/mod.rs]\n[index: `run` at line 1012 in src/tui/mod.rs]",
+      "files": [
+        "src/agent.rs",
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Display cost in config or stats view",
+      "instruction": "In src/tui/config_view.rs:18-201 (fn draw) or src/tui/mod.rs find stats display function, add rendering of `state.cost_per_mtok_input` if present. For example, near the context_tokens display in config_view, add a line showing the configured cost rate. Also display calculated cost in the TokenStats rendering - find where total_input/total_output are shown and add cost display there.\n[index: `draw` at line 18 in src/tui/config_view.rs]\n[index: `draw` at line 22 in src/tui/git_view.rs]\n[index: `draw` at line 12 in src/tui/plan_view.rs]\n[index: `draw` at line 106 in src/tui/render.rs]\n[index: `draw` at line 177 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/config_view.rs",
+        "src/tui/mod.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774233650,
+  "project": "forge"
+}
