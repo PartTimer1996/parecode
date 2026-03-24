@@ -279,8 +279,9 @@ impl InputBox {
             Mode::PlanRunning    => (Color::Rgb(35, 35, 55),  Color::DarkGray,          "▶",  ""),
             Mode::UndoPicker     => (Color::Rgb(200, 80, 40), Color::Rgb(220, 100, 60), "⚠",  " undo "),
             Mode::ProfilePicker  => (Color::Rgb(0, 180, 200), Color::Cyan,               "▸",  " profile "),
-            Mode::HookWizard     => (Color::Rgb(40, 100, 55), Color::Rgb(60, 140, 80),   "⚙",  " hook setup "),
-            Mode::Normal         => (Color::Rgb(55, 55, 85),  Color::Rgb(80, 160, 255),  "❯",  ""),
+            Mode::HookWizard        => (Color::Rgb(40, 100, 55),  Color::Rgb(60, 140, 80),    "⚙",  " hook setup "),
+            Mode::PlanSymbolPicker  => (Color::Rgb(60, 45, 120), Color::Rgb(140, 110, 220), "◆",  " plan symbols "),
+            Mode::Normal            => (Color::Rgb(55, 55, 85),  Color::Rgb(80, 160, 255),  "❯",  ""),
         };
 
         let box_bg = Color::Rgb(10, 10, 18);

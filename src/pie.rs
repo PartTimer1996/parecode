@@ -24,6 +24,50 @@ const GRAPH_PATH: &str = ".parecode/project.graph";
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
+/// A symbol explicitly chosen by the user via the plan symbol picker.
+/// The graph already has exact locations — this carries what's needed to inject
+/// the actual source code into the planner's initial context.
+#[derive(Debug, Clone)]
+pub struct AttachedSymbol {
+    pub name: String,
+    pub file: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub kind: String,  // "fn", "struct", "enum", "trait"
+}
+
+/// Read raw source lines for a symbol (capped at 150 lines).
+fn read_symbol_source(file: &str, start: usize, end: usize) -> Option<String> {
+    let content = std::fs::read_to_string(file).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let s = start.saturating_sub(1);
+    let e = end.min(lines.len()).min(s + 150);
+    if s >= e { return None; }
+    Some(lines[s..e].join("\n"))
+}
+
+/// Build the pre-loaded symbol block injected into the planner's task message.
+/// The model receives actual source code for each picked symbol before it
+/// makes any tool call — eliminating read_files calls for those locations.
+pub fn build_symbol_preload(symbols: &[AttachedSymbol]) -> String {
+    if symbols.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "Pre-loaded symbols — these contain actual source code. \
+         Do NOT call read_files for them. Use their line numbers directly in plan steps.\n\n"
+    );
+    for sym in symbols {
+        if let Some(code) = read_symbol_source(&sym.file, sym.start_line, sym.end_line) {
+            out.push_str(&format!(
+                "#{} {} ({}:{}-{}):\n{}\n\n",
+                sym.kind, sym.name, sym.file, sym.start_line, sym.end_line, code
+            ));
+        }
+    }
+    out
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ProjectGraph {
     pub schema_version: u32,

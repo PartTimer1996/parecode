@@ -168,11 +168,12 @@ pub enum Mode {
     SlashComplete,  // / inline command autocomplete
     SessionBrowser, // Ctrl+H session history browser
     PlanReview,     // Plan review/annotation overlay
-    PlanRunning,    // Plan step currently executing
-    UndoPicker,     // Interactive checkpoint picker in Git tab (↑↓ select, Enter confirm, Esc cancel)
-    ProfilePicker,  // Interactive profile picker overlay in Config tab
-    AskingUser,     // Model asked a question, waiting for user's typed answer
-    HookWizard,     // First-run hook setup wizard
+    PlanRunning,      // Plan step currently executing
+    PlanSymbolPicker, // Symbol picker shown before plan generation
+    UndoPicker,       // Interactive checkpoint picker in Git tab (↑↓ select, Enter confirm, Esc cancel)
+    ProfilePicker,    // Interactive profile picker overlay in Config tab
+    AskingUser,       // Model asked a question, waiting for user's typed answer
+    HookWizard,       // First-run hook setup wizard
 }
 
 // ── Hook wizard state ─────────────────────────────────────────────────────────
@@ -198,6 +199,46 @@ pub struct HookWizardState {
     pub on_plan_step_done_input: String,
     pub on_session_start_input: String,
     pub on_session_end_input: String,
+}
+
+// ── Plan symbol picker ────────────────────────────────────────────────────────
+
+/// State for the symbol picker shown before plan generation.
+/// User searches graph symbols by name and picks the ones they expect to change.
+/// Picked symbols have their source code injected into the planner's first message,
+/// collapsing the exploration phase to verification-only.
+pub struct PlanSymbolPickerState {
+    pub task: String,
+    pub query: String,
+    pub selected: usize,
+    pub all_symbols: Vec<crate::pie::AttachedSymbol>,
+    pub picked: Vec<crate::pie::AttachedSymbol>,
+}
+
+impl PlanSymbolPickerState {
+    pub fn filtered(&self) -> Vec<&crate::pie::AttachedSymbol> {
+        if self.query.is_empty() {
+            self.all_symbols.iter().collect()
+        } else {
+            let q = self.query.to_lowercase();
+            self.all_symbols.iter()
+                .filter(|s| s.name.to_lowercase().contains(&q)
+                          || s.file.to_lowercase().contains(&q))
+                .collect()
+        }
+    }
+
+    pub fn toggle(&mut self, sym: &crate::pie::AttachedSymbol) {
+        let pos = self.picked.iter().position(|p| p.name == sym.name && p.file == sym.file);
+        match pos {
+            Some(i) => { self.picked.remove(i); }
+            None    => self.picked.push(sym.clone()),
+        }
+    }
+
+    pub fn is_picked(&self, sym: &crate::pie::AttachedSymbol) -> bool {
+        self.picked.iter().any(|p| p.name == sym.name && p.file == sym.file)
+    }
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -487,6 +528,7 @@ pub struct AppState {
     pub available_hook_presets: Vec<String>,
     /// Hook setup wizard state (Some when Mode::HookWizard)
     pub hook_wizard: Option<HookWizardState>,
+    pub plan_symbol_picker: Option<PlanSymbolPickerState>,
     /// Persistent project graph — loaded/built at startup, injected into every agent call.
     /// None only before the first build completes (should not happen in normal flow).
     pub project_graph: Option<crate::pie::ProjectGraph>,
@@ -575,6 +617,7 @@ impl AppState {
             active_hook_preset: resolved.active_hooks.clone(),
             available_hook_presets: resolved.available_hooks.clone(),
             hook_wizard: None,
+            plan_symbol_picker: None,
             project_graph: None,     // populated during splash in event_loop
             project_narrative: None, // populated during splash in event_loop
             flow_paths: None,        // loaded from .parecode/paths.json after graph ready
@@ -1914,6 +1957,73 @@ fn handle_key(
         return Ok(true);
     }
 
+    // ── PlanSymbolPicker mode ─────────────────────────────────────────────────
+    if state.mode == Mode::PlanSymbolPicker {
+        // Collect the action outside the borrow to avoid NLL conflicts
+        enum PickerAction {
+            None,
+            Confirm { task: String, picked: Vec<crate::pie::AttachedSymbol> },
+            Toggle { sym: crate::pie::AttachedSymbol },
+        }
+        let action = if let Some(picker) = &mut state.plan_symbol_picker {
+            match key.code {
+                // Esc / Enter-on-empty-query: confirm picks (even empty) and start plan
+                KeyCode::Esc => PickerAction::Confirm {
+                    task: picker.task.clone(),
+                    picked: picker.picked.clone(),
+                },
+                KeyCode::Enter if picker.query.is_empty() => PickerAction::Confirm {
+                    task: picker.task.clone(),
+                    picked: picker.picked.clone(),
+                },
+                // Enter with query: toggle the highlighted symbol, clear query
+                KeyCode::Enter => {
+                    let sym_opt = picker.filtered().get(picker.selected).map(|s| (*s).clone());
+                    if let Some(sym) = sym_opt { PickerAction::Toggle { sym } }
+                    else { PickerAction::None }
+                }
+                KeyCode::Up => {
+                    if picker.selected > 0 { picker.selected -= 1; }
+                    PickerAction::None
+                }
+                KeyCode::Down => {
+                    let count = picker.filtered().len();
+                    if picker.selected + 1 < count { picker.selected += 1; }
+                    PickerAction::None
+                }
+                KeyCode::Backspace => {
+                    picker.query.pop();
+                    picker.selected = 0;
+                    PickerAction::None
+                }
+                KeyCode::Char(c) => {
+                    picker.query.push(c);
+                    picker.selected = 0;
+                    PickerAction::None
+                }
+                _ => PickerAction::None,
+            }
+        } else {
+            PickerAction::None
+        };
+        match action {
+            PickerAction::Confirm { task, picked } => {
+                state.plan_symbol_picker = None;
+                state.mode = Mode::Normal;
+                generate_and_show_plan(task, picked, state, resolved, ui_tx.clone());
+            }
+            PickerAction::Toggle { sym } => {
+                if let Some(picker) = &mut state.plan_symbol_picker {
+                    picker.toggle(&sym);
+                    picker.query.clear();
+                    picker.selected = 0;
+                }
+            }
+            PickerAction::None => {}
+        }
+        return Ok(true);
+    }
+
     // ── FilePicker mode ───────────────────────────────────────────────────────
     if state.mode == Mode::FilePicker {
         if let Some(fp) = &mut state.file_picker {
@@ -2125,7 +2235,7 @@ fn handle_key(
                                 "usage: /plan \"describe the task\"".to_string(),
                             ));
                         } else {
-                            generate_and_show_plan(task, state, resolved, ui_tx.clone());
+                            open_plan_symbol_picker(task, state);
                         }
                     } else if input.starts_with("/quick ") || input == "/quick" {
                         let task = input.trim_start_matches("/quick").trim().to_string();
@@ -2472,7 +2582,7 @@ fn handle_submit(
         if task.is_empty() {
             state.push(ConversationEntry::SystemMsg("usage: /plan \"describe the task\"".to_string()));
         } else {
-            generate_and_show_plan(task, state, resolved, ui_tx.clone());
+            open_plan_symbol_picker(task, state);
         }
         return Ok(true);
     }
@@ -3137,9 +3247,42 @@ fn launch_quick(
 
 // ── Plan generation ───────────────────────────────────────────────────────────
 
+/// Open the plan symbol picker overlay. Called on /plan submission.
+/// If no graph is available, falls straight through to plan generation.
+fn open_plan_symbol_picker(task: String, state: &mut AppState) {
+    let all_symbols: Vec<crate::pie::AttachedSymbol> = if let Some(graph) = &state.project_graph {
+        graph.symbols.iter()
+            .filter(|s| s.end_line > s.line)
+            .filter(|s| matches!(s.kind,
+                crate::index::SymbolKind::Function |
+                crate::index::SymbolKind::Struct |
+                crate::index::SymbolKind::Enum |
+                crate::index::SymbolKind::Trait))
+            .map(|s| crate::pie::AttachedSymbol {
+                name: s.name.clone(),
+                file: s.file.clone(),
+                start_line: s.line,
+                end_line: s.end_line,
+                kind: s.kind.label().to_string(),
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    state.plan_symbol_picker = Some(PlanSymbolPickerState {
+        task,
+        query: String::new(),
+        selected: 0,
+        all_symbols,
+        picked: Vec::new(),
+    });
+    state.mode = Mode::PlanSymbolPicker;
+}
+
 /// Spawn a background task to generate the plan, sending results back via UiEvent.
 fn generate_and_show_plan(
     task: String,
+    attached_symbols: Vec<crate::pie::AttachedSymbol>,
     state: &mut AppState,
     resolved: &ResolvedConfig,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
@@ -3154,8 +3297,14 @@ fn generate_and_show_plan(
     } else {
         String::new()
     };
+    let sym_note = if attached_symbols.is_empty() {
+        String::new()
+    } else {
+        format!(" · {} symbol{} pre-loaded", attached_symbols.len(),
+            if attached_symbols.len() == 1 { "" } else { "s" })
+    };
     state.push(ConversationEntry::SystemMsg(
-        format!("⟳ planning{planner_note}: {task}"),
+        format!("⟳ planning{planner_note}: {task}{sym_note}"),
     ));
     // Use AgentRunning mode to get spinner while generating
     state.mode = Mode::AgentRunning;
@@ -3183,6 +3332,7 @@ fn generate_and_show_plan(
     });
     let narrative = state.project_narrative.clone();
     let flow_paths = state.flow_paths.clone();
+    // attached_symbols moved into the spawn (already Vec<AttachedSymbol>)
 
     tokio::spawn(async move {
         let tx_plan = ui_tx.clone();
@@ -3190,7 +3340,7 @@ fn generate_and_show_plan(
         let on_chunk = move |chunk: &str| {
             let _ = tx_chunk.send(UiEvent::ThinkingChunk(chunk.to_string()));
         };
-        match plan::generate_plan(&task, &client, &project, &context_files, &graph, narrative.as_ref(), flow_paths.as_ref(), tx_plan, on_chunk).await {
+        match plan::generate_plan(&task, &client, &project, &context_files, &attached_symbols, &graph, narrative.as_ref(), flow_paths.as_ref(), tx_plan, on_chunk).await {
             Ok((generated_plan, _metrics)) => {
                 // Save plan to disk: JSON for machine use, Markdown for human reading
                 let _ = plan::save_plan(&generated_plan);

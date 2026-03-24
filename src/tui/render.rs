@@ -209,6 +209,11 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
             super::overlays::draw_hook_wizard(f, wiz, area);
         }
     }
+    if state.mode == Mode::PlanSymbolPicker {
+        if let Some(picker) = &state.plan_symbol_picker {
+            super::overlays::draw_plan_symbol_picker(f, picker, area);
+        }
+    }
 }
 
 // ── Tab bar ───────────────────────────────────────────────────────────────────

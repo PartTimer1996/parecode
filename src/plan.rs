@@ -12,7 +12,7 @@
 ///   5. After each step, verification runs; failure surfaces for user decision
 ///
 /// Plans are persisted to `.parecode/plans/{timestamp}.json` so they can be resumed.
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -261,7 +261,9 @@ STEP RULES:
 - verify: "none" | "command:CMD" | "changed:FILE" | "absent:FILE:PATTERN"
 - EXACT LINES REQUIRED: If you lack exact line numbers for a file a step must edit, add it to your read_files batch BEFORE writing the step. Never write "around line N" or "similar to line N" — either you know the exact location or you read it first.
 - NO REDUNDANT PARAMETERS: Before adding a parameter to a function, check whether an existing struct argument (e.g. AppState, AgentConfig) already carries that data. Read the field from the existing argument — do not add parameters that duplicate data already passed in.
-- RUST VERIFY: Any step that adds/removes a struct field OR changes a function signature MUST set verify: "command:cargo check". Field propagation across multiple files will silently break without this."#;
+- RUST VERIFY: Any step that adds/removes a struct field OR changes a function signature MUST set verify: "command:cargo check". Field propagation across multiple files will silently break without this.
+
+PRE-LOADED SYMBOLS: If the first user message contains a "Pre-loaded symbols" block, those symbols already contain their exact source code with line numbers. Do NOT call read_files for them — you already have everything you need. Use their line numbers directly in step instructions."#;
 
 /// Response from the model during plan generation.
 #[derive(Debug, Deserialize)]
@@ -477,36 +479,6 @@ fn enrich_step_instructions(steps: &mut Vec<PlanStep>, graph: &ProjectGraph) {
     }
 }
 
-/// Stub out stale read_file / read_symbol tool results in the message history.
-///
-/// Reads are expensive (2-5k tokens each) and accumulate across turns. Once the model
-/// has processed a read result (i.e. it's ≥2 turns old), the full content is no longer
-/// needed — replace it with a compact stub so the model knows it already read that range
-/// but doesn't pay to re-send thousands of tokens on every subsequent API call.
-///
-/// Graph tool results (orient, check_wiring, find_symbol) are left intact — they are
-/// already compact and the model references them throughout planning.
-fn compress_stale_reads(messages: &mut Vec<Message>, stale_ids: &HashSet<String>) {
-    if stale_ids.is_empty() { return; }
-    for msg in messages.iter_mut() {
-        if msg.role != "user" { continue; }
-        if let MessageContent::Parts(parts) = &mut msg.content {
-            for part in parts.iter_mut() {
-                if let ContentPart::ToolResult { tool_use_id, content } = part {
-                    if stale_ids.contains(tool_use_id) && content.len() > 120 {
-                        let header: String = content.lines()
-                            .next().unwrap_or("").chars().take(80).collect();
-                        *content = format!(
-                            "[read consumed ({} chars) — {header}. \
-                             Content already used for plan formulation. Do not re-read.]",
-                            content.len()
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// Call the model to generate a plan for `task`.
 ///
@@ -523,6 +495,7 @@ pub async fn generate_plan(
     client: &Client,
     project: &str,
     context_files: &[String],
+    attached_symbols: &[crate::pie::AttachedSymbol],
     graph: &ProjectGraph,
     narrative: Option<&crate::narrative::ProjectNarrative>,
     flow_paths: Option<&crate::flowpaths::FlowPathIndex>,
@@ -534,13 +507,6 @@ pub async fn generate_plan(
     let mut total_output: u32 = 0;
     let mut tool_counts: HashMap<String, usize> = HashMap::new();
     let mut turns: usize = 0;
-
-    // Read compression: track read_file/read_symbol tool_use_ids across turns.
-    // Reads from turn N are kept intact for turn N+1 (model still processing them),
-    // then stubbed at the start of turn N+2.
-    let mut stale_read_ids: HashSet<String> = HashSet::new(); // compress these now
-    let mut prev_turn_read_ids: HashSet<String> = HashSet::new(); // becomes stale next turn
-    let mut current_turn_read_ids: HashSet<String> = HashSet::new(); // being collected
 
     // ── Session log ───────────────────────────────────────────────────────────
     // Accumulated in a String; written to .parecode/last_plan_session.txt after
@@ -554,9 +520,18 @@ pub async fn generate_plan(
     let mut messages: Vec<Message> = Vec::new();
     messages.extend(pie_ctx.injection_messages);
 
-    // Task message — symbol locations immediately before the task for maximum salience.
+    // Task message — symbol preload first (if any), then orientation, then task.
     let focus_files = pie_ctx.focus_files;
-    let mut task_content = pie_ctx.user_prefix;
+    let mut task_content = String::new();
+
+    // Inject pre-loaded symbol source code at the top — these collapse the exploration phase.
+    let symbol_preload = crate::pie::build_symbol_preload(attached_symbols);
+    if !symbol_preload.is_empty() {
+        task_content.push_str(&symbol_preload);
+        task_content.push('\n');
+    }
+
+    task_content.push_str(&pie_ctx.user_prefix);
     task_content.push_str(&format!("Task: {task}"));
     messages.push(Message {
         role: "user".to_string(),
@@ -576,11 +551,6 @@ pub async fn generate_plan(
     let mut json_text_raw = String::new();
 
     for turn_idx in 0..MAX_TURNS {
-        // ── Read compression: rotate turn buckets and stub stale reads ────────
-        stale_read_ids.extend(std::mem::take(&mut prev_turn_read_ids));
-        prev_turn_read_ids = std::mem::take(&mut current_turn_read_ids);
-        compress_stale_reads(&mut messages, &stale_read_ids);
-
         let tool_call_count: usize = tool_counts.values().sum();
         // Enforce hard tool cap: once hit, strip tools and demand JSON regardless of model intent
         if tool_call_count >= TOOL_CAP && !output_mode {
@@ -726,10 +696,6 @@ pub async fn generate_plan(
                 content: result,
             });
             *tool_counts.entry(tc.name.clone()).or_default() += 1;
-            // Track read-class tool IDs for compression on turn N+2
-            if matches!(tc.name.as_str(), "read_files" | "read_file" | "read_symbol") {
-                current_turn_read_ids.insert(tc.id.clone());
-            }
         }
 
         let tool_call_count: usize = tool_counts.values().sum();
@@ -1534,6 +1500,7 @@ mod quality_tests {
             &client,
             "parecode",
             &context_files,
+            &[],
             &graph,
             None,
             None,
