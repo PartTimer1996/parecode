@@ -1,0 +1,175 @@
+=== SYSTEM PROMPT ===
+You are PareCode, a coding assistant. Complete tasks in minimum tool calls. A project index is pre-loaded.
+
+DISCOVERY:
+1. orient(query) — struct layouts, line numbers, call connections in ONE call. Skip if attached context already covers the task.
+2. check_wiring(field) — required when adding or modifying any struct field. Returns every struct in the pipeline that needs updating.
+3. read_files([{path, line_range}, ...]) — batch ALL discovery reads into ONE call. Line numbers from orient. Output is sufficient context for patch_file — no re-read needed.
+
+EDITING:
+4. patch_file — for 2+ edits to the same file. Use context lines from read_files directly. No pre-read required. Returns fresh hashes after apply.
+5. read_file(path, line_range) — only when a single edit needs fresh hashes. Use freely — no batching needed.
+6. edit_file — single-location replace. For multiple changes, use patch_file.
+7. bash("cargo check") — verify after each change set.
+
+Stop when done.
+
+# Project conventions (.parecode/conventions.md)
+
+# Project: parecode
+Language: Rust
+Test runner: `cargo test`
+Key dependencies: clap, reqwest, tokio, serde, serde_json, toml, anyhow, futures-util
+
+## Rust coding conventions
+
+### Architecture & design
+- **Functional style preferred** — favor pure functions with clear inputs/outputs over stateful objects
+- **Single Responsibility Principle** — each function/module should do one thing well
+- **Use abstractions** — extract reusable patterns; avoid duplication
+- **Explicit over implicit** — clear types, explicit error handling, no hidden magic
+
+### Code organization
+- Group related functionality into logical sections with `// ── Section ──────` comment headers
+- Struct definitions and implementations at the top, followed by helper functions
+- Constants declared near the top, using `SCREAMING_SNAKE_CASE`
+- Public API first, internal helpers below
+
+### Error handling
+- Use `Result<T, E>` for fallible operations; never panic in library code
+- Use `anyhow::Result` for application-level errors where context matters
+- Provide context with `.context("what failed")` when propagating errors
+- Return meaningful error messages that help debugging
+
+### Testing
+- Tests live in `#[cfg(test)] mod tests { }` at the bottom of each file
+- Test module structure:
+  - Group tests by the component/function they test
+  - Use descriptive test names: `test_<component>_<scenario>`
+  - Comment sections with `// ── Component ────────────────`
+- Test coverage expectations:
+  - **Core logic**: comprehensive unit tests for all branches
+  - **Public API**: test success cases, failure modes, edge cases
+  - **Serialization**: roundtrip tests for serde structs
+  - **Integration points**: where appropriate, not required for every function
+- Test patterns:
+  - Prefer `assert_eq!` over `assert!` for better failure messages
+  - Use `#[tokio::test]` for async tests
+  - Mock filesystem/external calls only when necessary; prefer real calls for unit tests
+- Keep tests fast and deterministic
+
+### Async code
+- Use `async/await` consistently; avoid blocking calls in async contexts
+- Prefer `tokio::fs` and `tokio::process::Command` over blocking equivalents
+- Use `tokio::time::timeout` for operations that might hang
+- Keep async boundaries clear and minimal
+
+### Naming
+- Types: `PascalCase`
+- Functions/variables: `snake_case`
+- Constants: `SCREAMING_SNAKE_CASE`
+- Lifetimes: short and descriptive (`'a`, `'static`, `'input`)
+- Use full words over abbreviations (prefer `config` over `cfg`, except in very local scope)
+
+### Documentation
+- Doc comments (`///`) for all public items
+- Module-level doc comments (`//!`) explaining purpose and key concepts
+- Code comments for non-obvious logic; prefer self-documenting code
+- Examples in doc comments where helpful
+
+### Dependencies
+- Prefer crates from the core Rust ecosystem (tokio, serde, clap, etc.)
+- Avoid unnecessary dependencies; consider maintenance burden
+- Pin major versions; let Cargo handle minor/patch updates
+
+# Git status
+
+```
+M .parecode/paths.json
+```
+
+
+--- MESSAGE 0 (assistant) ---
+
+
+--- MESSAGE 1 (user) ---
+[ToolResult id=pie_ctx_0]
+# Relevant call chain: draw → format_age
+
+## `draw` (src/tui/git_view.rs:22)
+```rust
+pub fn draw(f: &mut Frame, state: &AppState, area: Rect) {
+    // When the undo picker is active, show the checkpoint list fullscreen in this tab
+    if state.mode == Mode::UndoPicker {
+        draw_undo_picker(f, state, area);
+        return;
+    }
+
+    // Split into: header (checkpoint info), stat area, action bar
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),  // checkpoint summary
+            Constraint::Min(0),     // diff stat
+            Constraint::Length(1),  // action hints
+        ])
+        .split(area);
+
+    draw_checkpoint_header(f, state, chunks[0]);
+    draw_diff_stat(f, state, chunks[1]);
+    draw_action_bar(f, state, chunks[2]);
+}
+
+```
+
+## `draw_undo_picker` (src/tui/git_view.rs:44)
+```rust
+fn draw_undo_picker(f: &mut Frame, state: &AppState, area: Rect) { … }
+```
+
+## `draw_checkpoint_header` (src/tui/git_view.rs:145)
+```rust
+fn draw_checkpoint_header(f: &mut Frame, state: &AppState, area: Rect) { … }
+```
+
+## `draw_diff_stat` (src/tui/git_view.rs:234)
+```rust
+fn draw_diff_stat(f: &mut Frame, state: &AppState, area: Rect) { … }
+```
+
+## `draw_action_bar` (src/tui/git_view.rs:284)
+```rust
+fn draw_action_bar(f: &mut Frame, _state: &AppState, area: Rect) { … }
+```
+
+## `format_age` (src/tui/git_view.rs:306)
+```rust
+fn format_age(timestamp: i64) -> String { … }
+```
+
+
+---
+# Project index — forge
+## Architecture
+A terminal-based AI coding assistant that provides a TUI for interacting with LLM agents. Features include file editing, patching, and reading tools executed by the agent, fuzzy search capabilities, git integration, and project convention loading.
+
+## Clusters
+- **src** [agent.rs, budget.rs, cache.rs, callgraph.rs, client.rs, config.rs, context_weights.rs, flowpaths.rs, git.rs, history.rs, hooks.rs, index.rs, init.rs, main.rs, mcp.rs, narrative.rs, pie.rs, plan.rs, sessions.rs, setup.rs, task_memory.rs, telemetry.rs, ui.rs] — Core runtime: API client, git integration, project mapping, agent configuration, convention loading, …
+- **tui** [chat.rs, config_view.rs, git_view.rs, input_box.rs, mod.rs, overlays.rs, plan_view.rs, render.rs, sidebar.rs, stats_view.rs] — Terminal UI framework: chat interface, input boxes, spinner animations, history display, chip/tag …
+- **tools** [ask.rs, bash.rs, edit.rs, mod.rs, patch.rs, pie_tool.rs, read.rs, write.rs] — Agent tool implementations: patch, read, and edit operations with fuzzy matching, line …
+- **.parecode** [context_weights.json, paths.json, task_memory.jsonl]
+- **root** [ideas_ryan.txt]
+
+## Key files
+- src/tui/mod.rs (3825 lines)
+- src/tools/pie_tool.rs (1936 lines)
+- src/agent.rs (1764 lines)
+- src/plan.rs (1523 lines)
+- src/pie.rs (1324 lines)
+
+## Key symbols
+**src:** AgentConfig, ThinkParser, ToolKind, BudgetConfig, Budget, run_quick, run_tui, load_conventions, build_system_prompt, build_user_message
+**tui:** InputAction, InputBox, UiEvent, ConversationEntry, Mode, spinner_frame, tool_color, build_items, build_plan_card_items, draw_history
+**tools:** TurnThresholds, Hunk, DeliveredRanges, execute, definition, execute, definition, execute
+
+Use `orient(query="keyword")` to get struct layouts, line numbers, and call connections for any task — one call covers discovery. Use `check_wiring(field="name")` to verify field propagation gaps across the pipeline.
