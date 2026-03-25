@@ -18,7 +18,14 @@ use std::fs;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "patch_file",
-        "description": "Apply a unified diff patch. For multi-hunk changes (3+ locations in one file). Standard unified diff format: @@ headers, ' ' context, '-' remove, '+' add. Omit --- a/ +++ b/ headers; start with @@. Line numbers are hints — anchoring uses context lines.",
+        "description": "Apply multiple edits to one file in a single call. USE THIS instead of multiple edit_file calls.\n\
+                        No pre-read needed — context lines from read_files or orient are sufficient.\n\
+                        \n\
+                        Unified diff format: @@ headers, ' ' context lines, '-' remove, '+' add.\n\
+                        Omit --- a/ +++ b/ headers. Start directly with @@.\n\
+                        Line numbers are hints only — anchoring uses context lines.\n\
+                        \n\
+                        Returns ±15 lines around the last hunk with fresh hashes for follow-up edits.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -335,11 +342,11 @@ fn post_patch_context(path: &str, content: &str, anchor_line: usize) -> String {
         return String::new();
     }
     let centre = anchor_line.saturating_sub(1).min(total - 1);
-    let lo = centre.saturating_sub(8);
-    let hi = (centre + 8).min(total);
+    let lo = centre.saturating_sub(15);
+    let hi = (centre + 15).min(total);
 
     let mut out = format!(
-        "\n[{path} after patch — lines {}-{} of {total}]\n",
+        "\n[{path} after patch — lines {}-{} of {total} — use these hashes for any further edits]\n",
         lo + 1,
         hi
     );

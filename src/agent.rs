@@ -23,14 +23,15 @@ Skip if attached context already covers the task.\n\
 2. check_wiring(field) — required when adding or modifying any struct field. \
 Returns every struct in the pipeline that needs updating.\n\
 3. read_files([{path, line_range}, ...]) — batch ALL discovery reads into ONE call. \
-Line numbers from orient. Skip types already shown by orient.\n\
+Line numbers from orient. Output is sufficient context for patch_file — no re-read needed.\n\
 \n\
 EDITING:\n\
-4. read_file(path, line_range) — fetch exact hashes just before each edit. \
-Use freely — no batching needed. Line numbers from orient or read_files.\n\
-5. edit_file — requires hashes from read_file. After editing, use hashes from \
-the edit result for any follow-up edits to the same region.\n\
-6. bash(\"cargo check\") — verify after each change set.\n\
+4. patch_file — for 2+ edits to the same file. Use context lines from read_files directly. \
+No pre-read required. Returns fresh hashes after apply.\n\
+5. read_file(path, line_range) — only when a single edit needs fresh hashes. \
+Use freely — no batching needed.\n\
+6. edit_file — single-location replace. For multiple changes, use patch_file.\n\
+7. bash(\"cargo check\") — verify after each change set.\n\
 \n\
 Stop when done.";
 
@@ -197,7 +198,7 @@ pub async fn run_tui(
     } else {
         None
     };
-
+    dump_agent_prompt(system_prompt, &messages);
     // ── Prior turn pairs ─────────────────────────────────────────────────────
     // Inject recent turns as lean user/assistant pairs for session continuity.
     const MAX_PRIOR_TURNS: usize = 3;
@@ -1284,6 +1285,31 @@ pub fn _should_skip_done_turn(
     any_error: bool,
 ) -> bool {
     mutated_files_nonempty && !any_bash_or_ask && !any_error
+}
+
+/// Write the full planner prompt to `.parecode/last_plan_prompt.txt` for inspection.
+/// Best-effort — silently ignored on any I/O error.
+fn dump_agent_prompt(system_prompt: &str, messages: &[Message]) {
+    use std::fmt::Write as FmtWrite;
+    let mut out = String::new();
+    let _ = writeln!(out, "=== SYSTEM PROMPT ===\n{system_prompt}\n");
+    for (i, msg) in messages.iter().enumerate() {
+        let content_str = match &msg.content {
+            MessageContent::Text(t) => t.clone(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .map(|p| match p {
+                    ContentPart::ToolResult { tool_use_id, content } => {
+                        format!("[ToolResult id={tool_use_id}]\n{content}")
+                    }
+                    _ => format!("{p:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        };
+        let _ = writeln!(out, "\n--- MESSAGE {i} ({}) ---\n{content_str}", msg.role);
+    }
+    let _ = std::fs::write(".parecode/last_agent_prompt.txt", out);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

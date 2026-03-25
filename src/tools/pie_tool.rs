@@ -1493,10 +1493,9 @@ fn symbols_for_cluster(cluster: &Cluster, graph: &ProjectGraph) -> Vec<String> {
 pub fn read_files_definition() -> Value {
     serde_json::json!({
         "name": "read_files",
-        "description": "Read multiple file sections in ONE call. \
-                        Always use this instead of reading one file at a time. \
-                        After orient/check_wiring you know all the locations — \
-                        batch every read you need into a single read_files call. \
+        "description": "Read multiple file sections in ONE call — batch all discovery reads here.\n\
+                        After orient/check_wiring you know all locations: read them all at once.\n\
+                        Output is ready-to-use context for patch_file — no re-read needed before patching.\n\
                         Each entry MUST have a line_range. Full-file reads are blocked.",
         "parameters": {
             "type": "object",

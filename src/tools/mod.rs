@@ -117,14 +117,11 @@ pub fn tools_for_turn(turn: usize, has_graph: bool) -> Vec<Tool> {
 
     t.push(def(ask::definition()));
     t.push(def(edit::definition()));
+    t.push(def(patch::definition()));
     t.push(def(bash::definition()));
 
     if turn <= thresholds.exploration_end {
         t.push(def(write::definition()));
-    }
-
-    if turn >= thresholds.mutation_start {
-        t.push(def(patch::definition()));
     }
 
     t
@@ -220,16 +217,17 @@ mod tests {
 
     #[test]
     fn test_tools_for_turn_logic() {
-        // Turn 0: Exploration (includes list and write)
+        // Turn 0: Exploration (includes write + patch — patch always present now)
         let t0 = tools_for_turn(0, false);
         let names0: Vec<_> = t0.iter().map(|d| d.name.as_str()).collect();
         assert!(names0.contains(&TOOL_WRITE_FILE));
-        assert!(!names0.contains(&TOOL_PATCH_FILE));
+        assert!(names0.contains(&TOOL_PATCH_FILE));
 
-        // Turn 2: Mutation (includes patch)
+        // Turn 2: Still has patch (write may be absent after exploration_end)
         let t2 = tools_for_turn(2, false);
         let names2: Vec<_> = t2.iter().map(|d| d.name.as_str()).collect();
         assert!(names2.contains(&TOOL_PATCH_FILE));
+        assert!(!names2.contains(&TOOL_WRITE_FILE));
     }
 
     #[test]

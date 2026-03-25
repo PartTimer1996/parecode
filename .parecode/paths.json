@@ -106,8 +106,8 @@
       ]
     },
     {
-      "id": "run-single-shot-to-estimate-messages",
-      "name": "run_single_shot → estimate_messages",
+      "id": "run-single-shot-to-run-task-done-hooks",
+      "name": "run_single_shot → run_task_done_hooks",
       "entry_key": "src/main.rs::run_single_shot",
       "steps": [
         "src/agent.rs::run_tui",
@@ -119,6 +119,7 @@
         "src/plan.rs::estimate_tokens",
         "src/pie.rs::build_pie_context",
         "src/pie.rs::build_symbol_preload",
+        "src/agent.rs::dump_agent_prompt",
         "src/budget.rs::enforce",
         "src/budget.rs::total_context",
         "src/tools/mod.rs::tools_for_turn",
@@ -126,10 +127,10 @@
         "src/agent.rs::classify",
         "src/agent.rs::execute_one_tool_call",
         "src/agent.rs::strip_cot_from_last_assistant",
-        "src/hooks.rs::run_task_done_hooks",
-        "src/budget.rs::estimate_messages"
+        "src/hooks.rs::run_task_done_hooks"
       ],
       "keywords": [
+        "agent",
         "assistant",
         "build",
         "call",
@@ -138,19 +139,20 @@
         "context",
         "cot",
         "done",
+        "dump",
         "enforce",
         "estimate",
         "event",
         "execute",
         "hooks",
         "last",
-        "messages",
         "next",
         "one",
         "pie",
         "plain",
         "preload",
         "print",
+        "prompt",
         "short",
         "shot",
         "single",
@@ -490,8 +492,8 @@
       ]
     },
     {
-      "id": "launch-plan-to-total-context",
-      "name": "launch_plan → total_context",
+      "id": "launch-plan-to-enforce",
+      "name": "launch_plan → enforce",
       "entry_key": "src/tui/mod.rs::launch_plan",
       "steps": [
         "src/tui/mod.rs::resolve_hooks_with_state",
@@ -510,16 +512,18 @@
         "src/plan.rs::estimate_tokens",
         "src/pie.rs::build_pie_context",
         "src/pie.rs::build_symbol_preload",
-        "src/budget.rs::enforce",
-        "src/budget.rs::total_context"
+        "src/agent.rs::dump_agent_prompt",
+        "src/budget.rs::enforce"
       ],
       "keywords": [
+        "agent",
         "auto",
         "build",
         "commit",
         "completed",
         "context",
         "dir",
+        "dump",
         "effective",
         "enforce",
         "estimate",
@@ -532,6 +536,7 @@
         "plan",
         "plans",
         "preload",
+        "prompt",
         "resolve",
         "short",
         "state",
@@ -541,7 +546,6 @@
         "symbol",
         "tokens",
         "tools",
-        "total",
         "tui",
         "turn",
         "verify"
@@ -1069,5 +1073,5 @@
       ]
     }
   ],
-  "built_at": 1774401049
+  "built_at": 1774401383
 }

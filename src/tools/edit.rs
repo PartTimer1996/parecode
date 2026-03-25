@@ -5,8 +5,9 @@ use std::fs;
 pub fn definition() -> Value {
     serde_json::json!({
         "name": "edit_file",
-        "description": "Edit a file. Replace: old_str (unique) → new_str. Append: append=true.\n\
-                        Returns ±15 lines around the edit with fresh hashes. Use those hashes for follow-up edits — do NOT re-read the file.",
+        "description": "Single-location edit. For 2+ changes to the same file, use patch_file instead.\n\
+                        Replace: old_str (unique in file) → new_str. Append: append=true.\n\
+                        Returns ±15 lines around the edit with fresh hashes for follow-up edits.",
         "parameters": {
             "type": "object",
             "properties": {
