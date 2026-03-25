@@ -1,0 +1,121 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in agent.rs::run_tui() agent.rs::AgentConfig config.rs::Profile config.rs::ConfigFile config.rs::ResolvedConfig config_view.rs::draw()",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_output field to Profile struct",
+      "instruction": "In src/config.rs:44, after the `cost_per_mtok_input: Option<f64>` field (line 44), add a new field `cost_per_mtok_output: Option<f64>` with doc comment \"Optional: cost per 1M output tokens in USD. If set, used instead of 3x input cost.\" Also update `DEFAULT` impl if one exists.",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_output to ResolvedConfig and wire through resolve()",
+      "instruction": "1) In src/config.rs:187, add `pub cost_per_mtok_output: Option<f64>` after `cost_per_mtok_input`. 2) In src/config.rs:242, add `cost_per_mtok_output: base.cost_per_mtok_output,` after the cost_per_mtok_input line. 3) Update any tests in config.rs that construct ResolvedConfig or Profile to include the new field (use `..Default::default()` where possible).\n[index: `Profile` at line 24 in src/config.rs] — constructed by: DEFAULT_CONFIG_TOML (src/config.rs:281)\n[index: `ResolvedConfig` at line 175 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost_per_mtok_output to AppState and wire from ResolvedConfig",
+      "instruction": "1) In src/tui/mod.rs, add `cost_per_mtok_output: Option<f64>` field to AppState struct (near line 435 where cost_per_mtok_input is). 2) In src/tui/mod.rs:1119, after `state.cost_per_mtok_input = resolved.cost_per_mtok_input;`, add `state.cost_per_mtok_output = resolved.cost_per_mtok_output;`\n[index: `AppState` at line 405 in src/tui/mod.rs] — constructed by: event_loop (src/tui/mod.rs:1107)",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update cost_str to accept separate input/output rates",
+      "instruction": "In src/tui/stats_view.rs:56-66, change the `cost_str` signature to `fn cost_str(tokens_in: u32, tokens_out: u32, cost_per_mtok_input: Option<f64>, cost_per_mtok_output: Option<f64>) -> Option<String>`. Use cost_per_mtok_input for input tokens and cost_per_mtok_output (falling back to cost_per_mtok_input * 3.0 if None) for output tokens.\n[index: `cost_str` at line 56 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/stats_view.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update all cost_str call sites to pass both rates",
+      "instruction": "In src/tui/stats_view.rs, update every call to `cost_str(...)` to pass `state.cost_per_mtok_input` AND `state.cost_per_mtok_output`. The draw() function at line 181 extracts `let cost = state.cost_per_mtok_input.map(|c| c as f64);` — change this to pass both fields. The aggregate_items function at line 108 takes a `cost_per_mtok` param — change it to take two params (input + output). Update all callers (lines 224, 250, 266, 191).\n[index: `draw` at line 22 in src/tui/git_view.rs]\n[index: `draw` at line 12 in src/tui/plan_view.rs]\n[index: `draw` at line 106 in src/tui/render.rs]\n[index: `cost_str` at line 56 in src/tui/stats_view.rs]\n[index: `draw` at line 177 in src/tui/stats_view.rs]",
+      "files": [
+        "src/tui/stats_view.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Show cost_per_mtok_input and cost_per_mtok_output in config view",
+      "instruction": "In src/tui/config_view.rs, after the `git_context` kv row (around line 79), add lines showing `cost_per_mtok_input` and `cost_per_mtok_output` from state. Format: `kv(\"cost/1M in\", &state.cost_per_mtok_input.map(|c| format!(\"${:.2}\", c)).unwrap_or_else(|| \"(not set)\".to_string()))` and similarly for output. Read the AppState fields available in state.\n[index: `kv` at line 202 in src/tui/config_view.rs]\n[index: `AppState` at line 405 in src/tui/mod.rs] — constructed by: event_loop (src/tui/mod.rs:1107)",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update DEFAULT_CONFIG_TOML examples to mention cost_per_mtok_output",
+      "instruction": "In src/config.rs, in the DEFAULT_CONFIG_TOML string, add a commented-out `cost_per_mtok_output` line after the `cost_per_mtok_input` example (around line 305). E.g. `# cost_per_mtok_output = 15.0  # USD per 1M output tokens`.\n[index: `DEFAULT_CONFIG_TOML` at line 281 in src/config.rs]",
+      "files": [
+        "src/config.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Update config_view.rs draw to show cost settings from resolved config",
+      "instruction": "In src/tui/config_view.rs, ensure both cost_per_mtok_input and cost_per_mtok_output values are displayed in the Settings section. The AppState already has these fields — display them after the git_context line (around line 80) using the kv helper.\n[index: `kv` at line 202 in src/tui/config_view.rs]\n[index: `AppState` at line 405 in src/tui/mod.rs] — constructed by: event_loop (src/tui/mod.rs:1107)",
+      "files": [
+        "src/tui/config_view.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774396443,
+  "project": "forge"
+}

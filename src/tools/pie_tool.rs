@@ -816,7 +816,7 @@ pub fn check_wiring_execute(args: &Value, graph: &ProjectGraph) -> String {
                 ));
             } else {
                 out.push_str(&format!(
-                    "Try find_symbol(name=\"{field}\") to locate it as a top-level symbol."
+                    "Try orient(query=\"{field}\") to locate it as a type, enum, or symbol."
                 ));
             }
             return out;
@@ -872,7 +872,7 @@ pub fn check_wiring_execute(args: &Value, graph: &ProjectGraph) -> String {
     if with_syms.is_empty() {
         out.push_str(&format!(
             "No structs/enums found with '{}' fields.\n\
-             Try find_symbol(name=\"{}\") to locate it as a top-level symbol.\n",
+             Try orient(query=\"{}\") to locate it as a type, enum, or symbol.\n",
             field, field
         ));
         return out;
@@ -1350,23 +1350,6 @@ pub fn smart_read(args: &Value, graph: &ProjectGraph) -> String {
             }
         }
 
-        // Key types in the same file — compact one-liner per type so the model can
-        // see what fields exist without a follow-up read. Full layout is available via
-        // the struct intercept if the model reads a struct range explicitly.
-        let file_types: Vec<String> = graph.symbols.iter()
-            .filter(|s| s.file == path)
-            .filter(|s| matches!(s.kind, SymbolKind::Struct | SymbolKind::Enum))
-            .filter(|s| s.signature.is_some())
-            .take(6)
-            .map(|s| format!("  {} {} (line {}): {}", s.kind.label(), s.name, s.line, s.signature.as_deref().unwrap_or("")))
-            .collect();
-        if !file_types.is_empty() {
-            overlay.push_str("Key types in this file:\n");
-            for t in &file_types {
-                overlay.push_str(&format!("{t}\n"));
-            }
-        }
-
         overlay.push_str("[/Graph overlay]\n\n");
 
         let content = super::read::execute(args)
@@ -1506,7 +1489,7 @@ fn symbols_for_cluster(cluster: &Cluster, graph: &ProjectGraph) -> Vec<String> {
 }
 
 
-/// Tool definition for `read_files` — planner-only batched read tool.
+/// Tool definition for `read_files` — batched read tool for planner and agent.
 pub fn read_files_definition() -> Value {
     serde_json::json!({
         "name": "read_files",

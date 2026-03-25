@@ -1,0 +1,107 @@
+{
+  "task": "#src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in agent.rs::run_tui() agent.rs::AgentConfig config.rs::Profile config.rs::ConfigFile config.rs::ResolvedConfig config_view.rs::draw()",
+  "steps": [
+    {
+      "description": "Add cost_per_mtok_input field to AgentConfig struct and propagate from ResolvedConfig",
+      "instruction": "src/agent.rs:474 — Add `pub cost_per_mtok_input: Option<f64>` field to struct AgentConfig. src/main.rs:208 — In the AgentConfig construction, add `cost_per_mtok_input: resolved.cost_per_mtok_input,`. src/tui/mod.rs:1318+ (search for AgentConfig construction) — Add `cost_per_mtok_input: resolved.cost_per_mtok_input,` to any other AgentConfig construction sites.\n[index: `AgentConfig` at line 474 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1278), launch_agent (src/tui/mod.rs:3210), launch_plan (src/tui/mod.rs:3444), launch_quick (src/tui/mod.rs:3294)\n[index: `main` at line 90 in src/main.rs]",
+      "files": [
+        "src/agent.rs",
+        "src/main.rs",
+        "src/tui/mod.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost calculation to run_tui and emit cost in TokenStats and AgentDone events",
+      "instruction": "src/tui/mod.rs:57 — Add `cost: f64` field to both `UiEvent::TokenStats` and `UiEvent::AgentDone` variants. src/agent.rs:286 — In the TokenStats send, compute `let session_cost = (total_input_tokens as f64 / 1_000_000.0) * config.cost_per_mtok_input.unwrap_or(0.0)` and include `cost: session_cost` in the event. src/agent.rs:442 — In the AgentDone send, compute the same cost formula and include `cost: (total_input_tokens as f64 / 1_000_000.0) * config.cost_per_mtok_input.unwrap_or(0.0)` in the event.\n[index: `UiEvent` at line 57 in src/tui/mod.rs] — constructed by: event_loop (src/tui/mod.rs:1107), execute (src/tools/ask.rs:6), execute_one_tool_call (src/agent.rs:624), generate_plan (src/plan.rs:493)",
+      "files": [
+        "src/tui/mod.rs",
+        "src/agent.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost field to ConversationEntry::TaskComplete",
+      "instruction": "src/tui/mod.rs:134 — Add `cost: f64` field to `ConversationEntry::TaskComplete` variant.\n[index: `ConversationEntry` at line 134 in src/tui/mod.rs] — constructed by: AppState (src/tui/mod.rs:405)",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Handle cost in apply_event for TokenStats, AgentDone, and create TaskComplete",
+      "instruction": "src/tui/mod.rs — Find `fn apply_event` method on AppState. In the TokenStats handler, update `state.stats.cost` (or equivalent) from the `cost` field. In the AgentDone handler, push `ConversationEntry::TaskComplete { input_tokens, output_tokens, tool_calls, compressed_count, cost }` with the cost from the event. Update `state.stats` accordingly.\n[index: `ConversationEntry` at line 134 in src/tui/mod.rs] — constructed by: AppState (src/tui/mod.rs:405)\n[index: `AppState` at line 405 in src/tui/mod.rs] — constructed by: event_loop (src/tui/mod.rs:1107)",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Add cost tracking to SessionStats struct",
+      "instruction": "src/tui/mod.rs — Find struct SessionStats. Add `pub cost: f64` field to track accumulated session cost.\n[index: `SessionStats` at line 56 in src/telemetry.rs] — constructed by: AppState (src/tui/mod.rs:405)",
+      "files": [
+        "src/tui/mod.rs"
+      ],
+      "verify": {
+        "CommandSuccess": "cargo check"
+      },
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Display cost in stats_view and config_view",
+      "instruction": "src/tui/stats_view.rs — Add cost display showing `$X.XX` format using `state.stats.cost` or `state.cost_per_mtok_input` computed from token counts. src/tui/config_view.rs:58-62 — In the Settings section, after model line, add a line showing `cost_per_mtok_input` if configured (e.g. `cost/1M input tokens: $X.XX`).",
+      "files": [
+        "src/tui/stats_view.rs",
+        "src/tui/config_view.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    },
+    {
+      "description": "Handle cost in print_event_plain for non-TUI output",
+      "instruction": "src/main.rs:275 — In the AgentDone handler in print_event_plain, if cost > 0, print the estimated cost line (e.g. `estimated cost: $X.XX`). Add `let mut accum_cost: f64 = 0.0;` near line 238 and update it in the TokenStats handler.\n[index: `main` at line 90 in src/main.rs]\n[index: `print_event_plain` at line 248 in src/main.rs]",
+      "files": [
+        "src/main.rs"
+      ],
+      "verify": "None",
+      "status": "Pending",
+      "tool_budget": 15,
+      "user_annotation": null,
+      "completed_summary": null
+    }
+  ],
+  "current": 0,
+  "status": "Pending",
+  "created_at": 1774395872,
+  "project": "forge"
+}

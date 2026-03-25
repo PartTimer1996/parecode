@@ -127,67 +127,6 @@
       ]
     },
     {
-      "id": "execute-planner-tool-to-symbols-for-cluster",
-      "name": "execute_planner_tool → symbols_for_cluster",
-      "entry_key": "src/plan.rs::execute_planner_tool",
-      "steps": [
-        "src/tools/pie_tool.rs::orient_execute",
-        "src/tools/pie_tool.rs::trace_calls_execute",
-        "src/tools/pie_tool.rs::check_wiring_execute",
-        "src/tools/pie_tool.rs::read_files_execute",
-        "src/flowpaths.rs::split_identifier",
-        "src/tools/pie_tool.rs::pipeline_layer_order",
-        "src/tools/pie_tool.rs::pipeline_layer",
-        "src/tools/pie_tool.rs::extract_field_name_from_sig",
-        "src/flowpaths.rs::build_caller_counts",
-        "src/tools/pie_tool.rs::build_caller_counts",
-        "src/tools/pie_tool.rs::append_calls",
-        "src/tools/pie_tool.rs::resolve_loc",
-        "src/tools/pie_tool.rs::find_field_in_sig",
-        "src/tools/pie_tool.rs::construction_snippet",
-        "src/tools/pie_tool.rs::smart_read",
-        "src/tools/pie_tool.rs::build_compact_summary",
-        "src/tools/pie_tool.rs::expand_compact_sig",
-        "src/tools/pie_tool.rs::symbols_for_cluster"
-      ],
-      "keywords": [
-        "append",
-        "build",
-        "caller",
-        "calls",
-        "check",
-        "cluster",
-        "compact",
-        "construction",
-        "counts",
-        "execute",
-        "expand",
-        "extract",
-        "field",
-        "files",
-        "find",
-        "identifier",
-        "layer",
-        "loc",
-        "name",
-        "order",
-        "orient",
-        "pipeline",
-        "planner",
-        "read",
-        "resolve",
-        "sig",
-        "smart",
-        "snippet",
-        "split",
-        "summary",
-        "symbols",
-        "tool",
-        "trace",
-        "wiring"
-      ]
-    },
-    {
       "id": "run-setup-wizard-to-detect-style",
       "name": "run_setup_wizard → detect_style",
       "entry_key": "src/setup.rs::run_setup_wizard",
@@ -652,6 +591,44 @@
       ]
     },
     {
+      "id": "read-files-execute-to-split-top-level-commas",
+      "name": "read_files_execute → split_top_level_commas",
+      "entry_key": "src/tools/pie_tool.rs::read_files_execute",
+      "steps": [
+        "src/tools/pie_tool.rs::smart_read",
+        "src/tools/pie_tool.rs::build_compact_summary",
+        "src/tools/pie_tool.rs::find_field_in_sig",
+        "src/tools/pie_tool.rs::check_wiring_execute",
+        "src/tools/pie_tool.rs::expand_compact_sig",
+        "src/tools/pie_tool.rs::symbols_for_cluster",
+        "src/tools/pie_tool.rs::construction_snippet",
+        "src/tools/pie_tool.rs::split_top_level_commas"
+      ],
+      "keywords": [
+        "build",
+        "check",
+        "cluster",
+        "commas",
+        "compact",
+        "construction",
+        "execute",
+        "expand",
+        "field",
+        "files",
+        "find",
+        "level",
+        "read",
+        "sig",
+        "smart",
+        "snippet",
+        "split",
+        "summary",
+        "symbols",
+        "top",
+        "wiring"
+      ]
+    },
+    {
       "id": "truncate-to-lines-to-first-line",
       "name": "truncate_to_lines → first_line",
       "entry_key": "src/history.rs::truncate_to_lines",
@@ -760,5 +737,5 @@
       ]
     }
   ],
-  "built_at": 1774393252
+  "built_at": 1774394979
 }

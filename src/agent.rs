@@ -15,12 +15,23 @@ use crate::tui::UiEvent;
 const MAX_TOOL_CALLS: usize = 40;
 
 const SYSTEM_PROMPT_BASE: &str = "You are PareCode, a coding assistant. \
-Complete tasks using the available tools in minimum tool calls. \
-The project index is pre-loaded — the model knows the codebase. Tool order: \
-(1) orient — find all task-relevant symbols with struct signatures and call connections in one call. \
-(2) check_wiring — verify a field exists across the full pipeline before concluding it is wired. \
-(3) read_file — only for imperative logic you must modify. \
-When done, stop.";
+Complete tasks in minimum tool calls. A project index is pre-loaded.\n\
+\n\
+DISCOVERY — run before editing:\n\
+1. orient(query) — struct layouts, line numbers, call connections in ONE call. \
+Skip if attached context already covers the task.\n\
+2. check_wiring(field) — required when adding or modifying any struct field. \
+Returns every struct in the pipeline that needs updating.\n\
+3. read_files([{path, line_range}, ...]) — batch ALL reads into ONE call. \
+Line numbers come from orient. Only read function bodies you will edit — \
+skip types/layouts already shown by orient.\n\
+\n\
+EDITING — immediately after reading:\n\
+edit_file uses hashes from the read result. Hashes expire on edit — \
+use the edit result hashes for follow-up edits to the same region.\n\
+Verify with bash(\"cargo check\") after each change set.\n\
+\n\
+Stop when done.";
 
 /// Quick mode — single API call, no multi-turn loop, minimal context.
 /// Targets < 2k tokens total. No file loading, no session history.
@@ -528,7 +539,7 @@ pub fn build_system_prompt(config: &AgentConfig, git_status: Option<&str>) -> St
 pub fn build_user_message(task: &str, attached: &[String]) -> String {
     let mut s = String::new();
     if !attached.is_empty() {
-        s.push_str("Relevant files (use read_file if you need content):\n");
+        s.push_str("Relevant files (use read_files([{path, line_range}]) if you need content):\n");
         for path in attached {
             s.push_str(&format!("- {path}\n"));
         }
@@ -1048,22 +1059,46 @@ async fn dispatch_tool(
                 None => "[orient: no project graph available for this session]".to_string(),
             }
         }
+        // read_files — batched, graph-aware reads. Preferred over read_file when graph present.
+        // Each entry gets smart_read (struct intercept + call graph overlay).
+        // Per-call DeliveredRanges — no cross-call gating in agent mode (edits invalidate ranges).
+        "read_files" => {
+            match &config.project_graph {
+                Some(g) => {
+                    let mut delivered = tools::pie_tool::DeliveredRanges::new();
+                    tools::pie_tool::read_files_execute(args, g, &mut delivered)
+                }
+                None => {
+                    // No graph — read each entry individually as plain files
+                    let reads = match args["reads"].as_array() {
+                        Some(r) if !r.is_empty() => r.clone(),
+                        _ => return "[read_files: provide a non-empty 'reads' array]".to_string(),
+                    };
+                    let mut parts = Vec::new();
+                    for entry in &reads {
+                        let read_args = serde_json::json!({
+                            "path": entry["path"],
+                            "line_range": entry["line_range"]
+                        });
+                        parts.push(tools::dispatch("read_file", &read_args)
+                            .unwrap_or_else(|e| format!("[read error: {e}]")));
+                    }
+                    parts.join("\n\n---\n\n")
+                }
+            }
+        }
+
         "read_file" => {
-            // When graph is available the model has line numbers from orient and known
-            // locations — require line_range to prevent exploratory full-file reads.
-            // Falls through to normal read when no graph (unindexed project).
             match &config.project_graph {
                 Some(g) => {
                     let has_range = args["line_range"].as_array()
                         .map_or(false, |a| !a.is_empty());
                     if !has_range {
-                        return format!(
-                            "[read_file: full-file reads are blocked — use orient to get line \
-                             numbers, then read_file with line_range=[start, end]. \
-                             Struct signatures and symbol locations are already available \
-                             from orient and the known locations section.]"
-                        );
+                        return "[read_file: use read_files([{path, line_range}]) — \
+                                batch all reads in one call. Get line numbers from orient first.]"
+                            .to_string();
                     }
+                    // Ranged read_file still works via smart_read (hashes + graph overlay)
                     tools::pie_tool::smart_read(args, g)
                 }
                 None => tools::dispatch(name, args).unwrap_or_else(|e| format!("[Tool error: {e}]")),

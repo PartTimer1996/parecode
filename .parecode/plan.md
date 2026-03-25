@@ -1,79 +1,80 @@
-# Plan: run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in  agent.rs::run_tui() agent.rs::AgentConfig  config.rs::Profile config.rs::default_context_tokens() config.rs::ConfigFile config.rs::ResolvedConfig  config_view.rs::draw()
+# Plan: #src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in agent.rs::run_tui() agent.rs::AgentConfig config.rs::Profile config.rs::ConfigFile config.rs::ResolvedConfig config_view.rs::draw()
 
-## Step 1: Add cost_per_mtok_output field to Profile struct in config.rs
+## Step 1: Add cost_per_mtok_output field to Profile struct
 
-src/config.rs:44 — add after cost_per_mtok_input field: `    /// Optional cost per 1M output tokens in USD
-    #[serde(default)]
-    pub cost_per_mtok_output: Option<f64>,
+In src/config.rs:44, after the `cost_per_mtok_input: Option<f64>` field (line 44), add a new field `cost_per_mtok_output: Option<f64>` with doc comment "Optional: cost per 1M output tokens in USD. If set, used instead of 3x input cost." Also update `DEFAULT` impl if one exists.
 
 **Files:** src/config.rs
 
 **Verify:** `cargo check` exits 0
 
-## Step 2: Add cost_per_mtok_output field to ResolvedConfig struct in config.rs
+## Step 2: Add cost_per_mtok_output to ResolvedConfig and wire through resolve()
 
-src/config.rs:187 — add after cost_per_mtok_input field: `    /// Optional cost per 1M output tokens in USD (for cost estimates)
-    pub cost_per_mtok_output: Option<f64>,
+1) In src/config.rs:187, add `pub cost_per_mtok_output: Option<f64>` after `cost_per_mtok_input`. 2) In src/config.rs:242, add `cost_per_mtok_output: base.cost_per_mtok_output,` after the cost_per_mtok_input line. 3) Update any tests in config.rs that construct ResolvedConfig or Profile to include the new field (use `..Default::default()` where possible).
+[index: `Profile` at line 24 in src/config.rs] — constructed by: DEFAULT_CONFIG_TOML (src/config.rs:281)
+[index: `ResolvedConfig` at line 175 in src/config.rs]
 
 **Files:** src/config.rs
 
 **Verify:** `cargo check` exits 0
 
-## Step 3: Add cost fields to AgentConfig struct in agent.rs
+## Step 3: Add cost_per_mtok_output to AppState and wire from ResolvedConfig
 
-src/config.rs:489 — add after auto_commit_prefix field: `    /// Cost per 1M input tokens in USD (from profile config)
-    pub cost_per_mtok_input: Option<f64>,
-    /// Cost per 1M output tokens in USD (from profile config)
-    pub cost_per_mtok_output: Option<f64>,
-
-**Files:** src/agent.rs
-
-**Verify:** `cargo check` exits 0
-
-## Step 4: Add cost_per_mtok_output field to AppState struct in tui/mod.rs
-
-src/tui/mod.rs:425 — add after cost_per_mtok_input field: `      cost_per_mtok_output: Option<f64>,
-
-**Files:** src/tui/mod.rs
-
-**Verify:** `cargo check` exits 0
-
-## Step 5: Pass cost fields to AgentConfig in launch_agent function
-
-src/tui/mod.rs:3244 — add to AgentConfig construction: `        cost_per_mtok_input: resolved.cost_per_mtok_input,
-        cost_per_mtok_output: resolved.cost_per_mtok_output,
-[index: `AgentConfig` at line 474 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1278), launch_agent (src/tui/mod.rs:3210), launch_plan (src/tui/mod.rs:3444), launch_quick (src/tui/mod.rs:3294)
-
-**Files:** src/tui/mod.rs
-
-**Verify:** `cargo check` exits 0
-
-## Step 6: Pass cost fields to AgentConfig in launch_plan function
-
-src/tui/mod.rs:3469 — add to AgentConfig construction: `        cost_per_mtok_input: resolved.cost_per_mtok_input,
-        cost_per_mtok_output: resolved.cost_per_mtok_output,
-[index: `AgentConfig` at line 474 in src/agent.rs] — constructed by: _should_skip_done_turn (src/agent.rs:1278), launch_agent (src/tui/mod.rs:3210), launch_plan (src/tui/mod.rs:3444), launch_quick (src/tui/mod.rs:3294)
-
-**Files:** src/tui/mod.rs
-
-**Verify:** `cargo check` exits 0
-
-## Step 7: Pass cost fields to AppState in event_loop function
-
-src/tui/mod.rs:1118 — find AppState construction and add: `            cost_per_mtok_input: resolved.cost_per_mtok_input,
-            cost_per_mtok_output: resolved.cost_per_mtok_output,
+1) In src/tui/mod.rs, add `cost_per_mtok_output: Option<f64>` field to AppState struct (near line 435 where cost_per_mtok_input is). 2) In src/tui/mod.rs:1119, after `state.cost_per_mtok_input = resolved.cost_per_mtok_input;`, add `state.cost_per_mtok_output = resolved.cost_per_mtok_output;`
 [index: `AppState` at line 405 in src/tui/mod.rs] — constructed by: event_loop (src/tui/mod.rs:1107)
 
 **Files:** src/tui/mod.rs
 
 **Verify:** `cargo check` exits 0
 
-## Step 8: Display cost in stats bar based on token counts and cost rates
+## Step 4: Update cost_str to accept separate input/output rates
 
-src/tui/render.rs:418 — add cost calculation after token_str: calculate input_cost = total_input_tokens * cost_per_mtok_input / 1_000_000, output_cost similarly, then display as cost_str with format like "$X.XX"
+In src/tui/stats_view.rs:56-66, change the `cost_str` signature to `fn cost_str(tokens_in: u32, tokens_out: u32, cost_per_mtok_input: Option<f64>, cost_per_mtok_output: Option<f64>) -> Option<String>`. Use cost_per_mtok_input for input tokens and cost_per_mtok_output (falling back to cost_per_mtok_input * 3.0 if None) for output tokens.
 [index: `cost_str` at line 56 in src/tui/stats_view.rs]
 
-**Files:** src/tui/render.rs
+**Files:** src/tui/stats_view.rs
+
+**Verify:** `cargo check` exits 0
+
+## Step 5: Update all cost_str call sites to pass both rates
+
+In src/tui/stats_view.rs, update every call to `cost_str(...)` to pass `state.cost_per_mtok_input` AND `state.cost_per_mtok_output`. The draw() function at line 181 extracts `let cost = state.cost_per_mtok_input.map(|c| c as f64);` — change this to pass both fields. The aggregate_items function at line 108 takes a `cost_per_mtok` param — change it to take two params (input + output). Update all callers (lines 224, 250, 266, 191).
+[index: `draw` at line 22 in src/tui/git_view.rs]
+[index: `draw` at line 12 in src/tui/plan_view.rs]
+[index: `draw` at line 106 in src/tui/render.rs]
+[index: `cost_str` at line 56 in src/tui/stats_view.rs]
+[index: `draw` at line 177 in src/tui/stats_view.rs]
+
+**Files:** src/tui/stats_view.rs
+
+**Verify:** `cargo check` exits 0
+
+## Step 6: Show cost_per_mtok_input and cost_per_mtok_output in config view
+
+In src/tui/config_view.rs, after the `git_context` kv row (around line 79), add lines showing `cost_per_mtok_input` and `cost_per_mtok_output` from state. Format: `kv("cost/1M in", &state.cost_per_mtok_input.map(|c| format!("${:.2}", c)).unwrap_or_else(|| "(not set)".to_string()))` and similarly for output. Read the AppState fields available in state.
+[index: `kv` at line 202 in src/tui/config_view.rs]
+[index: `AppState` at line 405 in src/tui/mod.rs] — constructed by: event_loop (src/tui/mod.rs:1107)
+
+**Files:** src/tui/config_view.rs
+
+**Verify:** `cargo check` exits 0
+
+## Step 7: Update DEFAULT_CONFIG_TOML examples to mention cost_per_mtok_output
+
+In src/config.rs, in the DEFAULT_CONFIG_TOML string, add a commented-out `cost_per_mtok_output` line after the `cost_per_mtok_input` example (around line 305). E.g. `# cost_per_mtok_output = 15.0  # USD per 1M output tokens`.
+[index: `DEFAULT_CONFIG_TOML` at line 281 in src/config.rs]
+
+**Files:** src/config.rs
+
+**Verify:** `cargo check` exits 0
+
+## Step 8: Update config_view.rs draw to show cost settings from resolved config
+
+In src/tui/config_view.rs, ensure both cost_per_mtok_input and cost_per_mtok_output values are displayed in the Settings section. The AppState already has these fields — display them after the git_context line (around line 80) using the kv helper.
+[index: `kv` at line 202 in src/tui/config_view.rs]
+[index: `AppState` at line 405 in src/tui/mod.rs] — constructed by: event_loop (src/tui/mod.rs:1107)
+
+**Files:** src/tui/config_view.rs
 
 **Verify:** `cargo check` exits 0
 

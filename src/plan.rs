@@ -520,11 +520,11 @@ pub async fn generate_plan(
     let mut messages: Vec<Message> = Vec::new();
     messages.extend(pie_ctx.injection_messages);
 
-    // Task message — symbol preload first (if any), then orientation, then task.
+    // Task message — task first so the model anchors on the goal before reading context.
+    // Context (symbol preload, orientation) follows as supporting material.
     let focus_files = pie_ctx.focus_files;
-    let mut task_content = String::new();
+    let mut task_content = format!("Task: {task}\n\n");
 
-    // Inject pre-loaded symbol source code at the top — these collapse the exploration phase.
     let symbol_preload = crate::pie::build_symbol_preload(attached_symbols);
     if !symbol_preload.is_empty() {
         task_content.push_str(&symbol_preload);
@@ -532,7 +532,6 @@ pub async fn generate_plan(
     }
 
     task_content.push_str(&pie_ctx.user_prefix);
-    task_content.push_str(&format!("Task: {task}"));
     messages.push(Message {
         role: "user".to_string(),
         content: MessageContent::Text(task_content),

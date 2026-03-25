@@ -94,33 +94,33 @@ pub fn all_definitions() -> Vec<Tool> {
 /// When `has_graph` is true, `orient` leads the list (replaces find_symbol + trace_calls).
 /// orient returns struct signatures, locations, and call connections in one call.
 ///
-/// Core tools (always): read_file, edit_file, bash, ask_user
-/// Conditional: orient + check_wiring (graph), write_file (early), patch_file (late)
+/// When graph present: orient → check_wiring → read_files → edit_file → bash
+/// When no graph:      read_file → edit_file → bash  (original behaviour)
 ///
 /// Saves ~400-800 tokens/turn compared to sending all tools every turn.
 pub fn tools_for_turn(turn: usize, has_graph: bool) -> Vec<Tool> {
     let thresholds = TurnThresholds::default();
     let mut t: Vec<Tool> = Vec::new();
 
-    // Graph tools first when available — high salience position drives usage.
-    // orient replaces find_symbol + trace_calls: one call returns everything needed.
     if has_graph {
+        // Discovery-first ordering — position drives model behaviour.
+        // orient + check_wiring are free (in-memory graph), read_files is batched.
         t.push(def(pie_tool::orient_definition()));
         t.push(def(pie_tool::check_wiring_definition()));
+        t.push(def(pie_tool::read_files_definition()));
+    } else {
+        // No graph — fall back to single-file reads
+        t.push(def(read::definition()));
     }
 
-    t.push(def(ask::definition()));    // clarify before spiralling into reads
-    t.push(def(read::definition()));
+    t.push(def(ask::definition()));
     t.push(def(edit::definition()));
     t.push(def(bash::definition()));
 
-    // Exploration phase: navigation + file creation
-    // When graph is available, list_files is redundant on early turns
     if turn <= thresholds.exploration_end {
         t.push(def(write::definition()));
     }
 
-    // Mutation phase: multi-hunk diffs become useful after reading files
     if turn >= thresholds.mutation_start {
         t.push(def(patch::definition()));
     }

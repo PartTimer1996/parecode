@@ -36,12 +36,14 @@ pub struct AttachedSymbol {
     pub kind: String,  // "fn", "struct", "enum", "trait"
 }
 
-/// Read raw source lines for a symbol (capped at 150 lines).
+/// Read raw source lines for a symbol — full range, no cap.
+/// The user attached this symbol deliberately; truncating it silently causes
+/// the gating to block re-reads of the missing portion, wasting exploration turns.
 fn read_symbol_source(file: &str, start: usize, end: usize) -> Option<String> {
     let content = std::fs::read_to_string(file).ok()?;
     let lines: Vec<&str> = content.lines().collect();
     let s = start.saturating_sub(1);
-    let e = end.min(lines.len()).min(s + 150);
+    let e = end.min(lines.len());
     if s >= e { return None; }
     Some(lines[s..e].join("\n"))
 }

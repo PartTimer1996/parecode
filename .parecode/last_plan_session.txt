@@ -1,19 +1,226 @@
 === PLAN SESSION ===
-Task: run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in  agent.rs::run_tui() agent.rs::AgentConfig  config.rs::Profile config.rs::default_context_tokens() config.rs::ConfigFile config.rs::ResolvedConfig  config_view.rs::draw()
+Task: #src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in agent.rs::run_tui() agent.rs::AgentConfig config.rs::Profile config.rs::ConfigFile config.rs::ResolvedConfig config_view.rs::draw()
 
 
 ╔═══ TURN 1  ═══╗
-The user wants to add cost tracking to the run_tui function. Currently it tracks input/output tokens, but they want to also show the actual cost based on the model's pricing.
+The task is about adding cost tracking to the TUI. Let me analyze what's needed:
 
-Looking at the context map:
-- `AgentConfig` has `context_tokens` but no cost info
-- `Profile` has `cost_per_mtok_input` which is exactly what we need (optional cost per 1M input tokens)
-- `ResolvedConfig` also has `cost_per_mtok_input`
-- `run_tui` tracks `total_input_tokens` and `total_output_tokens`
+1. **Profile** already has `cost_per_mtok_input: Option<f64>` (line 44)
+2. **ResolvedConfig** already has `cost_per_mtok_input: Option<f64>` (line 187)
+3. **AgentConfig** does NOT have `cost_per_mtok_input` — it needs to be added
+4. **UiEvent::TokenStats** needs to include cost data
+5. **UiEvent::AgentDone** needs to include cost data
+6. The TUI display (config_view, stats_view) needs to show cost
 
-I need to check if there's also output token cost - looking at Profile, I only see `cost_per_mtok_input`. The user will probably need `cost_per_mtok_output` too.
 
-Let me use check_wiring to see what fields exist for cost tracking, then figure out what needs to be added.
+7. I should also track output token costs, not just input costs, so I need to add `cost_per_mtok_output` to the Profile and propagate it through the config chain.
+
+◆ orient {"query": "UiEvent TokenStats AgentDone 
+→ # orient: "UiEvent TokenStats AgentDone cost_per_mtok"
+
+## Types (pipeline order)
+[src/agent.rs — lines 474-508] ([agent]  struct AgentConfig — orient result)
+  struct AgentConfig
+  {
+      verbose: bool,
+      dry_run: bool,
+      context_tokens: u32,
+      _profile_name: String,
+      _model: String,
+      _show_timestamps: bool,
+      mcp: Arc<McpClient>,
+      hooks: Arc<HookConfig>,
+      hooks_enabled: bool,
+      auto_commit: bool,
+      auto_commit_prefix: String,
+      git_context: bool,
+      project_graph: Option<std::sync::Arc<crate::pie::ProjectGraph>>,
+      project_narrative: Option<std::sync::Arc<crate::narrative::ProjectNarrative>>,
+      flow_paths: Option<std::sync::Arc<crate::flowpaths::FlowPathIndex>>,
+      attached_symbols: Vec<crate::pie::AttachedSymbol>,
+  }
+  // constructed by: _should_skip_done_turn (src/agent.rs:1278), launch_agent (src/tui/mod.rs:3210), launch_plan (src/tui/mod.rs:3444), launch_quick (src/tui/mod.rs:3294)
+  // Layout authoritative — do not re-read this range.
+
+[src/tui/mod.rs — lines 57-133] ([ui]     enum UiEvent — orient result)
+  enum UiEvent
+  {
+      Chunk(String),
+      ThinkingChunk(String),
+      ToolCall { name: String, args_summary: String },
+      ToolResult { summary: String },
+      CacheHit { path: String, lines: usize },
+      LoopWarning { tool_name: String },
+      BudgetWarning,
+      ToolBudgetHit { limit: usize },
+      AgentDone { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize, duration_secs: u32, cwd: String },
+      AgentError(String),
+      TokenStats { _input: u32, _output: u32, total_input: u32, total_output: u32, tool_calls: usize },
+      ContextUpdate { used: usize, total: u32, compressed: bool },
+      PlanReady(crate::plan::Plan),
+      PlanGenerateFailed(String),
+      PlanStepStart { index: usize, total: usize, desc: String },
+      PlanStepDone { index: usize, passed: bool, error: Option<String> },
+      PlanComplete { total: usize },
+      PlanFailed { step: usize, error: String },
+      HookOutput { event: String, output: String, exit_code: i32 },
+      GitChanges { stat: String, checkpoint_hash: Option<String>, files_changed: usize },
+      GitAutoCommit { message: String },
+      GitError(String),
+      SystemMsg(String),
+      AskUser { question: String, reply_tx: tokio::sync::oneshot::Sender<String> },
+      IndexReady { graph: crate::pie::ProjectGraph, narrative: Option<crate::narrative::ProjectNarrative> },
+  }
+  // constructed by: event_loop (src/tui/mod.rs:1107), execute (src/tools/ask.rs:6), execute_one_tool_call (src/agent.rs:624), generate_plan (src/plan.rs:493), handle_submit (src/tui/mod.rs:2615), launch_plan (src/tui/mod.rs:3444)
+  // Layout authoritative — do not re-read this range.
+
+[src/telemetry.rs — lines 56-84] ([core]   struct SessionStats — orient result)
+  struct SessionStats
+  {
+      tasks_completed: usize,
+      total_input_tokens: u32,
+      total_output_tokens: u32,
+      total_tool_calls: usize,
+      total_compressed: usize,
+      budget_enforcements: usize,
+      peak_context_pct: u32,
+      records: Vec<TaskRecord>,
+      inflight_input_tokens: u32,
+      inflight_output_tokens: u32,
+      inflight_tool_calls: usize,
+      last_flush_ts: i64,
+  }
+  // constructed by: AppState (src/tui/mod.rs:405)
+  // Layout authoritative — do not re-read this range.
+
+[src/client.rs — lines 113-120] ([core]   struct UsageStats — orient result)
+  struct UsageStats
+  {
+      prompt_tokens: Option<u32>,
+      completion_tokens: Option<u32>,
+  }
+  // Layout authoritative — do not re-read this range.
+
+[src/config.rs — lines 24-62] ([config] struct Profile — orient result)
+  struct Profile
+  {
+      endpoint: String,
+      model: String,
+      context_tokens: u32,
+      api_key: Option<String>,
+      planner_model: Option<String>,
+      mcp_servers: Vec<McpServerConfig>,
+      cost_per_mtok_input: Option<f64>,
+      hooks: crate::hooks::HookConfig,
+      hooks_disabled: bool,
+      auto_commit: bool,
+      auto_commit_prefix: String,
+      git_context: bool,
+  }
+  // constructed by: DEFAULT_CONFIG_TOML (src/config.rs:281)
+  // Layout authoritative — do not re-read this range.
+
+[src/config.rs — lines 175-205] ([config] struct ResolvedConfig — orient result)
+  struct ResolvedConfig
+  {
+      endpoint: String,
+      model: String,
+      context_tokens: u32,
+      api_key: Option<String>,
+      profile_name: String,
+      planner_model: Option<String>,
+      mcp_servers: Vec<McpServerConfig>,
+      cost_per_mtok_input: Option<f64>,
+      hooks: crate::hooks::HookConfig,
+      hooks_disabled: bool,
+      auto_commit: bool,
+      auto_commit_prefix: String,
+      git_context: bool,
+      available_hooks: Vec<String>,
+      active_hooks: Option<String>,
+      active_hook_config: crate::hooks::HookConfig,
+  }
+  // Layout authoritative — do not re-read this range.
+
+[src/setup.rs — lines 55-64] ([init]   struct ProfileForm — orient result)
+  struct ProfileForm
+  {
+      profile_name: String,
+      endpoint: String,
+      model: String,
+      context_tokens: u32,
+      api_key: Option<String>,
+      key_source: Option<String>,
+  }
+  // constructed by: PROFILE_EXAMPLES (src/setup.rs:687), wizard_cloud_api (src/setup.rs:327), wizard_custom_endpoint (src/setup.rs:412), wizard_local_ollama (src/setup.rs:357)
+  // Layout authoritative — do not re-read this range.
+
+[src/setup.rs — lines 231-239] ([init]   struct ProviderPreset — orient result)
+  struct ProviderPreset
+  {
+      profile_name: &'static str,
+      endpoint: &'static str,
+      model: &'static str,
+      context_tokens: u32,
+      env_var: &'static str,
+      display_name: &'static str,
+  }
+  // constructed by: PRESETS (src/setup.rs:240)
+  // Layout authoritative — do not re-read this range.
+
+[src/plan.rs — lines 173-182] ([agent]  struct PlanMetrics — orient result)
+  struct PlanMetrics
+  {
+      total_input_tokens: u32,
+      total_output_tokens: u32,
+      turns: usize,
+      tool_calls: HashMap<String, usize>,
+      elapsed_secs: u32,
+  }
+  // constructed by: generate_plan (src/plan.rs:493)
+  // Layout authoritative — do not re-read this range.
+
+[src/tui/mod.rs — lines 260-272] ([ui]     enum Tab — orient result)
+  enum Tab
+  {
+      Chat,
+      Config,
+      Stats,
+      Plan,
+      Git,
+  }
+  // Layout authoritative — do not re-read this range.
+
+Struct/enum layouts above are [file — lines X-Y] blocks = completed reads.
+Do NOT call read_files for any struct range shown above.
+
+## Key functions
+[init]   fn print_event_plain (src/main.rs:248-320)
+
+[agent]  fn _should_skip_done_turn (src/agent.rs:1278-1735)
+  calls: build_user_message (src/agent.rs:528), build_system_prompt (src/agent.rs:509), strip_cot_from_last_assistant (src/agent.rs:831), execute_one_tool_call (src/agent.rs:624)
+  constructs: AgentConfig, ThinkParser, crate::client::ToolCall, ToolCall, FileCache, History, LoopDetector
+
+[ui]     fn event_loop (src/tui/mod.rs:1107-1505)
+  calls: load_sidebar_entries (src/tui/mod.rs:3706), prune_old_sessions (src/sessions.rs:165), cwd_str (src/tui/mod.rs:3748), open_session (src/sessions.rs:74), resolve_hooks (src/tui/mod.rs:3190), run_hook (src/hooks.rs:197), run_project_init (src/init.rs:17), save_conventions (src/init.rs:68), check_for_update (src/setup.rs:548), draw (src/tui/config_view.rs:18), draw_splash (src/tui/render.rs:28)
+  constructs: McpClient, AppState, UiEvent::HookOutput, Client
+
+[ui]     fn cost_str (src/tui/stats_view.rs:56-69)
+
+[ui]     fn launch_agent (src/tui/mod.rs:3210-3293)
+  calls: resolve_hooks_with_state (src/tui/mod.rs:3197)
+  constructs: Client, AgentConfig
+
+[ui]     fn draw_stats_bar (src/tui/render.rs:385-484)
+
+[core]   fn run_task_done_hooks (src/hooks.rs:263-638)
+  calls: run_hook (src/hooks.rs:197), run_edit_hooks (src/hooks.rs:248)
+  constructs: HookConfig
+
+[config] fn default_context_tokens (src/config.rs:63-66)
+
+Suggested: check_wiring(field="stats") to verify full pipeline propagation.
+
 
 
 ◆ check_wiring {"field": "cost_per_mtok"}
@@ -64,259 +271,23 @@ Gaps — structs needing 'cost_per_mtok':
 
 
 ╔═══ TURN 2  ═══╗
-The check_wiring shows:
-1. `Profile` has `cost_per_mtok_input: Option<f64>` - this exists
-2. `ResolvedConfig` has `cost_per_mtok_input: Option<f64>` - this exists
-3. `AppState` in tui/mod.rs also has `cost_per_mtok_input: Option<f64>` - this exists
+Let me now read the specific files I need to understand for the cost tracking feature:
 
-So input cost is already available in the pipeline! But I need to check if there's output cost too. The user probably wants both input and output costs.
+1. `src/tui/mod.rs` - lines around `launch_agent` to see how AgentConfig is constructed
+2. `src/tui/stats_view.rs` - to see the current stats display
+3. `src/tui/render.rs` - the `draw_stats_bar` function to see how token stats are shown
 
-Let me check for output token cost field:
+Let me also check the `cost_str` function in stats_view.rs since it was mentioned.
 
-
-◆ check_wiring {"field": "cost_per_mtok_output"}
-→ No structs found with exact 'cost_per_mtok_output' field.
-Try find_symbol(name="cost_per_mtok_output") to locate it as a top-level symbol.
-
-╔═══ TURN 3  ═══╗
-No `cost_per_mtok_output` field exists. The task needs to:
-1. Add output cost field to the config structs
-2. Pass cost info through to AgentConfig  
-3. Calculate and display cost in run_tui / UI
-
-Let me check how stats are displayed and how the config flows to see what else needs updating:
-
-
-
-◆ orient {"query": "stats view SessionStats token
-→ # orient: "stats view SessionStats token display"
-
-## Types (pipeline order)
-[src/tui/mod.rs — lines 342-347] ([ui]     struct SessionBrowserState — orient result)
-  struct SessionBrowserState
-  {
-      entries: Vec<(String, std::path::PathBuf, usize, String)>,
-      selected: usize,
-  }
-  // Layout authoritative — do not re-read this range.
-
-[src/sessions.rs — lines 38-53] ([core]   struct Session — orient result)
-  struct Session
-  {
-      id: String,
-      _cwd: String,
-      _turns: Vec<ConversationTurn>,
-      active_turn: usize,
-      path: PathBuf,
-  }
-  // constructed by: new_session (src/sessions.rs:187), open_session (src/sessions.rs:74)
-  // Layout authoritative — do not re-read this range.
-
-[src/telemetry.rs — lines 56-84] ([core]   struct SessionStats — orient result)
-  struct SessionStats
-  {
-      tasks_completed: usize,
-      total_input_tokens: u32,
-      total_output_tokens: u32,
-      total_tool_calls: usize,
-      total_compressed: usize,
-      budget_enforcements: usize,
-      peak_context_pct: u32,
-      records: Vec<TaskRecord>,
-      inflight_input_tokens: u32,
-      inflight_output_tokens: u32,
-      inflight_tool_calls: usize,
-      last_flush_ts: i64,
-  }
-  // constructed by: AppState (src/tui/mod.rs:405)
-  // Layout authoritative — do not re-read this range.
-
-[src/client.rs — lines 113-120] ([core]   struct UsageStats — orient result)
-  struct UsageStats
-  {
-      prompt_tokens: Option<u32>,
-      completion_tokens: Option<u32>,
-  }
-  // Layout authoritative — do not re-read this range.
-
-[src/tui/mod.rs — lines 373-383] ([ui]     struct PlanReviewState — orient result)
-  struct PlanReviewState
-  {
-      plan: Plan,
-      selected: usize,
-      annotating: bool,
-      annotation_input: String,
-  }
-  // constructed by: AppState (src/tui/mod.rs:405)
-  // Layout authoritative — do not re-read this range.
-
-[src/config.rs — lines 175-205] ([config] struct ResolvedConfig — orient result)
-  struct ResolvedConfig
-  {
-      endpoint: String,
-      model: String,
-      context_tokens: u32,
-      api_key: Option<String>,
-      profile_name: String,
-      planner_model: Option<String>,
-      mcp_servers: Vec<McpServerConfig>,
-      cost_per_mtok_input: Option<f64>,
-      hooks: crate::hooks::HookConfig,
-      hooks_disabled: bool,
-      auto_commit: bool,
-      auto_commit_prefix: String,
-      git_context: bool,
-      available_hooks: Vec<String>,
-      active_hooks: Option<String>,
-      active_hook_config: crate::hooks::HookConfig,
-  }
-  // Layout authoritative — do not re-read this range.
-
-[src/config.rs — lines 24-62] ([config] struct Profile — orient result)
-  struct Profile
-  {
-      endpoint: String,
-      model: String,
-      context_tokens: u32,
-      api_key: Option<String>,
-      planner_model: Option<String>,
-      mcp_servers: Vec<McpServerConfig>,
-      cost_per_mtok_input: Option<f64>,
-      hooks: crate::hooks::HookConfig,
-      hooks_disabled: bool,
-      auto_commit: bool,
-      auto_commit_prefix: String,
-      git_context: bool,
-  }
-  // constructed by: DEFAULT_CONFIG_TOML (src/config.rs:281)
-  // Layout authoritative — do not re-read this range.
-
-[src/setup.rs — lines 55-64] ([init]   struct ProfileForm — orient result)
-  struct ProfileForm
-  {
-      profile_name: String,
-      endpoint: String,
-      model: String,
-      context_tokens: u32,
-      api_key: Option<String>,
-      key_source: Option<String>,
-  }
-  // constructed by: PROFILE_EXAMPLES (src/setup.rs:687), wizard_cloud_api (src/setup.rs:327), wizard_custom_endpoint (src/setup.rs:412), wizard_local_ollama (src/setup.rs:357)
-  // Layout authoritative — do not re-read this range.
-
-[src/setup.rs — lines 231-239] ([init]   struct ProviderPreset — orient result)
-  struct ProviderPreset
-  {
-      profile_name: &'static str,
-      endpoint: &'static str,
-      model: &'static str,
-      context_tokens: u32,
-      env_var: &'static str,
-      display_name: &'static str,
-  }
-  // constructed by: PRESETS (src/setup.rs:240)
-  // Layout authoritative — do not re-read this range.
-
-[src/plan.rs — lines 173-182] ([agent]  struct PlanMetrics — orient result)
-  struct PlanMetrics
-  {
-      total_input_tokens: u32,
-      total_output_tokens: u32,
-      turns: usize,
-      tool_calls: HashMap<String, usize>,
-      elapsed_secs: u32,
-  }
-  // constructed by: generate_plan (src/plan.rs:493)
-  // Layout authoritative — do not re-read this range.
-
-Struct/enum layouts above are [file — lines X-Y] blocks = completed reads.
-Do NOT call read_files for any struct range shown above.
-
-## Key functions
-[ui]     fn draw_session_browser (src/tui/overlays.rs:230-352)
-
-[ui]     fn load_sidebar_session (src/tui/mod.rs:3665-3705)
-  calls: load_session_turns (src/sessions.rs:125), load_sidebar_entries (src/tui/mod.rs:3706)
-  constructs: sessions::Session
-
-[ui]     fn draw_stats_bar (src/tui/render.rs:385-484)
-
-[core]   fn new_session (src/sessions.rs:187-212)
-  calls: sessions_dir (src/sessions.rs:54), cwd_basename (src/sessions.rs:64)
-  constructs: Session
-
-[core]   fn open_session (src/sessions.rs:74-113)
-  calls: sessions_dir (src/sessions.rs:54), find_latest_for_cwd (src/sessions.rs:213), load_session_turns (src/sessions.rs:125), cwd_basename (src/sessions.rs:64)
-  constructs: Session
-
-[core]   fn load_session_turns (src/sessions.rs:125-136)
-
-[core]   fn display_summarise (src/history.rs:70-97)
-  calls: first_line (src/history.rs:312), summarise (src/history.rs:100)
-
-[config] fn default_context_tokens (src/config.rs:63-66)
-
-Suggested: check_wiring(field="task_preview") to verify full pipeline propagation.
-
-
-╔═══ TURN 4  ═══╗
-Now I understand the pipeline:
-- `Profile` has `cost_per_mtok_input` → needs output cost too
-- `ResolvedConfig` has `cost_per_mtok_input` → needs output cost too  
-- `AgentConfig` has NO cost fields → needs both input and output
-- `AppState` already has `cost_per_mtok_input` → needs output cost
-- `SessionStats` tracks tokens → could calculate cost there
-
-Let me trace how cost flows from config → agent → UI to see what's missing:
-
-
-◆ check_wiring {"field": "cost_per_mtok_input", "struct
-→ check_wiring: 'cost_per_mtok_input'
-
-[ui]     struct AppState (src/tui/mod.rs:405)
-  layout: { entries: Vec<ConversationEntry>, input_box: InputBox, input: String, cursor: usize, mode: Mode, scroll: usize, profile: String, model: String, context_tokens: u32, ctx_used: usize, ctx_compressed: bool, show_timestamps: bool, palette_query: String, file_picker: Option<FilePickerState>, slash_complete_selected: usize, cancel_tx: Option<tokio::sync::oneshot::Sender<()>>, attached_files: Vec<AttachedFile>, focused_chip: Option<usize>, spinner_tick: u32, conversation_turns: Vec<ConversationTurn>, session: Option<Session>, collecting_response: String, collecting_tools: Vec<String>, session_resumed: bool, session_browser: Option<SessionBrowserState>, plan_review: Option<PlanReviewState>, plan_running_step: usize, mcp: Arc<McpClient>, stats: SessionStats, current_task_preview: String, cost_per_mtok_input: Option<f64>, last_stream_text: String, stream_in_think: bool, hooks_enabled: bool, sidebar_visible: bool, sidebar_focused: bool, sidebar_selected: usize, sidebar_scroll: usize, sidebar_entries: Vec<SidebarEntry>, active_tab: Tab, plan_ever_active: bool, stats_scroll: usize, telemetry_history: Vec<crate::telemetry::TaskRecord>, endpoint: String, hooks_config: crate::hooks::HookConfig, hooks_disabled_profile: bool, mcp_server_names: Vec<String>, auto_commit: bool, auto_commit_prefix: String, git_context_enabled: bool, git_available: bool, last_checkpoint_hash: Option<String>, git_stat_content: String, git_diff_content: String, diff_overlay_scroll: usize, diff_overlay_visible: bool, git_checkpoints: Vec<crate::git::CheckpointInfo>, undo_picker_selected: usize, wants_editor: bool, config_scroll: usize, profile_picker_selected: usize, profile_picker_entries: Vec<(String, String)>, pending_ask_reply: Option<tokio::sync::oneshot::Sender<String>>, active_hook_preset: Option<String>, available_hook_presets: Vec<String>, hook_wizard: Option<HookWizardState>, symbol_picker: Option<FileSymbolPickerState>, attached_symbols: Vec<crate::pie::AttachedSymbol>, project_graph: Option<crate::pie::ProjectGraph>, project_narrative: Option<crate::narrative::ProjectNarrative>, flow_paths: Option<crate::flowpaths::FlowPathIndex>, context_weights: crate::context_weights::ContextWeights, file_cache: std::sync::Arc<tokio::sync::Mutex<crate::cache::FileCache>> }
-  has: cost_per_mtok_input: Option<f64>
-  constructed by:
-    event_loop (src/tui/mod.rs:1118)
-  fns in file: gather_files (line 297), slash_filtered (line 1048), run (line 1074), event_loop (line 1107), handle_key (line 1506)
-
-Gaps — structs needing 'cost_per_mtok_input':
-  [agent]  AgentConfig (src/agent.rs:474)
-    constructed by: _should_skip_done_turn (src/agent.rs:1330)
-      verbose: false,
-      dry_run: false,
-      context_tokens: 8000,
-      _profile_name: String::new(),
-      … +11 more fields
-    constructed by: launch_agent (src/tui/mod.rs:3233)
-      context_tokens: resolved.context_tokens,
-      _profile_name: resolved.profile_name.clone(),
-      _model: resolved.model.clone(),
-      _show_timestamps: state.show_timestamps,
-      … +10 more fields
-    constructed by: launch_plan (src/tui/mod.rs:3458)
-      context_tokens: resolved.context_tokens,
-      _profile_name: resolved.profile_name.clone(),
-      _model: resolved.model.clone(),
-      _show_timestamps: state.show_timestamps,
-      … +10 more fields
-
-
-╔═══ TURN 5  ═══╗
-Now I see the gaps clearly:
-- `AgentConfig` is MISSING cost fields (needs both input and output cost)
-- The pipeline: Profile → ResolvedConfig → AgentConfig (but AgentConfig doesn't receive cost!)
-- AppState already has cost_per_mtok_input but needs output cost too
-
-Let me check where AgentConfig is constructed and where stats are displayed:
-
-
-
-◆ read_files src/tui/mod.rs[3225–3260], src/tui/mod.rs[3450–3485], src/tui/render.rs[380–430]
-→ [Graph overlay for src/tui/mod.rs:3225-3260]
+◆ read_files src/tui/mod.rs[3210–3293], src/tui/stats_view.rs[1–120], src/tui/render.rs[385–484]
+→ [Graph overlay for src/tui/mod.rs:3210-3293]
+fn resolve_hooks_with_state (src/tui/mod.rs:3197-3209):
+  called by: src/tui/mod.rs::launch_agent, src/tui/mod.rs::launch_plan
 fn launch_agent (src/tui/mod.rs:3210-3293):
   calls: resolve_hooks_with_state (src/tui/mod.rs:3197)
   called by: src/tui/mod.rs::handle_submit
+fn launch_quick (src/tui/mod.rs:3294-3362):
+  called by: src/tui/mod.rs::handle_submit, src/tui/mod.rs::handle_key
 Key types in this file:
   enum UiEvent (line 57): { Chunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult { summary: String }, CacheHit { path: String, lines: usize }, LoopWarning { tool_name: String }, BudgetWarning, ToolBudgetHit { limit: usize }, AgentDone { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize, duration_secs: u32, cwd: String }, AgentError(String), TokenStats { _input: u32, _output: u32, total_input: u32, total_output: u32, tool_calls: usize }, ContextUpdate { used: usize, total: u32, compressed: bool }, PlanReady(crate::plan::Plan), PlanGenerateFailed(String), PlanStepStart { index: usize, total: usize, desc: String }, PlanStepDone { index: usize, passed: bool, error: Option<String> }, PlanComplete { total: usize }, PlanFailed { step: usize, error: String }, HookOutput { event: String, output: String, exit_code: i32 }, GitChanges { stat: String, checkpoint_hash: Option<String>, files_changed: usize }, GitAutoCommit { message: String }, GitError(String), SystemMsg(String), AskUser { question: String, reply_tx: tokio::sync::oneshot::Sender<String> }, IndexReady { graph: crate::pie::ProjectGraph, narrative: Option<crate::narrative::ProjectNarrative> } }
   enum ConversationEntry (line 134): { UserMessage(String), AssistantChunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult(String), CacheHit { path: String, lines: usize }, SystemMsg(String), HookOutput { event: String, output: String, success: bool }, TaskComplete { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize }, PlanCard, GitNotification { files_changed: usize, _checkpoint_hash: Option<String> }, AskUser(String), AskReply(String) }
@@ -326,8 +297,23 @@ Key types in this file:
   struct FileSymbolPickerState (line 210): { file: String, query: String, selected: usize, all_symbols: Vec<crate::pie::AttachedSymbol>, picked: Vec<crate::pie::AttachedSymbol> }
 [/Graph overlay]
 
-[src/tui/mod.rs — lines 3225-3260 of 3825]
+[src/tui/mod.rs — lines 3210-3293 of 3825]
 
+3210 [7w76] | fn launch_agent(
+3211 [7ua9] |     task: String,
+3212 [66s0] |     state: &mut AppState,
+3213 [o2fz] |     resolved: &ResolvedConfig,
+3214 [j5r9] |     verbose: bool,
+3215 [ln6y] |     dry_run: bool,
+3216 [dnai] |     ui_tx: mpsc::UnboundedSender<UiEvent>,
+3217 [84aq] | ) -> Result<()> {
+3218 [wby5] |     state.push(ConversationEntry::UserMessage(task.clone()));
+3219 [vf5f] |     state.current_task_preview = task.lines().next().unwrap_or(&task).chars().take(80).collect();
+3220 [j7a0] |     state.mode = Mode::AgentRunning;
+3221 [d9kp] |     state.ctx_used = 0;
+3222 [tzjk] |     state.ctx_compressed = false;
+3223 [ntfp] | 
+3224 [83ht] |     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
 3225 [7acb] |     state.cancel_tx = Some(cancel_tx);
 3226 [ntfp] | 
 3227 [5l3v] |     // Build client + config
@@ -364,80 +350,203 @@ Key types in this file:
 3258 [7e2h] |     let active_limit = state.session.as_ref().map(|s| s.active_turn + 1).unwrap_or(usize::MAX);
 3259 [cgj3] |     let prior_turns: Vec<crate::sessions::ConversationTurn> = state.conversation_turns
 3260 [wwaw] |         .iter()
+3261 [dk9e] |         .filter(|t| t.turn_index < active_limit)
+3262 [z2ux] |         .cloned()
+3263 [1qa3] |         .collect();
+3264 [ntfp] | 
+3265 [50v2] |     // Reset collectors for this new run
+3266 [nftt] |     state.collecting_response.clear();
+3267 [3n7z] |     state.collecting_tools.clear();
+3268 [4sls] |     // Clear attached files and symbols — consumed into the first user message.
+3269 [bwx1] |     state.attached_files.clear();
+3270 [cykv] |     state.attached_symbols.clear();
+3271 [1n40] |     state.focused_chip = None;
+3272 [ntfp] | 
+3273 [aye1] |     let file_cache = state.file_cache.clone();
+3274 [hxsc] |     tokio::spawn(async move {
+3275 [5gc1] |         tokio::select! {
+3276 [73cn] |             result = crate::agent::run_tui(&task, &client, &agent_config, attached, prior_turns, ui_tx.clone(), file_cache) => {
+3277 [5m3j] |                 if let Err(e) = result {
+3278 [o9dy] |                     let _ = ui_tx.send(UiEvent::AgentError(e.to_string()));
+3279 [m5m0] |                 }
+3280 [4q3c] |             }
+3281 [068v] |             _ = async move {
+3282 [rjsy] |                 let _ = cancel_rx.await;
+3283 [zxpi] |             } => {
+3284 [d1go] |                 let _ = ui_tx.send(UiEvent::AgentError("cancelled".to_string()));
+3285 [4q3c] |             }
+3286 [7xag] |         }
+3287 [m59k] |     });
+3288 [ntfp] | 
+3289 [yat5] |     Ok(())
+3290 [ok2w] | }
+3291 [ntfp] | 
+3292 [vkt1] | // ── Quick mode launcher ───────────────────────────────────────────────────────
+3293 [ntfp] | 
 
 
 ---
 
-[Graph overlay for src/tui/mod.rs:3450-3485]
-fn launch_plan (src/tui/mod.rs:3444-3664):
-  calls: resolve_hooks_with_state (src/tui/mod.rs:3197), execute_step (src/plan.rs:872), verify_step (src/plan.rs:1044), summarise_completed_step (src/plan.rs:910), run_hook (src/hooks.rs:197), save_plan (src/plan.rs:200)
-  called by: src/tui/mod.rs::handle_key
-Key types in this file:
-  enum UiEvent (line 57): { Chunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult { summary: String }, CacheHit { path: String, lines: usize }, LoopWarning { tool_name: String }, BudgetWarning, ToolBudgetHit { limit: usize }, AgentDone { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize, duration_secs: u32, cwd: String }, AgentError(String), TokenStats { _input: u32, _output: u32, total_input: u32, total_output: u32, tool_calls: usize }, ContextUpdate { used: usize, total: u32, compressed: bool }, PlanReady(crate::plan::Plan), PlanGenerateFailed(String), PlanStepStart { index: usize, total: usize, desc: String }, PlanStepDone { index: usize, passed: bool, error: Option<String> }, PlanComplete { total: usize }, PlanFailed { step: usize, error: String }, HookOutput { event: String, output: String, exit_code: i32 }, GitChanges { stat: String, checkpoint_hash: Option<String>, files_changed: usize }, GitAutoCommit { message: String }, GitError(String), SystemMsg(String), AskUser { question: String, reply_tx: tokio::sync::oneshot::Sender<String> }, IndexReady { graph: crate::pie::ProjectGraph, narrative: Option<crate::narrative::ProjectNarrative> } }
-  enum ConversationEntry (line 134): { UserMessage(String), AssistantChunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult(String), CacheHit { path: String, lines: usize }, SystemMsg(String), HookOutput { event: String, output: String, success: bool }, TaskComplete { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize }, PlanCard, GitNotification { files_changed: usize, _checkpoint_hash: Option<String> }, AskUser(String), AskReply(String) }
-  enum Mode (line 164): { Normal, AgentRunning, Palette, FilePicker, SlashComplete, SessionBrowser, PlanReview, PlanRunning, SymbolPicker, UndoPicker, ProfilePicker, AskingUser, HookWizard }
-  enum WizardStep (line 184): { EnterName, EnterOnEdit, EnterOnTaskDone, EnterOnPlanStepDone, EnterOnSessionStart, EnterOnSessionEnd, Confirm }
-  struct HookWizardState (line 195): { step: WizardStep, name_input: String, on_edit_input: String, on_task_done_input: String, on_plan_step_done_input: String, on_session_start_input: String, on_session_end_input: String }
-  struct FileSymbolPickerState (line 210): { file: String, query: String, selected: usize, all_symbols: Vec<crate::pie::AttachedSymbol>, picked: Vec<crate::pie::AttachedSymbol> }
+[Graph overlay for src/tui/stats_view.rs:1-120]
+fn bar (src/tui/stats_view.rs:17-33):
+  called by: src/tui/stats_view.rs::draw, src/tui/stats_view.rs::stat_bar_row
+fn fmt_k (src/tui/stats_view.rs:34-43):
+  called by: src/tui/stats_view.rs::draw
+fn fmt_duration (src/tui/stats_view.rs:44-55):
+fn cost_str (src/tui/stats_view.rs:56-69):
+  called by: src/tui/stats_view.rs::draw, src/tui/stats_view.rs::aggregate_items
+fn stat_bar_row (src/tui/stats_view.rs:74-88):
+  calls: bar (src/tui/stats_view.rs:17)
+  called by: src/tui/stats_view.rs::aggregate_items
+fn kv_row (src/tui/stats_view.rs:89-95):
+  called by: src/tui/stats_view.rs::draw, src/tui/stats_view.rs::aggregate_items
+fn section_header (src/tui/stats_view.rs:96-102):
+  called by: src/tui/stats_view.rs::draw
+fn divider (src/tui/stats_view.rs:103-107):
+  called by: src/tui/stats_view.rs::draw
+fn aggregate_items (src/tui/stats_view.rs:108-176):
+  calls: stat_bar_row (src/tui/stats_view.rs:74), kv_row (src/tui/stats_view.rs:89), cost_str (src/tui/stats_view.rs:56)
+  called by: src/tui/stats_view.rs::draw
 [/Graph overlay]
 
-[src/tui/mod.rs — lines 3450-3485 of 3825]
+[src/tui/stats_view.rs — lines 1-120 of 325]
 
-3450 [ln6y] |     dry_run: bool,
-3451 [dnai] |     ui_tx: mpsc::UnboundedSender<UiEvent>,
-3452 [6qk5] | ) {
-3453 [umd3] |     let mut client = Client::new(resolved.endpoint.clone(), resolved.model.clone());
-3454 [57wb] |     if let Some(key) = &resolved.api_key {
-3455 [229k] |         client.set_api_key(key.clone());
-3456 [zoqg] |     }
-3457 [fh1x] |     let resolved_hooks = resolve_hooks_with_state(resolved, state);
-3458 [ujl7] |     let agent_config = AgentConfig {
-3459 [h2df] |         verbose,
-3460 [huiw] |         dry_run,
-3461 [zeq5] |         context_tokens: resolved.context_tokens,
-3462 [w5t8] |         _profile_name: resolved.profile_name.clone(),
-3463 [iqse] |         _model: resolved.model.clone(),
-3464 [mfdz] |         _show_timestamps: state.show_timestamps,
-3465 [1mio] |         mcp: state.mcp.clone(),
-3466 [8jfn] |         hooks: std::sync::Arc::new(resolved_hooks),
-3467 [su1s] |         hooks_enabled: state.hooks_enabled,
-3468 [nd39] |         auto_commit: resolved.auto_commit,
-3469 [ot2x] |         auto_commit_prefix: resolved.auto_commit_prefix.clone(),
-3470 [arw5] |         git_context: resolved.git_context,
-3471 [8qf3] |         project_graph: None,     // executor steps have pre-digested instructions — no graph needed
-3472 [hyxx] |         project_narrative: None,
-3473 [y5de] |         flow_paths: None,
-3474 [tgn5] |         attached_symbols: vec![], // executor steps use pre-digested instructions
-3475 [r6d5] |     };
-3476 [ntfp] | 
-3477 [hxsc] |     tokio::spawn(async move {
-3478 [833r] |         // Use a shared cancellation flag so we can check it between steps
-3479 [qcbj] |         // without consuming the oneshot receiver more than once.
-3480 [0nd4] |         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-3481 [um8c] |         let cancelled_clone = cancelled.clone();
-3482 [2xid] |         let ui_tx_cancel = ui_tx.clone();
-3483 [0n5o] |         tokio::spawn(async move {
-3484 [flzm] |             let _ = cancel_rx.await;
-3485 [41ut] |             cancelled_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+   1 [dnvb] | /// Stats tab — session totals, daily/all-time aggregates, per-task table.
+   2 [uog9] | use ratatui::{
+   3 [zc5q] |     Frame,
+   4 [mz5z] |     layout::Rect,
+   5 [0bu1] |     style::{Color, Modifier, Style},
+   6 [4zq0] |     text::{Line, Span},
+   7 [dcbq] |     widgets::{Block, List, ListItem},
+   8 [7gq1] | };
+   9 [ntfp] | 
+  10 [3gnw] | use super::AppState;
+  11 [easi] | use crate::telemetry::Aggregate;
+  12 [ntfp] | 
+  13 [7yom] | // ── Rendering helpers ─────────────────────────────────────────────────────────
+  14 [ntfp] | 
+  15 [drlx] | /// Unicode block progress bar, width chars wide, value/max ratio filled.
+  16 [2dvz] | /// Uses ░ for empty, gradient blocks for partial, █ for full.
+  17 [5pqh] | fn bar(value: u64, max: u64, width: usize) -> String {
+  18 [iqjz] |     if max == 0 {
+  19 [ve5v] |         return "░".repeat(width);
+  20 [zoqg] |     }
+  21 [xdxi] |     let blocks = ["▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];
+  22 [sxza] |     let filled_eighths = ((value as usize * width * 8) / max as usize).min(width * 8);
+  23 [zwv1] |     let full = filled_eighths / 8;
+  24 [6dh7] |     let partial = filled_eighths % 8;
+  25 [w7vk] |     let mut s = "█".repeat(full);
+  26 [jvtp] |     if partial > 0 && full < width {
+  27 [lpv7] |         s.push_str(blocks[partial - 1]);
+  28 [zoqg] |     }
+  29 [zv4e] |     let empty = width.saturating_sub(s.chars().count());
+  30 [oej4] |     s.push_str(&"░".repeat(empty));
+  31 [0hci] |     s
+  32 [ok2w] | }
+  33 [ntfp] | 
+  34 [2eyt] | fn fmt_k(n: u64) -> String {
+  35 [gxaj] |     if n >= 1_000_000 {
+  36 [bivu] |         format!("{:.1}M", n as f64 / 1_000_000.0)
+  37 [9j11] |     } else if n >= 1000 {
+  38 [021e] |         format!("{:.1}k", n as f64 / 1000.0)
+  39 [99e8] |     } else {
+  40 [fvnr] |         n.to_string()
+  41 [zoqg] |     }
+  42 [ok2w] | }
+  43 [ntfp] | 
+  44 [nkh1] | fn fmt_duration(secs: u32) -> String {
+  45 [rh8b] |     if secs >= 3600 {
+  46 [jnqp] |         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+  47 [7mt2] |     } else if secs >= 60 {
+  48 [p69m] |         format!("{}m {}s", secs / 60, secs % 60)
+  49 [82ax] |     } else if secs > 0 {
+  50 [umh3] |         format!("{}s", secs)
+  51 [99e8] |     } else {
+  52 [9bhr] |         "—".to_string()
+  53 [zoqg] |     }
+  54 [ok2w] | }
+  55 [ntfp] | 
+  56 [n3uo] | fn cost_str(tokens_in: u32, tokens_out: u32, cost_per_mtok: Option<f64>) -> Option<String> {
+  57 [g17g] |     let cpm = cost_per_mtok?;
+  58 [hiwl] |     // assume output is ~3× input price (rough Anthropic ratio)
+  59 [e5jz] |     let cost = (tokens_in as f64 / 1_000_000.0) * cpm
+  60 [wuy2] |         + (tokens_out as f64 / 1_000_000.0) * cpm * 3.0;
+  61 [kgd7] |     if cost < 0.001 {
+  62 [sq1r] |         Some("<$0.001".to_string())
+  63 [99e8] |     } else {
+  64 [3bkh] |         Some(format!("${:.3}", cost))
+  65 [zoqg] |     }
+  66 [ok2w] | }
+  67 [ntfp] | 
+  68 [r8aa] | // ── Section builders ──────────────────────────────────────────────────────────
+  69 [ntfp] | 
+  70 [qs6e] | const BAR_W: usize = 16;
+  71 [ntfp] | 
+  72 [y0i7] | /// One stat row with an inline bar:
+  73 [6dpl] | ///   `  label    ████████░░░░░░░░  value_str`
+  74 [bk2i] | fn stat_bar_row<'a>(
+  75 [qw0q] |     label: &str,
+  76 [ksbn] |     value: u64,
+  77 [d3tg] |     max: u64,
+  78 [9po7] |     value_str: &str,
+  79 [vomd] |     bar_color: Color,
+  80 [41yl] | ) -> ListItem<'a> {
+  81 [sf7i] |     let b = bar(value, max, BAR_W);
+  82 [bw6k] |     ListItem::new(Line::from(vec![
+  83 [q72d] |         Span::styled(format!("  {:<14}", label), Style::default().fg(Color::Rgb(100, 95, 140))),
+  84 [by5b] |         Span::styled(b, Style::default().fg(bar_color)),
+  85 [1ow0] |         Span::styled(format!("  {}", value_str), Style::default().fg(Color::White)),
+  86 [g5ry] |     ]))
+  87 [ok2w] | }
+  88 [ntfp] | 
+  89 [eune] | fn kv_row<'a>(label: &str, value: &str) -> ListItem<'a> {
+  90 [bw6k] |     ListItem::new(Line::from(vec![
+  91 [q72d] |         Span::styled(format!("  {:<14}", label), Style::default().fg(Color::Rgb(100, 95, 140))),
+  92 [r4sn] |         Span::styled(value.to_string(), Style::default().fg(Color::White)),
+  93 [g5ry] |     ]))
+  94 [ok2w] | }
+  95 [ntfp] | 
+  96 [4h9l] | fn section_header<'a>(title: &str) -> ListItem<'a> {
+  97 [bw6k] |     ListItem::new(Line::from(vec![
+  98 [4a9u] |         Span::raw("  "),
+  99 [77pi] |         Span::styled(title.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+ 100 [g5ry] |     ]))
+ 101 [ok2w] | }
+ 102 [ntfp] | 
+ 103 [5gxk] | fn divider<'a>() -> ListItem<'a> {
+ 104 [pphe] |     ListItem::new(Line::raw(""))
+ 105 [ok2w] | }
+ 106 [ntfp] | 
+ 107 [kcf5] | /// Build items for a single Aggregate block (session / today / all-time).
+ 108 [tl75] | fn aggregate_items<'a>(
+ 109 [lb0f] |     agg: &Aggregate,
+ 110 [9kpd] |     peak_context_pct: Option<u32>,
+ 111 [9gs9] |     budget_enforcements: Option<usize>,
+ 112 [pqwj] |     cost_per_mtok: Option<f64>,
+ 113 [x9rm] |     max_tokens: u64,   // for bar scaling
+ 114 [m0ko] |     max_tools: u64,
+ 115 [02sx] | ) -> Vec<ListItem<'a>> {
+ 116 [5w3f] |     let mut items = Vec::new();
+ 117 [ntfp] | 
+ 118 [9rhv] |     let total_tok = agg.total_tokens() as u64;
+ 119 [ww39] |     let in_tok = agg.input_tokens as u64;
+ 120 [y9bt] |     let out_tok = agg.output_tokens as u64;
 
 
 ---
 
-[Graph overlay for src/tui/render.rs:380-430]
+[Graph overlay for src/tui/render.rs:385-484]
 fn draw_status_bar (src/tui/render.rs:262-384):
   calls: cwd_str (src/tui/mod.rs:3748), truncate_path (src/tui/chat.rs:613)
   called by: src/tui/render.rs::draw
 fn draw_stats_bar (src/tui/render.rs:385-484):
   called by: src/tui/render.rs::draw
+fn fmt_k (src/tui/render.rs:485-492):
+  called by: src/tui/stats_view.rs::draw
 [/Graph overlay]
 
-[src/tui/render.rs — lines 380-430 of 492]
+[src/tui/render.rs — lines 385-484 of 492]
 
- 380 [chwd] |     );
- 381 [ok2w] | }
- 382 [ntfp] | 
- 383 [lt1v] | // ── Stats bar (always-visible session telemetry) ──────────────────────────────
- 384 [ntfp] | 
  385 [ryc6] | fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
  386 [ixz3] |     let s = &state.stats;
  387 [ntfp] | 
@@ -484,38 +593,897 @@ fn draw_stats_bar (src/tui/render.rs:385-484):
  428 [4tyn] |     // Peak context colour
  429 [yfp2] |     let peak_color = match s.peak_context_pct {
  430 [xguk] |         0..=50  => Color::DarkGray,
+ 431 [g2wa] |         51..=75 => Color::Rgb(140, 120, 40),
+ 432 [da06] |         76..=90 => Color::Rgb(180, 100, 20),
+ 433 [igq3] |         _       => Color::Rgb(180, 60, 60),
+ 434 [r6d5] |     };
+ 435 [k8ty] |     let peak_str = if s.peak_context_pct > 0 {
+ 436 [sdfo] |         format!("  peak {}%", s.peak_context_pct)
+ 437 [99e8] |     } else {
+ 438 [i8at] |         String::new()
+ 439 [r6d5] |     };
+ 440 [ntfp] | 
+ 441 [6j4a] |     let budget_str = if s.budget_enforcements > 0 {
+ 442 [t941] |         format!("  {} compressions", s.budget_enforcements)
+ 443 [99e8] |     } else {
+ 444 [i8at] |         String::new()
+ 445 [r6d5] |     };
+ 446 [ntfp] | 
+ 447 [ky0u] |     // PIE graph status — shown on the right of the stats bar
+ 448 [wv13] |     let pie_str = if let Some(graph) = &state.project_graph {
+ 449 [0vv7] |         let cluster_count = graph.clusters.len();
+ 450 [nb7b] |         if cluster_count > 0 {
+ 451 [m8s6] |             let mins_ago = (chrono::Utc::now().timestamp() - graph.last_indexed).max(0) / 60;
+ 452 [vtle] |             let age = if mins_ago < 1 {
+ 453 [d48x] |                 "just now".to_string()
+ 454 [6x3y] |             } else if mins_ago < 60 {
+ 455 [4or9] |                 format!("{mins_ago}m ago")
+ 456 [rhf4] |             } else {
+ 457 [pxjl] |                 format!("{}h ago", mins_ago / 60)
+ 458 [to9l] |             };
+ 459 [p6d5] |             format!("  ◈ {cluster_count} clusters · indexed {age}")
+ 460 [gi2o] |         } else {
+ 461 [i8dx] |             String::new()
+ 462 [7xag] |         }
+ 463 [99e8] |     } else {
+ 464 [i8at] |         String::new()
+ 465 [r6d5] |     };
+ 466 [ntfp] | 
+ 467 [vznp] |     let line = Line::from(vec![
+ 468 [dkmb] |         Span::styled("  ∑ ", Style::default().fg(Color::Rgb(60, 55, 100))),
+ 469 [dd10] |         Span::styled(task_str, Style::default().fg(Color::Rgb(120, 110, 180))),
+ 470 [5cox] |         Span::styled(token_str, Style::default().fg(Color::Rgb(80, 80, 120))),
+ 471 [bbfb] |         Span::styled(inflight_str, Style::default().fg(Color::Cyan)),
+ 472 [1bzl] |         Span::styled(tool_str, Style::default().fg(Color::Rgb(70, 70, 110))),
+ 473 [xpmj] |         Span::styled(ratio_str, Style::default().fg(Color::Rgb(60, 100, 80))),
+ 474 [aw1q] |         Span::styled(peak_str, Style::default().fg(peak_color)),
+ 475 [1i3f] |         Span::styled(budget_str, Style::default().fg(Color::Rgb(80, 70, 60))),
+ 476 [7d81] |         Span::styled(pie_str, Style::default().fg(Color::Rgb(80, 70, 140))),
+ 477 [alhk] |     ]);
+ 478 [ntfp] | 
+ 479 [s5za] |     f.render_widget(
+ 480 [n3rf] |         Paragraph::new(line).style(Style::default().bg(Color::Rgb(7, 7, 14))),
+ 481 [6ic8] |         area,
+ 482 [chwd] |     );
+ 483 [ok2w] | }
+ 484 [ntfp] | 
+
+
+╔═══ TURN 3  ═══╗
+Let me read a few more sections I need to understand the full picture:
+
+◆ read_files src/tui/stats_view.rs[120–200], src/tui/mod.rs[1118–1200], src/tui/mod.rs[146–220]
+→ [Graph overlay for src/tui/stats_view.rs:120-200]
+fn aggregate_items (src/tui/stats_view.rs:108-176):
+  calls: stat_bar_row (src/tui/stats_view.rs:74), kv_row (src/tui/stats_view.rs:89), cost_str (src/tui/stats_view.rs:56)
+  called by: src/tui/stats_view.rs::draw
+fn draw (src/tui/stats_view.rs:177-325):
+  calls: divider (src/tui/stats_view.rs:103), section_header (src/tui/stats_view.rs:96), kv_row (src/tui/stats_view.rs:89), fmt_k (src/tui/render.rs:485), cost_str (src/tui/stats_view.rs:56), aggregate_items (src/tui/stats_view.rs:108), bar (src/tui/stats_view.rs:17)
+  called by: src/tui/mod.rs::event_loop
+[/Graph overlay]
+
+[src/tui/stats_view.rs — lines 120-200 of 325]
+
+ 120 [y9bt] |     let out_tok = agg.output_tokens as u64;
+ 121 [hzlp] |     let tools = agg.tool_calls as u64;
+ 122 [8yr1] |     let comp_pct = (agg.compression_ratio() * 100.0).round() as u64;
+ 123 [ntfp] | 
+ 124 [58az] |     // Tokens row
+ 125 [wnyb] |     let tok_str = format!(
+ 126 [4h4p] |         "{}  (in: {}  out: {})",
+ 127 [6m43] |         fmt_k(total_tok), fmt_k(in_tok), fmt_k(out_tok)
+ 128 [chwd] |     );
+ 129 [lf0z] |     items.push(stat_bar_row("tokens", total_tok, max_tokens.max(1), &tok_str, Color::Rgb(80, 140, 200)));
+ 130 [ntfp] | 
+ 131 [cmgq] |     // Tool calls row
+ 132 [d5xl] |     let avg_tools = if agg.tasks > 0 { tools / agg.tasks as u64 } else { 0 };
+ 133 [brk0] |     let tools_str = format!("{}  (avg {}/task)", tools, avg_tools);
+ 134 [g9ph] |     items.push(stat_bar_row("tool calls", tools, max_tools.max(1), &tools_str, Color::Rgb(160, 120, 220)));
+ 135 [ntfp] | 
+ 136 [qznl] |     // Compression row
+ 137 [ypwc] |     let comp_str = format!("{}%  ({}/{} compressed)", comp_pct, agg.compressed, agg.tool_calls);
+ 138 [1i8t] |     items.push(stat_bar_row("compression", comp_pct, 100, &comp_str, Color::Rgb(80, 180, 120)));
+ 139 [ntfp] | 
+ 140 [3z5g] |     // Budget enforcements (live only)
+ 141 [t9a3] |     if let Some(hits) = budget_enforcements {
+ 142 [vi73] |         if hits > 0 {
+ 143 [vw3i] |             items.push(stat_bar_row("budget hits", hits as u64, hits.max(5) as u64, &hits.to_string(), Color::Rgb(220, 120, 40)));
+ 144 [7xag] |         }
+ 145 [zoqg] |     }
+ 146 [ntfp] | 
+ 147 [b0le] |     // Peak context (live only)
+ 148 [26io] |     if let Some(pct) = peak_context_pct {
+ 149 [p4j6] |         if pct > 0 {
+ 150 [07rt] |             let peak_color = match pct {
+ 151 [ztk0] |                 0..=50  => Color::Rgb(60, 180, 60),
+ 152 [flxb] |                 51..=75 => Color::Rgb(200, 180, 40),
+ 153 [v6s9] |                 76..=90 => Color::Rgb(220, 120, 20),
+ 154 [og10] |                 _       => Color::Rgb(220, 60, 60),
+ 155 [to9l] |             };
+ 156 [n2x8] |             items.push(stat_bar_row("peak context", pct as u64, 100, &format!("{}%", pct), peak_color));
+ 157 [7xag] |         }
+ 158 [zoqg] |     }
+ 159 [ntfp] | 
+ 160 [6d6x] |     // Duration
+ 161 [3ejd] |     if agg.duration_secs > 0 {
+ 162 [iwr3] |         let avg_dur = if agg.tasks > 0 { agg.duration_secs / agg.tasks as u32 } else { 0 };
+ 163 [wpe7] |         let dur_str = format!("{}  (avg {}/task)", fmt_duration(agg.duration_secs), fmt_duration(avg_dur));
+ 164 [xcua] |         items.push(kv_row("time", &dur_str));
+ 165 [zoqg] |     }
+ 166 [ntfp] | 
+ 167 [mxiq] |     // Cost estimate
+ 168 [7c91] |     if let Some(c) = cost_str(agg.input_tokens, agg.output_tokens, cost_per_mtok) {
+ 169 [d9zk] |         items.push(kv_row("est. cost", &c));
+ 170 [zoqg] |     }
+ 171 [ntfp] | 
+ 172 [hewv] |     items
+ 173 [ok2w] | }
+ 174 [ntfp] | 
+ 175 [atw2] | // ── Main draw ─────────────────────────────────────────────────────────────────
+ 176 [ntfp] | 
+ 177 [d4ol] | pub fn draw(f: &mut Frame, state: &AppState, area: Rect) {
+ 178 [htfr] |     let mut all_items: Vec<ListItem<'static>> = Vec::new();
+ 179 [ntfp] | 
+ 180 [ixz3] |     let s = &state.stats;
+ 181 [ycft] |     let cost = state.cost_per_mtok_input.map(|c| c as f64);
+ 182 [ntfp] | 
+ 183 [rkex] |     // ── Section 0: In-Flight (shown only while agent is running) ──────────────
+ 184 [ma9q] |     if s.inflight_input_tokens > 0 || s.inflight_output_tokens > 0 {
+ 185 [rn19] |         all_items.push(divider());
+ 186 [by89] |         all_items.push(section_header("▶ In-Flight"));
+ 187 [cucf] |         all_items.push(kv_row("input",  &fmt_k(s.inflight_input_tokens as u64)));
+ 188 [iy1b] |         all_items.push(kv_row("output", &fmt_k(s.inflight_output_tokens as u64)));
+ 189 [nlpc] |         let total = s.inflight_input_tokens + s.inflight_output_tokens;
+ 190 [nox9] |         all_items.push(kv_row("total",  &fmt_k(total as u64)));
+ 191 [su43] |         if let Some(cost_str) = cost_str(s.inflight_input_tokens, s.inflight_output_tokens, cost) {
+ 192 [p4eg] |             all_items.push(kv_row("est cost", &cost_str));
+ 193 [7xag] |         }
+ 194 [zoqg] |     }
+ 195 [ntfp] | 
+ 196 [il99] |     // ── Section 1: This Session ───────────────────────────────────────────────
+ 197 [zl9p] |     all_items.push(divider());
+ 198 [3ou3] |     all_items.push(section_header("This Session"));
+ 199 [ntfp] | 
+ 200 [h8pw] |     if s.tasks_completed == 0 {
+
+
+---
+
+[Graph overlay for src/tui/mod.rs:1118-1200]
+fn event_loop (src/tui/mod.rs:1107-1505):
+  calls: load_sidebar_entries (src/tui/mod.rs:3706), prune_old_sessions (src/sessions.rs:165), cwd_str (src/tui/mod.rs:3748), open_session (src/sessions.rs:74), resolve_hooks (src/tui/mod.rs:3190), run_hook (src/hooks.rs:197), run_project_init (src/init.rs:17), save_conventions (src/init.rs:68), check_for_update (src/setup.rs:548), draw (src/tui/config_view.rs:18)
+  called by: src/tui/mod.rs::run
+Key types in this file:
+  enum UiEvent (line 57): { Chunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult { summary: String }, CacheHit { path: String, lines: usize }, LoopWarning { tool_name: String }, BudgetWarning, ToolBudgetHit { limit: usize }, AgentDone { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize, duration_secs: u32, cwd: String }, AgentError(String), TokenStats { _input: u32, _output: u32, total_input: u32, total_output: u32, tool_calls: usize }, ContextUpdate { used: usize, total: u32, compressed: bool }, PlanReady(crate::plan::Plan), PlanGenerateFailed(String), PlanStepStart { index: usize, total: usize, desc: String }, PlanStepDone { index: usize, passed: bool, error: Option<String> }, PlanComplete { total: usize }, PlanFailed { step: usize, error: String }, HookOutput { event: String, output: String, exit_code: i32 }, GitChanges { stat: String, checkpoint_hash: Option<String>, files_changed: usize }, GitAutoCommit { message: String }, GitError(String), SystemMsg(String), AskUser { question: String, reply_tx: tokio::sync::oneshot::Sender<String> }, IndexReady { graph: crate::pie::ProjectGraph, narrative: Option<crate::narrative::ProjectNarrative> } }
+  enum ConversationEntry (line 134): { UserMessage(String), AssistantChunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult(String), CacheHit { path: String, lines: usize }, SystemMsg(String), HookOutput { event: String, output: String, success: bool }, TaskComplete { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize }, PlanCard, GitNotification { files_changed: usize, _checkpoint_hash: Option<String> }, AskUser(String), AskReply(String) }
+  enum Mode (line 164): { Normal, AgentRunning, Palette, FilePicker, SlashComplete, SessionBrowser, PlanReview, PlanRunning, SymbolPicker, UndoPicker, ProfilePicker, AskingUser, HookWizard }
+  enum WizardStep (line 184): { EnterName, EnterOnEdit, EnterOnTaskDone, EnterOnPlanStepDone, EnterOnSessionStart, EnterOnSessionEnd, Confirm }
+  struct HookWizardState (line 195): { step: WizardStep, name_input: String, on_edit_input: String, on_task_done_input: String, on_plan_step_done_input: String, on_session_start_input: String, on_session_end_input: String }
+  struct FileSymbolPickerState (line 210): { file: String, query: String, selected: usize, all_symbols: Vec<crate::pie::AttachedSymbol>, picked: Vec<crate::pie::AttachedSymbol> }
+[/Graph overlay]
+
+[src/tui/mod.rs — lines 1118-1200 of 3825]
+
+1118 [zqw3] |     let mut state = AppState::new(&resolved, show_timestamps, mcp);
+1119 [6j9o] |     state.cost_per_mtok_input = resolved.cost_per_mtok_input;
+1120 [ntfp] | 
+1121 [dn69] |     // Auto-show sidebar when terminal is wide enough
+1122 [1ekp] |     if let Ok((w, _)) = crossterm::terminal::size() {
+1123 [8r0f] |         state.sidebar_visible = w >= 110;
+1124 [zoqg] |     }
+1125 [5cxl] |     state.sidebar_entries = load_sidebar_entries(&state.session);
+1126 [ntfp] | 
+1127 [l6sz] |     // ── Hook startup summary ──────────────────────────────────────────────────
+1128 [16p0] |     if resolved.hooks_disabled {
+1129 [qew1] |         state.push(ConversationEntry::SystemMsg("⚙ hooks disabled for this profile".to_string()));
+1130 [uqaa] |     } else if let Some(name) = &resolved.active_hooks {
+1131 [wcq1] |         let summary = resolved.active_hook_config.summary()
+1132 [nzjf] |             .unwrap_or_else(|| "no commands configured".to_string());
+1133 [4y3b] |         state.push(ConversationEntry::SystemMsg(
+1134 [ld5i] |             format!("⚙ hooks.{name}  {summary}  (/list-hooks for details)"),
+1135 [za90] |         ));
+1136 [6a4x] |     } else if let Some(summary) = resolved.hooks.summary() {
+1137 [vz4i] |         state.push(ConversationEntry::SystemMsg(format!("⚙ hooks  {summary}  (/list-hooks for details)")));
+1138 [zoqg] |     }
+1139 [ntfp] | 
+1140 [agt7] |     // ── Update notification ───────────────────────────────────────────────────
+1141 [xzfa] |     if let Ok(Some((current, latest))) = update_notice.await {
+1142 [4y3b] |         state.push(ConversationEntry::SystemMsg(
+1143 [dmtd] |             format!("⬆ update available: parecode {current} → {latest}  (run `parecode --update`)"),
+1144 [za90] |         ));
+1145 [zoqg] |     }
+1146 [ntfp] | 
+1147 [5kb8] |     // ── PIE warm status ───────────────────────────────────────────────────────
+1148 [4bf3] |     let graph_path = std::path::Path::new(".parecode/project.graph");
+1149 [k75g] |     if graph_path.exists() {
+1150 [y768] |         if let Ok(content) = std::fs::read_to_string(graph_path) {
+1151 [b5fr] |             if let Ok(g) = serde_json::from_str::<crate::pie::ProjectGraph>(&content) {
+1152 [okbe] |                 let cluster_count = g.clusters.len();
+1153 [w53d] |                 let file_count: usize = g.clusters.iter().map(|c| c.files.len()).sum();
+1154 [6jhz] |                 state.push(ConversationEntry::SystemMsg(
+1155 [eyqo] |                     format!("◈ PIE  {cluster_count} clusters · {file_count} files · warm"),
+1156 [ck3o] |                 ));
+1157 [4q3c] |             }
+1158 [7xag] |         }
+1159 [zoqg] |     }
+1160 [ntfp] | 
+1161 [thdg] |     // Open session (resumes existing or creates new) — loads turns and sets active_turn
+1162 [6v6j] |     // Prune before opening so a freshly created empty session isn't immediately deleted
+1163 [4a8z] |     sessions::prune_old_sessions(10);
+1164 [0gk7] |     let cwd = cwd_str();
+1165 [s2y6] |     match sessions::open_session(&cwd) {
+1166 [hgyk] |         Ok(session) => {
+1167 [264r] |             // Sync conversation_turns from the loaded session for context injection
+1168 [hkqp] |             state.conversation_turns = session._turns.clone();
+1169 [ntfp] | 
+1170 [zlkv] |             // Replay loaded turns as display entries so history is visible
+1171 [kbae] |             if !state.conversation_turns.is_empty() {
+1172 [pyps] |                 state.session_resumed = true;
+1173 [snwl] |                 for t in &state.conversation_turns {
+1174 [hpab] |                     state.entries.push(ConversationEntry::UserMessage(t.user_message.clone()));
+1175 [aht4] |                     if !t.agent_response.is_empty() {
+1176 [7a3w] |                         state.entries.push(ConversationEntry::AssistantChunk(t.agent_response.clone()));
+1177 [l7aw] |                     }
+1178 [m5m0] |                 }
+1179 [ysne] |                 let count = state.conversation_turns.len();
+1180 [6jhz] |                 state.push(ConversationEntry::SystemMsg(
+1181 [za8e] |                     format!("↩ resumed session · {count} turn{} · /new for a fresh start",
+1182 [wy37] |                         if count == 1 { "" } else { "s" }),
+1183 [ck3o] |                 ));
+1184 [4q3c] |             }
+1185 [ntfp] | 
+1186 [2ogh] |             state.session = Some(session);
+1187 [qwiv] |             // Reload sidebar now that state.session is set — this correctly marks is_current
+1188 [vqc9] |             state.sidebar_entries = load_sidebar_entries(&state.session);
+1189 [7xag] |         }
+1190 [x5uo] |         Err(e) => {
+1191 [fv8n] |             state.push(ConversationEntry::SystemMsg(
+1192 [02du] |                 format!("session: storage unavailable: {e}"),
+1193 [wqes] |             ));
+1194 [7xag] |         }
+1195 [zoqg] |     }
+1196 [ntfp] | 
+1197 [lg8j] |     // Channel: agent → TUI
+1198 [sry9] |     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+1199 [ntfp] | 
+1200 [3pv3] |     // Fire on_session_start hooks (non-blocking — output shown in TUI)
+
+
+---
+
+[src/tui/mod.rs — lines 146-220 (struct/enum layout served from project index)]
+
+  line 164: enum Mode
+  {
+      Normal,
+      AgentRunning,
+      Palette,
+      FilePicker,
+      SlashComplete,
+      SessionBrowser,
+      PlanReview,
+      PlanRunning,
+      SymbolPicker,
+      UndoPicker,
+      ProfilePicker,
+      AskingUser,
+      HookWizard,
+  }
+
+  line 184: enum WizardStep
+  {
+      EnterName,
+      EnterOnEdit,
+      EnterOnTaskDone,
+      EnterOnPlanStepDone,
+      EnterOnSessionStart,
+      EnterOnSessionEnd,
+      Confirm,
+  }
+
+  line 195: struct HookWizardState
+  {
+      step: WizardStep,
+      name_input: String,
+      on_edit_input: String,
+      on_task_done_input: String,
+      on_plan_step_done_input: String,
+      on_session_start_input: String,
+      on_session_end_input: String,
+  }
+
+  line 210: struct FileSymbolPickerState
+  {
+      file: String,
+      query: String,
+      selected: usize,
+      all_symbols: Vec<crate::pie::AttachedSymbol>,
+      picked: Vec<crate::pie::AttachedSymbol>,
+  }
+
+Layout is authoritative (matches file). Use check_wiring(field="name") to trace where a field flows.
+
+
+╔═══ TURN 4  ═══╗
+Let me check how ResolvedConfig is created to understand the full pipeline:
+
+◆ read_files src/config.rs[120–175], src/config.rs[380–420], src/tui/stats_view.rs[200–325]
+→ [src/config.rs — lines 120-175 (struct/enum layout served from project index)]
+
+  line 175: struct ResolvedConfig
+  {
+      endpoint: String,
+      model: String,
+      context_tokens: u32,
+      api_key: Option<String>,
+      profile_name: String,
+      planner_model: Option<String>,
+      mcp_servers: Vec<McpServerConfig>,
+      cost_per_mtok_input: Option<f64>,
+      hooks: crate::hooks::HookConfig,
+      hooks_disabled: bool,
+      auto_commit: bool,
+      auto_commit_prefix: String,
+      git_context: bool,
+      available_hooks: Vec<String>,
+      active_hooks: Option<String>,
+      active_hook_config: crate::hooks::HookConfig,
+  }
+
+Layout is authoritative (matches file). Use check_wiring(field="name") to trace where a field flows.
+
+
+---
+
+[src/config.rs — lines 380-420 of 558]
+
+ 380 [41pt] |     fn test_default_profile_name() {
+ 381 [4img] |         assert_eq!(default_profile_name(), "default".to_string());
+ 382 [zoqg] |     }
+ 383 [ntfp] | 
+ 384 [7vww] |     // ── Profile ──────────────────────────────────────────────────────────────
+ 385 [ntfp] | 
+ 386 [0r2u] |     #[test]
+ 387 [yh9x] |     fn test_profile_default() {
+ 388 [z396] |         let profile = Profile::default();
+ 389 [dz0k] |         assert_eq!(profile.endpoint, "http://localhost:11434/v1/chat/completions");
+ 390 [8jws] |         assert_eq!(profile.model, "qwen3:14b");
+ 391 [zkbp] |         assert_eq!(profile.context_tokens, 32_768);
+ 392 [h0oc] |         assert_eq!(profile.api_key, None);
+ 393 [psy2] |         assert_eq!(profile.planner_model, None);
+ 394 [6j9u] |         assert_eq!(profile.mcp_servers, Vec::new());
+ 395 [aoce] |         assert_eq!(profile.cost_per_mtok_input, None);
+ 396 [x3fc] |         assert_eq!(profile.hooks, crate::hooks::HookConfig::default());
+ 397 [6y2m] |         assert_eq!(profile.hooks_disabled, false);
+ 398 [jkyi] |         assert_eq!(profile.auto_commit, false);
+ 399 [1d9d] |         assert_eq!(profile.auto_commit_prefix, "parecode: ".to_string());
+ 400 [maua] |         assert_eq!(profile.git_context, true);
+ 401 [zoqg] |     }
+ 402 [ntfp] | 
+ 403 [2ald] |     // ── ConfigFile ───────────────────────────────────────────────────────────
+ 404 [ntfp] | 
+ 405 [0r2u] |     #[test]
+ 406 [bhhi] |     fn test_config_file_resolve_profile() {
+ 407 [8090] |         let mut file = ConfigFile::default();
+ 408 [mbb7] |         file.default_profile = "local".to_string();
+ 409 [s8yg] |         let profile = Profile {
+ 410 [djyl] |             endpoint: "http://example.com".to_string(),
+ 411 [h7fm] |             model: "test".to_string(),
+ 412 [t5r0] |             ..Default::default()
+ 413 [or2h] |         };
+ 414 [cf5o] |         file.profiles.insert("local".to_string(), profile.clone());
+ 415 [os8h] |         file.profiles.insert("other".to_string(), Profile::default());
+ 416 [ntfp] | 
+ 417 [tvxq] |         // Resolve default
+ 418 [blxy] |         assert_eq!(file.resolve_profile(None), Some(&profile));
+ 419 [9y9y] |         // Resolve explicit existing
+ 420 [8zpb] |         assert_eq!(file.resolve_profile(Some("other")), Some(&Profile::default()));
+
+
+---
+
+[Graph overlay for src/tui/stats_view.rs:200-325]
+fn draw (src/tui/stats_view.rs:177-325):
+  calls: divider (src/tui/stats_view.rs:103), section_header (src/tui/stats_view.rs:96), kv_row (src/tui/stats_view.rs:89), fmt_k (src/tui/render.rs:485), cost_str (src/tui/stats_view.rs:56), aggregate_items (src/tui/stats_view.rs:108), bar (src/tui/stats_view.rs:17)
+  called by: src/tui/mod.rs::event_loop
+[/Graph overlay]
+
+[src/tui/stats_view.rs — lines 200-325 of 325]
+
+ 200 [h8pw] |     if s.tasks_completed == 0 {
+ 201 [fq0g] |         all_items.push(ListItem::new(Line::from(vec![
+ 202 [3eky] |             Span::raw("  "),
+ 203 [pckm] |             Span::styled("No tasks completed yet.", Style::default().fg(Color::DarkGray)),
+ 204 [c3zu] |         ])));
+ 205 [99e8] |     } else {
+ 206 [kwkx] |         let session_agg = Aggregate {
+ 207 [ncgi] |             tasks: s.tasks_completed,
+ 208 [bupb] |             input_tokens: s.total_input_tokens,
+ 209 [e5gf] |             output_tokens: s.total_output_tokens,
+ 210 [fpqz] |             tool_calls: s.total_tool_calls,
+ 211 [lg2f] |             compressed: s.total_compressed,
+ 212 [bh70] |             duration_secs: s.records.iter().map(|r| r.duration_secs).sum(),
+ 213 [or2h] |         };
+ 214 [yx1x] |         all_items.push(kv_row("tasks", &s.tasks_completed.to_string()));
+ 215 [ntfp] | 
+ 216 [aldz] |         // Scale bars against the session max
+ 217 [p52a] |         let max_tok = session_agg.total_tokens() as u64;
+ 218 [nm2n] |         let max_tools = session_agg.tool_calls as u64;
+ 219 [ntfp] | 
+ 220 [9c1h] |         all_items.extend(aggregate_items(
+ 221 [fn4b] |             &session_agg,
+ 222 [6sgo] |             Some(s.peak_context_pct),
+ 223 [fehi] |             Some(s.budget_enforcements),
+ 224 [zsss] |             cost,
+ 225 [6hrc] |             max_tok,
+ 226 [vycz] |             max_tools,
+ 227 [za90] |         ));
+ 228 [zoqg] |     }
+ 229 [zl9p] |     all_items.push(divider());
+ 230 [ntfp] | 
+ 231 [q7ll] |     // ── Section 2: Today ──────────────────────────────────────────────────────
+ 232 [ltj1] |     let now = chrono::Utc::now().timestamp();
+ 233 [come] |     let day_start = now - 86400;
+ 234 [e91q] |     let today_records: Vec<_> = state.telemetry_history.iter()
+ 235 [e5zy] |         .filter(|r| r.timestamp >= day_start)
+ 236 [z2ux] |         .cloned()
+ 237 [1qa3] |         .collect();
+ 238 [ntfp] | 
+ 239 [ckzq] |     all_items.push(section_header("Today"));
+ 240 [wmts] |     if today_records.is_empty() {
+ 241 [fq0g] |         all_items.push(ListItem::new(Line::from(vec![
+ 242 [3eky] |             Span::raw("  "),
+ 243 [zk40] |             Span::styled("No tasks today.", Style::default().fg(Color::DarkGray)),
+ 244 [c3zu] |         ])));
+ 245 [99e8] |     } else {
+ 246 [664g] |         let agg = Aggregate::from_records(&today_records);
+ 247 [rtmb] |         all_items.push(kv_row("tasks", &agg.tasks.to_string()));
+ 248 [td9v] |         let max_tok = agg.total_tokens() as u64;
+ 249 [2lam] |         let max_tools = agg.tool_calls as u64;
+ 250 [h0vb] |         all_items.extend(aggregate_items(&agg, None, None, cost, max_tok, max_tools));
+ 251 [zoqg] |     }
+ 252 [zl9p] |     all_items.push(divider());
+ 253 [ntfp] | 
+ 254 [pj1j] |     // ── Section 3: All Time ───────────────────────────────────────────────────
+ 255 [ar7v] |     all_items.push(section_header("All Time"));
+ 256 [nrel] |     if state.telemetry_history.is_empty() {
+ 257 [fq0g] |         all_items.push(ListItem::new(Line::from(vec![
+ 258 [3eky] |             Span::raw("  "),
+ 259 [gfl3] |             Span::styled("No historical data.", Style::default().fg(Color::DarkGray)),
+ 260 [c3zu] |         ])));
+ 261 [99e8] |     } else {
+ 262 [e40b] |         let agg = Aggregate::from_records(&state.telemetry_history);
+ 263 [rtmb] |         all_items.push(kv_row("tasks", &agg.tasks.to_string()));
+ 264 [td9v] |         let max_tok = agg.total_tokens() as u64;
+ 265 [2lam] |         let max_tools = agg.tool_calls as u64;
+ 266 [h0vb] |         all_items.extend(aggregate_items(&agg, None, None, cost, max_tok, max_tools));
+ 267 [ntfp] | 
+ 268 [t3zt] |         // First-seen date
+ 269 [wa7g] |         if let Some(first) = state.telemetry_history.first() {
+ 270 [t6rl] |             let dt = chrono::DateTime::from_timestamp(first.timestamp, 0)
+ 271 [51yv] |                 .unwrap_or_default()
+ 272 [pswb] |                 .with_timezone(&chrono::Local);
+ 273 [vq1o] |             all_items.push(kv_row("since", &dt.format("%b %d %Y").to_string()));
+ 274 [7xag] |         }
+ 275 [zoqg] |     }
+ 276 [zl9p] |     all_items.push(divider());
+ 277 [ntfp] | 
+ 278 [pp3y] |     // ── Section 4: Per-task table (this session) ──────────────────────────────
+ 279 [lsq4] |     if !s.records.is_empty() {
+ 280 [0olv] |         all_items.push(section_header("Tasks — this session"));
+ 281 [fq0g] |         all_items.push(ListItem::new(Line::from(vec![
+ 282 [bq0v] |             Span::styled("   #  ", Style::default().fg(Color::Rgb(60, 57, 90))),
+ 283 [8m4p] |             Span::styled(format!("{:<9}", "in tok"),   Style::default().fg(Color::Rgb(60, 57, 90))),
+ 284 [7gq6] |             Span::styled(format!("{:<9}", "out tok"),  Style::default().fg(Color::Rgb(60, 57, 90))),
+ 285 [sly1] |             Span::styled(format!("{:<7}", "tools"),    Style::default().fg(Color::Rgb(60, 57, 90))),
+ 286 [0rff] |             Span::styled(format!("{:<7}", "time"),     Style::default().fg(Color::Rgb(60, 57, 90))),
+ 287 [msnd] |             Span::styled("task",                        Style::default().fg(Color::Rgb(60, 57, 90))),
+ 288 [c3zu] |         ])));
+ 289 [ntfp] | 
+ 290 [fk6x] |         let max_tok_rec = s.records.iter()
+ 291 [khdw] |             .map(|r| (r.input_tokens + r.output_tokens) as u64)
+ 292 [s2sa] |             .max()
+ 293 [g78x] |             .unwrap_or(1);
+ 294 [ntfp] | 
+ 295 [ffd5] |         for (i, rec) in s.records.iter().enumerate() {
+ 296 [loay] |             let total = (rec.input_tokens + rec.output_tokens) as u64;
+ 297 [1bcy] |             let b = bar(total, max_tok_rec, 8);
+ 298 [wrhn] |             let preview: String = rec.task_preview.chars().take(32).collect();
+ 299 [iwjk] |             all_items.push(ListItem::new(Line::from(vec![
+ 300 [rvqz] |                 Span::styled(format!("  {:>2}  ", i + 1),            Style::default().fg(Color::Rgb(100, 95, 140))),
+ 301 [9pr3] |                 Span::styled(format!("{:<9}", fmt_k(rec.input_tokens as u64)),  Style::default().fg(Color::Rgb(100, 180, 255))),
+ 302 [yza0] |                 Span::styled(format!("{:<9}", fmt_k(rec.output_tokens as u64)), Style::default().fg(Color::Rgb(100, 220, 180))),
+ 303 [dswm] |                 Span::styled(format!("{:<7}", rec.tool_calls),        Style::default().fg(Color::Rgb(200, 160, 255))),
+ 304 [dvxm] |                 Span::styled(format!("{:<7}", fmt_duration(rec.duration_secs)), Style::default().fg(Color::Rgb(160, 150, 190))),
+ 305 [300n] |                 Span::styled(b,                                        Style::default().fg(Color::Rgb(70, 120, 170))),
+ 306 [qzk0] |                 Span::styled(format!("  {}", preview),                Style::default().fg(Color::Rgb(150, 145, 185))),
+ 307 [gsbu] |             ])));
+ 308 [7xag] |         }
+ 309 [rn19] |         all_items.push(divider());
+ 310 [zoqg] |     }
+ 311 [ntfp] | 
+ 312 [fyw7] |     // Footer hint
+ 313 [9qao] |     all_items.push(ListItem::new(Line::from(vec![
+ 314 [pqb0] |         Span::styled("  /stats reset  to clear all history", Style::default().fg(Color::Rgb(55, 52, 80))),
+ 315 [w16y] |     ])));
+ 316 [zl9p] |     all_items.push(divider());
+ 317 [ntfp] | 
+ 318 [yqgn] |     // Apply scroll offset
+ 319 [aqr1] |     let scroll = state.stats_scroll;
+ 320 [p28o] |     let visible: Vec<ListItem<'static>> = all_items.into_iter().skip(scroll).collect();
+ 321 [ntfp] | 
+ 322 [nzj0] |     let list = List::new(visible)
+ 323 [1ape] |         .block(Block::default().style(Style::default().bg(Color::Rgb(8, 8, 14))));
+ 324 [ciqv] |     f.render_widget(list, area);
+ 325 [ok2w] | }
+
+
+╔═══ TURN 5  ═══╗
+Let me check the resolve function and the DEFAULT_CONFIG_TOML:
+
+◆ read_files src/config.rs[205–260], src/config.rs[280–380]
+→ [Graph overlay for src/config.rs:205-260]
+fn config_path (src/config.rs:260-266):
+  calls: dirs_config_dir (src/config.rs:267)
+  called by: src/config.rs::ConfigFile, src/setup.rs::write_config, src/config.rs::DEFAULT_CONFIG_TOML, src/main.rs::main, src/hooks.rs::write_config_hooks, src/hooks.rs::write_active_hooks
+Key types in this file:
+  struct McpServerConfig (line 11): { name: String, command: Vec<String>, env: std::collections::HashMap<String, String> }
+  struct Profile (line 24): { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool }
+  struct ConfigFile (line 97): { default_profile: String, profiles: HashMap<String, Profile>, hooks: HashMap<String, crate::hooks::HookConfig>, active_hooks: Option<String> }
+  struct ResolvedConfig (line 175): { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, profile_name: String, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool, available_hooks: Vec<String>, active_hooks: Option<String>, active_hook_config: crate::hooks::HookConfig }
+[/Graph overlay]
+
+[src/config.rs — lines 205-260 of 558]
+
+ 205 [ntfp] | 
+ 206 [77my] | impl ResolvedConfig {
+ 207 [569a] |     /// Merge config file profile with CLI overrides.
+ 208 [6u13] |     /// Priority: CLI args > env vars (handled by clap) > config file profile > built-in defaults
+ 209 [hwzw] |     pub fn resolve(
+ 210 [ek0f] |         file: &ConfigFile,
+ 211 [amib] |         profile_override: Option<&str>,
+ 212 [4fr9] |         endpoint_override: Option<&str>,
+ 213 [wmon] |         model_override: Option<&str>,
+ 214 [19lu] |         api_key_override: Option<&str>,
+ 215 [dfnu] |     ) -> Self {
+ 216 [lrsu] |         let profile_name = profile_override
+ 217 [xqxm] |             .unwrap_or(&file.default_profile)
+ 218 [kc88] |             .to_string();
+ 219 [ntfp] | 
+ 220 [0k02] |         let base = file
+ 221 [6efw] |             .resolve_profile(profile_override)
+ 222 [mjs9] |             .cloned()
+ 223 [t2ic] |             .unwrap_or_default();
+ 224 [ntfp] | 
+ 225 [ctld] |         let mut hook_names: Vec<String> = file.hooks.keys().cloned().collect();
+ 226 [2stf] |         hook_names.sort();
+ 227 [ntfp] | 
+ 228 [nyx6] |         Self {
+ 229 [d1pg] |             endpoint: endpoint_override
+ 230 [n0y8] |                 .map(str::to_string)
+ 231 [7js3] |                 .unwrap_or(base.endpoint),
+ 232 [h92e] |             model: model_override
+ 233 [n0y8] |                 .map(str::to_string)
+ 234 [x15x] |                 .unwrap_or(base.model),
+ 235 [e59g] |             context_tokens: base.context_tokens,
+ 236 [h3c8] |             api_key: api_key_override
+ 237 [n0y8] |                 .map(str::to_string)
+ 238 [o8su] |                 .or(base.api_key),
+ 239 [lxfg] |             profile_name,
+ 240 [bthi] |             planner_model: base.planner_model,
+ 241 [3p5a] |             mcp_servers: base.mcp_servers,
+ 242 [f1lm] |             cost_per_mtok_input: base.cost_per_mtok_input,
+ 243 [2852] |             hooks: base.hooks,
+ 244 [sqpe] |             hooks_disabled: base.hooks_disabled,
+ 245 [q6va] |             auto_commit: base.auto_commit,
+ 246 [vezs] |             auto_commit_prefix: base.auto_commit_prefix,
+ 247 [c0bi] |             git_context: base.git_context,
+ 248 [n7ut] |             active_hook_config: file.active_hooks.as_deref()
+ 249 [ic9q] |                 .and_then(|name| file.hooks.get(name))
+ 250 [gzx5] |                 .cloned()
+ 251 [o6f5] |                 .unwrap_or_default(),
+ 252 [hvmf] |             available_hooks: hook_names,
+ 253 [e211] |             active_hooks: file.active_hooks.clone(),
+ 254 [7xag] |         }
+ 255 [zoqg] |     }
+ 256 [ok2w] | }
+ 257 [ntfp] | 
+ 258 [64e3] | // ── Paths ─────────────────────────────────────────────────────────────────────
+ 259 [ntfp] | 
+ 260 [5klb] | pub fn config_path() -> PathBuf {
+
+
+---
+
+[Graph overlay for src/config.rs:280-380]
+fn dirs_config_dir (src/config.rs:267-280):
+  called by: src/config.rs::config_path, src/config.rs::DEFAULT_CONFIG_TOML
+Key types in this file:
+  struct McpServerConfig (line 11): { name: String, command: Vec<String>, env: std::collections::HashMap<String, String> }
+  struct Profile (line 24): { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool }
+  struct ConfigFile (line 97): { default_profile: String, profiles: HashMap<String, Profile>, hooks: HashMap<String, crate::hooks::HookConfig>, active_hooks: Option<String> }
+  struct ResolvedConfig (line 175): { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, profile_name: String, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool, available_hooks: Vec<String>, active_hooks: Option<String>, active_hook_config: crate::hooks::HookConfig }
+[/Graph overlay]
+
+[src/config.rs — lines 280-380 of 558]
+
+ 280 [ntfp] | 
+ 281 [xbms] | const DEFAULT_CONFIG_TOML: &str = r#"# PareCode configuration
+ 282 [iqcf] | # Run `parecode --init` to regenerate this file.
+ 283 [ntfp] | 
+ 284 [hxve] | default_profile = "local"
+ 285 [ntfp] | 
+ 286 [wee3] | # ── Local Ollama (default) ────────────────────────────────────────────────────
+ 287 [lmj4] | [profiles.local]
+ 288 [l3ly] | endpoint      = "http://localhost:11434/v1/chat/completions"
+ 289 [tmf8] | model         = "qwen3:14b"
+ 290 [zdz8] | context_tokens = 32768
+ 291 [jyaf] | # api_key is not needed for Ollama
+ 292 [ntfp] | 
+ 293 [45qb] | # ── Another local model example ───────────────────────────────────────────────
+ 294 [ij97] | # [profiles.small]
+ 295 [7ke1] | # endpoint      = "http://localhost:11434/v1/chat/completions"
+ 296 [596g] | # model         = "qwen3:8b"
+ 297 [p8zj] | # context_tokens = 32768
+ 298 [ntfp] | 
+ 299 [mr8i] | # ── Anthropic Claude ─────────────────────────────────────────────────────────
+ 300 [emrq] | # [profiles.claude]
+ 301 [sndt] | # endpoint             = "https://api.anthropic.com/v1/chat/completions"
+ 302 [ynyq] | # model                = "claude-sonnet-4-6"
+ 303 [knyr] | # context_tokens       = 200000
+ 304 [y31o] | # api_key              = "sk-ant-..."
+ 305 [3q07] | # cost_per_mtok_input  = 3.0   # USD per 1M input tokens — enables cost estimates in /plan
+ 306 [ntfp] | 
+ 307 [aoyp] | # ── Anthropic Claude — Opus planner + Haiku executor ─────────────────────────
+ 308 [jov4] | # Uses Opus for planning (high reasoning, low token count) and Haiku for
+ 309 [e02j] | # executing each step (fast, cheap). Best cost/quality ratio for large tasks.
+ 310 [j5y1] | # [profiles.claude-split]
+ 311 [fp5l] | # endpoint       = "https://api.anthropic.com/v1/chat/completions"
+ 312 [wk62] | # model          = "claude-haiku-4-5-20251001"
+ 313 [olyz] | # planner_model  = "claude-opus-4-6"
+ 314 [yqgj] | # context_tokens = 200000
+ 315 [c94s] | # api_key        = "sk-ant-..."
+ 316 [ntfp] | 
+ 317 [yruy] | # ── OpenAI ───────────────────────────────────────────────────────────────────
+ 318 [qiua] | # [profiles.openai]
+ 319 [mj2t] | # endpoint       = "https://api.openai.com/v1/chat/completions"
+ 320 [v5eh] | # model          = "gpt-4o"
+ 321 [kzwm] | # context_tokens = 128000
+ 322 [bl1c] | # api_key        = "sk-..."
+ 323 [ntfp] | 
+ 324 [pf6l] | # ── OpenRouter ────────────────────────────────────────────────────────────────
+ 325 [go13] | # [profiles.openrouter]
+ 326 [i4ru] | # endpoint       = "https://openrouter.ai/api/v1/chat/completions"
+ 327 [kbww] | # model          = "qwen/qwen-2.5-coder-32b-instruct"
+ 328 [p8zj] | # context_tokens = 32768
+ 329 [7ipk] | # api_key        = "sk-or-..."
+ 330 [ntfp] | 
+ 331 [87uq] | # ── Git integration (optional, per-profile) ──────────────────────────────────
+ 332 [tc5b] | # git_context = true           # inject git status into system prompt; enables checkpoints/diffs
+ 333 [8ei3] | # auto_commit = false          # auto-commit all changes after each successful task
+ 334 [cm86] | # auto_commit_prefix = "parecode: "
+ 335 [ntfp] | 
+ 336 [5xjg] | # ── MCP servers (optional, per-profile) ──────────────────────────────────────
+ 337 [hq4e] | # Add MCP servers to any profile to give the model extra tools.
+ 338 [kjzs] | # Tools appear as "<server_name>.<tool_name>" (e.g. "brave.brave_web_search").
+ 339 [280i] | #
+ 340 [69ri] | # Example: Brave Search (requires BRAVE_API_KEY — free at https://brave.com/search/api/)
+ 341 [h3yk] | # [[profiles.local.mcp_servers]]
+ 342 [1g1q] | # name    = "brave"
+ 343 [olqc] | # command = ["npx", "-y", "@modelcontextprotocol/server-brave-search"]
+ 344 [7qhf] | # [profiles.local.mcp_servers.env]
+ 345 [8w3s] | # BRAVE_API_KEY = "BSA..."
+ 346 [280i] | #
+ 347 [1089] | # Example: Filesystem access (read/write beyond cwd)
+ 348 [h3yk] | # [[profiles.local.mcp_servers]]
+ 349 [3l7t] | # name    = "fs"
+ 350 [wjna] | # command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+ 351 [280i] | #
+ 352 [d70x] | # Example: Fetch (HTTP fetch + HTML→text, no API key needed)
+ 353 [h3yk] | # [[profiles.local.mcp_servers]]
+ 354 [1cbk] | # name    = "fetch"
+ 355 [md3i] | # command = ["uvx", "mcp-server-fetch"]
+ 356 [r23v] | "#;
+ 357 [ntfp] | 
+ 358 [ghub] | #[cfg(test)]
+ 359 [9je3] | mod tests {
+ 360 [10n0] |     use super::*;
+ 361 [ntfp] | 
+ 362 [xckf] |     // ── Default functions ────────────────────────────────────────────────────
+ 363 [ntfp] | 
+ 364 [0r2u] |     #[test]
+ 365 [hwbi] |     fn test_default_context_tokens() {
+ 366 [xwhl] |         assert_eq!(default_context_tokens(), 32_768);
+ 367 [zoqg] |     }
+ 368 [ntfp] | 
+ 369 [0r2u] |     #[test]
+ 370 [gcda] |     fn test_default_auto_commit_prefix() {
+ 371 [et21] |         assert_eq!(default_auto_commit_prefix(), "parecode: ".to_string());
+ 372 [zoqg] |     }
+ 373 [ntfp] | 
+ 374 [0r2u] |     #[test]
+ 375 [pd1s] |     fn test_default_git_context() {
+ 376 [tcjk] |         assert_eq!(default_git_context(), true);
+ 377 [zoqg] |     }
+ 378 [ntfp] | 
+ 379 [0r2u] |     #[test]
+ 380 [41pt] |     fn test_default_profile_name() {
 
 
 ╔═══ TURN 6  ═══╗
-Now I have full picture. Let me check the exact lines of Profile, ResolvedConfig, and how stats display works to know exact insertion points:
+Let me check how TokenStats and AgentDone events are handled in the TUI event loop:
+
+◆ read_files src/tui/mod.rs[1300–1420]
+→ [Graph overlay for src/tui/mod.rs:1300-1420]
+fn event_loop (src/tui/mod.rs:1107-1505):
+  calls: load_sidebar_entries (src/tui/mod.rs:3706), prune_old_sessions (src/sessions.rs:165), cwd_str (src/tui/mod.rs:3748), open_session (src/sessions.rs:74), resolve_hooks (src/tui/mod.rs:3190), run_hook (src/hooks.rs:197), run_project_init (src/init.rs:17), save_conventions (src/init.rs:68), check_for_update (src/setup.rs:548), draw (src/tui/config_view.rs:18)
+  called by: src/tui/mod.rs::run
+Key types in this file:
+  enum UiEvent (line 57): { Chunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult { summary: String }, CacheHit { path: String, lines: usize }, LoopWarning { tool_name: String }, BudgetWarning, ToolBudgetHit { limit: usize }, AgentDone { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize, duration_secs: u32, cwd: String }, AgentError(String), TokenStats { _input: u32, _output: u32, total_input: u32, total_output: u32, tool_calls: usize }, ContextUpdate { used: usize, total: u32, compressed: bool }, PlanReady(crate::plan::Plan), PlanGenerateFailed(String), PlanStepStart { index: usize, total: usize, desc: String }, PlanStepDone { index: usize, passed: bool, error: Option<String> }, PlanComplete { total: usize }, PlanFailed { step: usize, error: String }, HookOutput { event: String, output: String, exit_code: i32 }, GitChanges { stat: String, checkpoint_hash: Option<String>, files_changed: usize }, GitAutoCommit { message: String }, GitError(String), SystemMsg(String), AskUser { question: String, reply_tx: tokio::sync::oneshot::Sender<String> }, IndexReady { graph: crate::pie::ProjectGraph, narrative: Option<crate::narrative::ProjectNarrative> } }
+  enum ConversationEntry (line 134): { UserMessage(String), AssistantChunk(String), ThinkingChunk(String), ToolCall { name: String, args_summary: String }, ToolResult(String), CacheHit { path: String, lines: usize }, SystemMsg(String), HookOutput { event: String, output: String, success: bool }, TaskComplete { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize }, PlanCard, GitNotification { files_changed: usize, _checkpoint_hash: Option<String> }, AskUser(String), AskReply(String) }
+  enum Mode (line 164): { Normal, AgentRunning, Palette, FilePicker, SlashComplete, SessionBrowser, PlanReview, PlanRunning, SymbolPicker, UndoPicker, ProfilePicker, AskingUser, HookWizard }
+  enum WizardStep (line 184): { EnterName, EnterOnEdit, EnterOnTaskDone, EnterOnPlanStepDone, EnterOnSessionStart, EnterOnSessionEnd, Confirm }
+  struct HookWizardState (line 195): { step: WizardStep, name_input: String, on_edit_input: String, on_task_done_input: String, on_plan_step_done_input: String, on_session_start_input: String, on_session_end_input: String }
+  struct FileSymbolPickerState (line 210): { file: String, query: String, selected: usize, all_symbols: Vec<crate::pie::AttachedSymbol>, picked: Vec<crate::pie::AttachedSymbol> }
+[/Graph overlay]
+
+[src/tui/mod.rs — lines 1300-1420 of 3825]
+
+1300 [wtvm] |         let narrative = loop {
+1301 [69oc] |             splash_ticker.tick().await;
+1302 [6mox] |             splash_frame = splash_frame.wrapping_add(1);
+1303 [aasq] |             terminal.draw(|f| render::draw_splash(f, nar_status, splash_frame))?;
+1304 [9e37] |             if narrative_task.is_finished() {
+1305 [j6wf] |                 break narrative_task.await.ok().flatten();
+1306 [4q3c] |             }
+1307 [or2h] |         };
+1308 [ntfp] | 
+1309 [o4f2] |         state.project_narrative = narrative;
+1310 [p3pc] |         // Load pre-built flow paths (zero cost — instant JSON read).
+1311 [4wkn] |         // Built by rebuild_call_edges whenever graph is refreshed.
+1312 [8eck] |         state.flow_paths = crate::flowpaths::FlowPathIndex::load(std::path::Path::new("."));
+1313 [wxz3] |         state.project_graph = Some(graph);
+1314 [zoqg] |     }
+1315 [ntfp] | 
+1316 [x5t2] |     terminal.draw(|f| render::draw(f, &mut state))?;
+1317 [ntfp] | 
+1318 [fejy] |     loop {
+1319 [5gc1] |         tokio::select! {
+1320 [h0ko] |             // ── Animation tick ────────────────────────────────────────────────
+1321 [su5j] |             _ = ticker.tick() => {
+1322 [jz6u] |                 if matches!(state.mode, Mode::AgentRunning | Mode::PlanRunning) {
+1323 [h2rf] |                     state.spinner_tick = state.spinner_tick.wrapping_add(1);
+1324 [19ly] |                     terminal.draw(|f| render::draw(f, &mut state))?;
+1325 [m5m0] |                 }
+1326 [4q3c] |             }
+1327 [ntfp] | 
+1328 [lxy7] |             // ── Drain UI events from agent ────────────────────────────────────
+1329 [4ets] |             Some(ev) = ui_rx.recv() => {
+1330 [qax6] |                 state.apply_event(ev);
+1331 [hcom] |                 terminal.draw(|f| render::draw(f, &mut state))?;
+1332 [4q3c] |             }
+1333 [ntfp] | 
+1334 [ofx8] |             // ── Keyboard/resize events ────────────────────────────────────────
+1335 [smgz] |             Some(Ok(ev)) = crossterm_events.next() => {
+1336 [a8ts] |                 match ev {
+1337 [cc1i] |                     Event::Key(key) => {
+1338 [2c96] |                         let keep = handle_key(
+1339 [pbdc] |                             key,
+1340 [4o30] |                             &mut state,
+1341 [rgc9] |                             &mut resolved,
+1342 [v8sv] |                             &mut file,
+1343 [4zsj] |                             verbose,
+1344 [ffw8] |                             dry_run,
+1345 [ld94] |                             ui_tx.clone(),
+1346 [mr2m] |                         )?;
+1347 [dprg] |                         if !keep { break; }
+1348 [l7aw] |                     }
+1349 [1iky] |                     Event::Paste(text) => {
+1350 [a4td] |                         if state.mode != Mode::AgentRunning && state.mode != Mode::PlanRunning {
+1351 [pg1r] |                             if matches!(state.mode, Mode::Normal | Mode::AskingUser) {
+1352 [lgwf] |                                 // Insert via input_box (preserves newlines)
+1353 [bugo] |                                 state.input_box.insert_str(&text);
+1354 [ounk] |                             } else {
+1355 [z7me] |                                 // Special modes use state.input directly
+1356 [i9bv] |                                 state.input.insert_str(state.cursor, &text);
+1357 [h3x8] |                                 state.cursor += text.len();
+1358 [45lk] |                             }
+1359 [r894] |                         }
+1360 [l7aw] |                     }
+1361 [8f0y] |                     Event::Mouse(mouse) => {
+1362 [oxsu] |                         match mouse.kind {
+1363 [4z3s] |                             MouseEventKind::ScrollUp => {
+1364 [crol] |                                 if state.sidebar_visible && mouse.column < 30 {
+1365 [60h6] |                                     state.sidebar_scroll = state.sidebar_scroll.saturating_sub(1);
+1366 [amyy] |                                 } else if state.active_tab == Tab::Stats {
+1367 [ouxr] |                                     state.stats_scroll = state.stats_scroll.saturating_add(3);
+1368 [5wps] |                                 } else {
+1369 [4dm3] |                                     state.scroll = state.scroll.saturating_add(3);
+1370 [7vhk] |                                 }
+1371 [45lk] |                             }
+1372 [enif] |                             MouseEventKind::ScrollDown => {
+1373 [crol] |                                 if state.sidebar_visible && mouse.column < 30 {
+1374 [rogd] |                                     let max_scroll = state.sidebar_entries.len().saturating_sub(1);
+1375 [pfo9] |                                     state.sidebar_scroll = (state.sidebar_scroll + 1).min(max_scroll);
+1376 [amyy] |                                 } else if state.active_tab == Tab::Stats {
+1377 [25ri] |                                     state.stats_scroll = state.stats_scroll.saturating_sub(3);
+1378 [5wps] |                                 } else {
+1379 [qzwy] |                                     state.scroll = state.scroll.saturating_sub(3);
+1380 [7vhk] |                                 }
+1381 [45lk] |                             }
+1382 [44k7] |                             MouseEventKind::Down(MouseButton::Left) => {
+1383 [2oyj] |                                 // Sidebar session click — hit-test against the 30-col sidebar panel
+1384 [crol] |                                 if state.sidebar_visible && mouse.column < 30 {
+1385 [lnzf] |                                     let rel_row = mouse.row as usize;
+1386 [tljl] |                                     // Rows 0-1 are header + divider; entries start at row 2
+1387 [ygfc] |                                     if rel_row >= 2 {
+1388 [1fvo] |                                         let mut row_offset = 2usize;
+1389 [swgp] |                                         let mut clicked_idx = None;
+1390 [7jtw] |                                         for (i, entry) in state.sidebar_entries.iter().enumerate() {
+1391 [s1jx] |                                             // Each entry: name(1) + ts(1) + preview?(1) + divider(1)
+1392 [e01l] |                                             let entry_height = if !entry.preview.is_empty() { 4 } else { 3 };
+1393 [wrdk] |                                             if rel_row < row_offset + entry_height {
+1394 [9xs4] |                                                 clicked_idx = Some(i);
+1395 [ab3t] |                                                 break;
+1396 [ya3c] |                                             }
+1397 [im1a] |                                             row_offset += entry_height;
+1398 [pdjc] |                                         }
+1399 [271q] |                                         if let Some(idx) = clicked_idx {
+1400 [fu87] |                                             let actual_idx = idx + state.sidebar_scroll;
+1401 [l0sg] |                                             load_sidebar_session(&mut state, actual_idx);
+1402 [pdjc] |                                         }
+1403 [o41k] |                                     }
+1404 [7vhk] |                                 }
+1405 [45lk] |                             }
+1406 [mpkv] |                             _ => {}
+1407 [r894] |                         }
+1408 [l7aw] |                     }
+1409 [qm2j] |                     Event::Resize(_, _) => {}
+1410 [clun] |                     _ => {}
+1411 [m5m0] |                 }
+1412 [ntfp] | 
+1413 [rf6c] |                 // Shell out to $EDITOR if requested by Config tab
+1414 [4owv] |                 if state.wants_editor {
+1415 [6cpm] |                     state.wants_editor = false;
+1416 [znel] |                     let config_file_path = crate::config::config_path();
+1417 [dcu3] |                     let editor = std::env::var("EDITOR")
+1418 [ch0c] |                         .or_else(|_| std::env::var("VISUAL"))
+1419 [eh1a] |                         .unwrap_or_else(|_| "vi".to_string());
+1420 [ntfp] | 
 
 
+╔═══ TURN 7  ═══╗
+Let me find the `apply_event` method:
 
-◆ read_files src/config.rs[24–62], src/config.rs[175–205], src/telemetry.rs[56–84], src/tui/mod.rs[405–415]
-→ [src/config.rs — lines 24-62]
-↑ Already in context (pre-loaded struct Profile).
-Find the [file — lines X-Y] block above — do not re-read.
+◆ orient {"query": "fn apply_event AppState Token
+→ # orient: "fn apply_event AppState TokenStats AgentDone"
 
+## Types (pipeline order)
+[src/agent.rs — lines 474-508] ([agent]  struct AgentConfig — orient result)
+  struct AgentConfig
+  {
+      verbose: bool,
+      dry_run: bool,
+      context_tokens: u32,
+      _profile_name: String,
+      _model: String,
+      _show_timestamps: bool,
+      mcp: Arc<McpClient>,
+      hooks: Arc<HookConfig>,
+      hooks_enabled: bool,
+      auto_commit: bool,
+      auto_commit_prefix: String,
+      git_context: bool,
+      project_graph: Option<std::sync::Arc<crate::pie::ProjectGraph>>,
+      project_narrative: Option<std::sync::Arc<crate::narrative::ProjectNarrative>>,
+      flow_paths: Option<std::sync::Arc<crate::flowpaths::FlowPathIndex>>,
+      attached_symbols: Vec<crate::pie::AttachedSymbol>,
+  }
+  // constructed by: _should_skip_done_turn (src/agent.rs:1278), launch_agent (src/tui/mod.rs:3210), launch_plan (src/tui/mod.rs:3444), launch_quick (src/tui/mod.rs:3294)
+  // Layout authoritative — do not re-read this range.
 
----
-
-[src/config.rs — lines 175-205]
-↑ Already in context (pre-loaded struct ResolvedConfig).
-Find the [file — lines X-Y] block above — do not re-read.
-
-
----
-
-[src/telemetry.rs — lines 56-84]
-↑ Already in context (orient: struct SessionStats).
-Find the [file — lines X-Y] block above — do not re-read.
-
-
----
-
-[src/tui/mod.rs — lines 405-415 (struct/enum layout served from project index)]
-
-  line 405: struct AppState
+[src/tui/mod.rs — lines 405-554] ([ui]     struct AppState — orient result)
+  struct AppState
   {
       entries: Vec<ConversationEntry>,
       input_box: InputBox,
@@ -591,192 +1559,211 @@ Find the [file — lines X-Y] block above — do not re-read.
       context_weights: crate::context_weights::ContextWeights,
       file_cache: std::sync::Arc<tokio::sync::Mutex<crate::cache::FileCache>>,
   }
+  // constructed by: event_loop (src/tui/mod.rs:1107)
+  // Layout authoritative — do not re-read this range.
 
-Layout is authoritative (matches file). Use check_wiring(field="name") to trace where a field flows.
+[src/tui/mod.rs — lines 373-383] ([ui]     struct PlanReviewState — orient result)
+  struct PlanReviewState
+  {
+      plan: Plan,
+      selected: usize,
+      annotating: bool,
+      annotation_input: String,
+  }
+  // constructed by: AppState (src/tui/mod.rs:405)
+  // Layout authoritative — do not re-read this range.
+
+[src/tui/mod.rs — lines 342-347] ([ui]     struct SessionBrowserState — orient result)
+  struct SessionBrowserState
+  {
+      entries: Vec<(String, std::path::PathBuf, usize, String)>,
+      selected: usize,
+  }
+  // Layout authoritative — do not re-read this range.
+
+[src/tui/mod.rs — lines 210-218] ([ui]     struct FileSymbolPickerState — orient result)
+  struct FileSymbolPickerState
+  {
+      file: String,
+      query: String,
+      selected: usize,
+      all_symbols: Vec<crate::pie::AttachedSymbol>,
+      picked: Vec<crate::pie::AttachedSymbol>,
+  }
+  // constructed by: handle_key (src/tui/mod.rs:1506)
+  // Layout authoritative — do not re-read this range.
+
+[src/tui/mod.rs — lines 57-133] ([ui]     enum UiEvent — orient result)
+  enum UiEvent
+  {
+      Chunk(String),
+      ThinkingChunk(String),
+      ToolCall { name: String, args_summary: String },
+      ToolResult { summary: String },
+      CacheHit { path: String, lines: usize },
+      LoopWarning { tool_name: String },
+      BudgetWarning,
+      ToolBudgetHit { limit: usize },
+      AgentDone { input_tokens: u32, output_tokens: u32, tool_calls: usize, compressed_count: usize, duration_secs: u32, cwd: String },
+      AgentError(String),
+      TokenStats { _input: u32, _output: u32, total_input: u32, total_output: u32, tool_calls: usize },
+      ContextUpdate { used: usize, total: u32, compressed: bool },
+      PlanReady(crate::plan::Plan),
+      PlanGenerateFailed(String),
+      PlanStepStart { index: usize, total: usize, desc: String },
+      PlanStepDone { index: usize, passed: bool, error: Option<String> },
+      PlanComplete { total: usize },
+      PlanFailed { step: usize, error: String },
+      HookOutput { event: String, output: String, exit_code: i32 },
+      GitChanges { stat: String, checkpoint_hash: Option<String>, files_changed: usize },
+      GitAutoCommit { message: String },
+      GitError(String),
+      SystemMsg(String),
+      AskUser { question: String, reply_tx: tokio::sync::oneshot::Sender<String> },
+      IndexReady { graph: crate::pie::ProjectGraph, narrative: Option<crate::narrative::ProjectNarrative> },
+  }
+  // constructed by: event_loop (src/tui/mod.rs:1107), execute (src/tools/ask.rs:6), execute_one_tool_call (src/agent.rs:624), generate_plan (src/plan.rs:493), handle_submit (src/tui/mod.rs:2615), launch_plan (src/tui/mod.rs:3444)
+  // Layout authoritative — do not re-read this range.
+
+[src/tui/mod.rs — lines 195-209] ([ui]     struct HookWizardState — orient result)
+  struct HookWizardState
+  {
+      step: WizardStep,
+      name_input: String,
+      on_edit_input: String,
+      on_task_done_input: String,
+      on_plan_step_done_input: String,
+      on_session_start_input: String,
+      on_session_end_input: String,
+  }
+  // constructed by: execute_command (src/tui/mod.rs:2749)
+  // Layout authoritative — do not re-read this range.
+
+[src/tui/mod.rs — lines 273-281] ([ui]     struct FilePickerState — orient result)
+  struct FilePickerState
+  {
+      all_files: Vec<String>,
+      query: String,
+      selected: usize,
+  }
+  // constructed by: handle_key (src/tui/mod.rs:1506)
+  // Layout authoritative — do not re-read this range.
+
+[src/client.rs — lines 113-120] ([core]   struct UsageStats — orient result)
+  struct UsageStats
+  {
+      prompt_tokens: Option<u32>,
+      completion_tokens: Option<u32>,
+  }
+  // Layout authoritative — do not re-read this range.
+
+[src/telemetry.rs — lines 56-84] ([core]   struct SessionStats — orient result)
+  struct SessionStats
+  {
+      tasks_completed: usize,
+      total_input_tokens: u32,
+      total_output_tokens: u32,
+      total_tool_calls: usize,
+      total_compressed: usize,
+      budget_enforcements: usize,
+      peak_context_pct: u32,
+      records: Vec<TaskRecord>,
+      inflight_input_tokens: u32,
+      inflight_output_tokens: u32,
+      inflight_tool_calls: usize,
+      last_flush_ts: i64,
+  }
+  // constructed by: AppState (src/tui/mod.rs:405)
+  // Layout authoritative — do not re-read this range.
+
+Struct/enum layouts above are [file — lines X-Y] blocks = completed reads.
+Do NOT call read_files for any struct range shown above.
+
+## Key functions
+[init]   fn print_event_plain (src/main.rs:248-320)
+
+[agent]  fn _should_skip_done_turn (src/agent.rs:1278-1735)
+  calls: build_user_message (src/agent.rs:528), build_system_prompt (src/agent.rs:509), strip_cot_from_last_assistant (src/agent.rs:831), execute_one_tool_call (src/agent.rs:624)
+  constructs: AgentConfig, ThinkParser, crate::client::ToolCall, ToolCall, FileCache, History, LoopDetector
+
+[tools]  fn apply_pure_insertion (src/tools/patch.rs:237-251)
+
+[tools]  fn apply_hunk (src/tools/patch.rs:155-236)
+  calls: apply_pure_insertion (src/tools/patch.rs:237), find_needle (src/tools/patch.rs:252), context_around (src/tools/patch.rs:319)
+
+[ui]     fn launch_agent (src/tui/mod.rs:3210-3293)
+  calls: resolve_hooks_with_state (src/tui/mod.rs:3197)
+  constructs: Client, AgentConfig
+
+[ui]     fn resolve_hooks_with_state (src/tui/mod.rs:3197-3209)
+
+[ui]     fn draw_stats_bar (src/tui/render.rs:385-484)
+
+[ui]     fn event_loop (src/tui/mod.rs:1107-1505)
+  calls: load_sidebar_entries (src/tui/mod.rs:3706), prune_old_sessions (src/sessions.rs:165), cwd_str (src/tui/mod.rs:3748), open_session (src/sessions.rs:74), resolve_hooks (src/tui/mod.rs:3190), run_hook (src/hooks.rs:197), run_project_init (src/init.rs:17), save_conventions (src/init.rs:68), check_for_update (src/setup.rs:548), draw (src/tui/config_view.rs:18), draw_splash (src/tui/render.rs:28)
+  constructs: McpClient, AppState, UiEvent::HookOutput, Client
+
+Suggested: check_wiring(field="stats") to verify full pipeline propagation.
 
 
-╔═══ TURN 7  ═══╗
-Now I have the complete picture. Let me check the stats display to see where cost would be shown:
-
-
-◆ read_files src/tui/render.rs[430–485]
-→ [Graph overlay for src/tui/render.rs:430-485]
-fn draw_stats_bar (src/tui/render.rs:385-484):
-  called by: src/tui/render.rs::draw
-fn fmt_k (src/tui/render.rs:485-492):
-  called by: src/tui/stats_view.rs::draw
-[/Graph overlay]
-
-[src/tui/render.rs — lines 430-485 of 492]
-
- 430 [xguk] |         0..=50  => Color::DarkGray,
- 431 [g2wa] |         51..=75 => Color::Rgb(140, 120, 40),
- 432 [da06] |         76..=90 => Color::Rgb(180, 100, 20),
- 433 [igq3] |         _       => Color::Rgb(180, 60, 60),
- 434 [r6d5] |     };
- 435 [k8ty] |     let peak_str = if s.peak_context_pct > 0 {
- 436 [sdfo] |         format!("  peak {}%", s.peak_context_pct)
- 437 [99e8] |     } else {
- 438 [i8at] |         String::new()
- 439 [r6d5] |     };
- 440 [ntfp] | 
- 441 [6j4a] |     let budget_str = if s.budget_enforcements > 0 {
- 442 [t941] |         format!("  {} compressions", s.budget_enforcements)
- 443 [99e8] |     } else {
- 444 [i8at] |         String::new()
- 445 [r6d5] |     };
- 446 [ntfp] | 
- 447 [ky0u] |     // PIE graph status — shown on the right of the stats bar
- 448 [wv13] |     let pie_str = if let Some(graph) = &state.project_graph {
- 449 [0vv7] |         let cluster_count = graph.clusters.len();
- 450 [nb7b] |         if cluster_count > 0 {
- 451 [m8s6] |             let mins_ago = (chrono::Utc::now().timestamp() - graph.last_indexed).max(0) / 60;
- 452 [vtle] |             let age = if mins_ago < 1 {
- 453 [d48x] |                 "just now".to_string()
- 454 [6x3y] |             } else if mins_ago < 60 {
- 455 [4or9] |                 format!("{mins_ago}m ago")
- 456 [rhf4] |             } else {
- 457 [pxjl] |                 format!("{}h ago", mins_ago / 60)
- 458 [to9l] |             };
- 459 [p6d5] |             format!("  ◈ {cluster_count} clusters · indexed {age}")
- 460 [gi2o] |         } else {
- 461 [i8dx] |             String::new()
- 462 [7xag] |         }
- 463 [99e8] |     } else {
- 464 [i8at] |         String::new()
- 465 [r6d5] |     };
- 466 [ntfp] | 
- 467 [vznp] |     let line = Line::from(vec![
- 468 [dkmb] |         Span::styled("  ∑ ", Style::default().fg(Color::Rgb(60, 55, 100))),
- 469 [dd10] |         Span::styled(task_str, Style::default().fg(Color::Rgb(120, 110, 180))),
- 470 [5cox] |         Span::styled(token_str, Style::default().fg(Color::Rgb(80, 80, 120))),
- 471 [bbfb] |         Span::styled(inflight_str, Style::default().fg(Color::Cyan)),
- 472 [1bzl] |         Span::styled(tool_str, Style::default().fg(Color::Rgb(70, 70, 110))),
- 473 [xpmj] |         Span::styled(ratio_str, Style::default().fg(Color::Rgb(60, 100, 80))),
- 474 [aw1q] |         Span::styled(peak_str, Style::default().fg(peak_color)),
- 475 [1i3f] |         Span::styled(budget_str, Style::default().fg(Color::Rgb(80, 70, 60))),
- 476 [7d81] |         Span::styled(pie_str, Style::default().fg(Color::Rgb(80, 70, 140))),
- 477 [alhk] |     ]);
- 478 [ntfp] | 
- 479 [s5za] |     f.render_widget(
- 480 [n3rf] |         Paragraph::new(line).style(Style::default().bg(Color::Rgb(7, 7, 14))),
- 481 [6ic8] |         area,
- 482 [chwd] |     );
- 483 [ok2w] | }
- 484 [ntfp] | 
- 485 [7r34] | fn fmt_k(n: u32) -> String {
-
-
-╔═══ TURN 8  ═══╗
-Now I have the complete picture. Let me check where DEFAULT_CONFIG_TOML is defined (to add the new field default):
-
-
-
-◆ read_files src/config.rs[281–320]
-→ [Graph overlay for src/config.rs:281-320]
-fn dirs_config_dir (src/config.rs:267-280):
-  called by: src/config.rs::config_path, src/config.rs::DEFAULT_CONFIG_TOML
-Key types in this file:
-  struct McpServerConfig (line 11): { name: String, command: Vec<String>, env: std::collections::HashMap<String, String> }
-  struct Profile (line 24): { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool }
-  struct ConfigFile (line 97): { default_profile: String, profiles: HashMap<String, Profile>, hooks: HashMap<String, crate::hooks::HookConfig>, active_hooks: Option<String> }
-  struct ResolvedConfig (line 175): { endpoint: String, model: String, context_tokens: u32, api_key: Option<String>, profile_name: String, planner_model: Option<String>, mcp_servers: Vec<McpServerConfig>, cost_per_mtok_input: Option<f64>, hooks: crate::hooks::HookConfig, hooks_disabled: bool, auto_commit: bool, auto_commit_prefix: String, git_context: bool, available_hooks: Vec<String>, active_hooks: Option<String>, active_hook_config: crate::hooks::HookConfig }
-[/Graph overlay]
-
-[src/config.rs — lines 281-320 of 558]
-
- 281 [xbms] | const DEFAULT_CONFIG_TOML: &str = r#"# PareCode configuration
- 282 [iqcf] | # Run `parecode --init` to regenerate this file.
- 283 [ntfp] | 
- 284 [hxve] | default_profile = "local"
- 285 [ntfp] | 
- 286 [wee3] | # ── Local Ollama (default) ────────────────────────────────────────────────────
- 287 [lmj4] | [profiles.local]
- 288 [l3ly] | endpoint      = "http://localhost:11434/v1/chat/completions"
- 289 [tmf8] | model         = "qwen3:14b"
- 290 [zdz8] | context_tokens = 32768
- 291 [jyaf] | # api_key is not needed for Ollama
- 292 [ntfp] | 
- 293 [45qb] | # ── Another local model example ───────────────────────────────────────────────
- 294 [ij97] | # [profiles.small]
- 295 [7ke1] | # endpoint      = "http://localhost:11434/v1/chat/completions"
- 296 [596g] | # model         = "qwen3:8b"
- 297 [p8zj] | # context_tokens = 32768
- 298 [ntfp] | 
- 299 [mr8i] | # ── Anthropic Claude ─────────────────────────────────────────────────────────
- 300 [emrq] | # [profiles.claude]
- 301 [sndt] | # endpoint             = "https://api.anthropic.com/v1/chat/completions"
- 302 [ynyq] | # model                = "claude-sonnet-4-6"
- 303 [knyr] | # context_tokens       = 200000
- 304 [y31o] | # api_key              = "sk-ant-..."
- 305 [3q07] | # cost_per_mtok_input  = 3.0   # USD per 1M input tokens — enables cost estimates in /plan
- 306 [ntfp] | 
- 307 [aoyp] | # ── Anthropic Claude — Opus planner + Haiku executor ─────────────────────────
- 308 [jov4] | # Uses Opus for planning (high reasoning, low token count) and Haiku for
- 309 [e02j] | # executing each step (fast, cheap). Best cost/quality ratio for large tasks.
- 310 [j5y1] | # [profiles.claude-split]
- 311 [fp5l] | # endpoint       = "https://api.anthropic.com/v1/chat/completions"
- 312 [wk62] | # model          = "claude-haiku-4-5-20251001"
- 313 [olyz] | # planner_model  = "claude-opus-4-6"
- 314 [yqgj] | # context_tokens = 200000
- 315 [c94s] | # api_key        = "sk-ant-..."
- 316 [ntfp] | 
- 317 [yruy] | # ── OpenAI ───────────────────────────────────────────────────────────────────
- 318 [qiua] | # [profiles.openai]
- 319 [mj2t] | # endpoint       = "https://api.openai.com/v1/chat/completions"
- 320 [v5eh] | # model          = "gpt-4o"
-
-
-╔═══ TURN 9 (output — no tools) ═══╗
+╔═══ TURN 8 (output — no tools) ═══╗
 {
   "steps": [
     {
-      "description": "Add cost_per_mtok_output field to Profile struct in config.rs",
-      "instruction": "src/config.rs:44 — add after cost_per_mtok_input field: `    /// Optional cost per 1M output tokens in USD\n    #[serde(default)]\n    pub cost_per_mtok_output: Option<f64>,",
+      "description": "Add cost_per_mtok_output field to Profile struct",
+      "instruction": "In src/config.rs:44, after the `cost_per_mtok_input: Option<f64>` field (line 44), add a new field `cost_per_mtok_output: Option<f64>` with doc comment \"Optional: cost per 1M output tokens in USD. If set, used instead of 3x input cost.\" Also update `DEFAULT` impl if one exists.",
       "files": ["src/config.rs"],
-      "verify": "command:cargo check"
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Add cost_per_mtok_output field to ResolvedConfig struct in config.rs",
-      "instruction": "src/config.rs:187 — add after cost_per_mtok_input field: `    /// Optional cost per 1M output tokens in USD (for cost estimates)\n    pub cost_per_mtok_output: Option<f64>,",
+      "description": "Add cost_per_mtok_output to ResolvedConfig and wire through resolve()",
+      "instruction": "1) In src/config.rs:187, add `pub cost_per_mtok_output: Option<f64>` after `cost_per_mtok_input`. 2) In src/config.rs:242, add `cost_per_mtok_output: base.cost_per_mtok_output,` after the cost_per_mtok_input line. 3) Update any tests in config.rs that construct ResolvedConfig or Profile to include the new field (use `..Default::default()` where possible).",
       "files": ["src/config.rs"],
-      "verify": "command:cargo check"
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Add cost fields to AgentConfig struct in agent.rs",
-      "instruction": "src/config.rs:489 — add after auto_commit_prefix field: `    /// Cost per 1M input tokens in USD (from profile config)\n    pub cost_per_mtok_input: Option<f64>,\n    /// Cost per 1M output tokens in USD (from profile config)\n    pub cost_per_mtok_output: Option<f64>,",
-      "files": ["src/agent.rs"],
-      "verify": "command:cargo check"
-    },
-    {
-      "description": "Add cost_per_mtok_output field to AppState struct in tui/mod.rs",
-      "instruction": "src/tui/mod.rs:425 — add after cost_per_mtok_input field: `      cost_per_mtok_output: Option<f64>,",
+      "description": "Add cost_per_mtok_output to AppState and wire from ResolvedConfig",
+      "instruction": "1) In src/tui/mod.rs, add `cost_per_mtok_output: Option<f64>` field to AppState struct (near line 435 where cost_per_mtok_input is). 2) In src/tui/mod.rs:1119, after `state.cost_per_mtok_input = resolved.cost_per_mtok_input;`, add `state.cost_per_mtok_output = resolved.cost_per_mtok_output;`",
       "files": ["src/tui/mod.rs"],
-      "verify": "command:cargo check"
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Pass cost fields to AgentConfig in launch_agent function",
-      "instruction": "src/tui/mod.rs:3244 — add to AgentConfig construction: `        cost_per_mtok_input: resolved.cost_per_mtok_input,\n        cost_per_mtok_output: resolved.cost_per_mtok_output,",
-      "files": ["src/tui/mod.rs"],
-      "verify": "command:cargo check"
+      "description": "Update cost_str to accept separate input/output rates",
+      "instruction": "In src/tui/stats_view.rs:56-66, change the `cost_str` signature to `fn cost_str(tokens_in: u32, tokens_out: u32, cost_per_mtok_input: Option<f64>, cost_per_mtok_output: Option<f64>) -> Option<String>`. Use cost_per_mtok_input for input tokens and cost_per_mtok_output (falling back to cost_per_mtok_input * 3.0 if None) for output tokens.",
+      "files": ["src/tui/stats_view.rs"],
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Pass cost fields to AgentConfig in launch_plan function",
-      "instruction": "src/tui/mod.rs:3469 — add to AgentConfig construction: `        cost_per_mtok_input: resolved.cost_per_mtok_input,\n        cost_per_mtok_output: resolved.cost_per_mtok_output,",
-      "files": ["src/tui/mod.rs"],
-      "verify": "command:cargo check"
+      "description": "Update all cost_str call sites to pass both rates",
+      "instruction": "In src/tui/stats_view.rs, update every call to `cost_str(...)` to pass `state.cost_per_mtok_input` AND `state.cost_per_mtok_output`. The draw() function at line 181 extracts `let cost = state.cost_per_mtok_input.map(|c| c as f64);` — change this to pass both fields. The aggregate_items function at line 108 takes a `cost_per_mtok` param — change it to take two params (input + output). Update all callers (lines 224, 250, 266, 191).",
+      "files": ["src/tui/stats_view.rs"],
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Pass cost fields to AppState in event_loop function",
-      "instruction": "src/tui/mod.rs:1118 — find AppState construction and add: `            cost_per_mtok_input: resolved.cost_per_mtok_input,\n            cost_per_mtok_output: resolved.cost_per_mtok_output,",
-      "files": ["src/tui/mod.rs"],
-      "verify": "command:cargo check"
+      "description": "Show cost_per_mtok_input and cost_per_mtok_output in config view",
+      "instruction": "In src/tui/config_view.rs, after the `git_context` kv row (around line 79), add lines showing `cost_per_mtok_input` and `cost_per_mtok_output` from state. Format: `kv(\"cost/1M in\", &state.cost_per_mtok_input.map(|c| format!(\"${:.2}\", c)).unwrap_or_else(|| \"(not set)\".to_string()))` and similarly for output. Read the AppState fields available in state.",
+      "files": ["src/tui/config_view.rs"],
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Display cost in stats bar based on token counts and cost rates",
-      "instruction": "src/tui/render.rs:418 — add cost calculation after token_str: calculate input_cost = total_input_tokens * cost_per_mtok_input / 1_000_000, output_cost similarly, then display as cost_str with format like \"$X.XX\"",
-      "files": ["src/tui/render.rs"],
-      "verify": "command:cargo check"
+      "description": "Update DEFAULT_CONFIG_TOML examples to mention cost_per_mtok_output",
+      "instruction": "In src/config.rs, in the DEFAULT_CONFIG_TOML string, add a commented-out `cost_per_mtok_output` line after the `cost_per_mtok_input` example (around line 305). E.g. `# cost_per_mtok_output = 15.0  # USD per 1M output tokens`.",
+      "files": ["src/config.rs"],
+      "verify": "command:cargo check",
+      "tool_budget": 15
+    },
+    {
+      "description": "Update config_view.rs draw to show cost settings from resolved config",
+      "instruction": "In src/tui/config_view.rs, ensure both cost_per_mtok_input and cost_per_mtok_output values are displayed in the Settings section. The AppState already has these fields — display them after the git_context line (around line 80) using the kv helper.",
+      "files": ["src/tui/config_view.rs"],
+      "verify": "command:cargo check",
+      "tool_budget": 15
     }
   ]
 }
@@ -785,52 +1772,60 @@ Key types in this file:
 {
   "steps": [
     {
-      "description": "Add cost_per_mtok_output field to Profile struct in config.rs",
-      "instruction": "src/config.rs:44 — add after cost_per_mtok_input field: `    /// Optional cost per 1M output tokens in USD\n    #[serde(default)]\n    pub cost_per_mtok_output: Option<f64>,",
+      "description": "Add cost_per_mtok_output field to Profile struct",
+      "instruction": "In src/config.rs:44, after the `cost_per_mtok_input: Option<f64>` field (line 44), add a new field `cost_per_mtok_output: Option<f64>` with doc comment \"Optional: cost per 1M output tokens in USD. If set, used instead of 3x input cost.\" Also update `DEFAULT` impl if one exists.",
       "files": ["src/config.rs"],
-      "verify": "command:cargo check"
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Add cost_per_mtok_output field to ResolvedConfig struct in config.rs",
-      "instruction": "src/config.rs:187 — add after cost_per_mtok_input field: `    /// Optional cost per 1M output tokens in USD (for cost estimates)\n    pub cost_per_mtok_output: Option<f64>,",
+      "description": "Add cost_per_mtok_output to ResolvedConfig and wire through resolve()",
+      "instruction": "1) In src/config.rs:187, add `pub cost_per_mtok_output: Option<f64>` after `cost_per_mtok_input`. 2) In src/config.rs:242, add `cost_per_mtok_output: base.cost_per_mtok_output,` after the cost_per_mtok_input line. 3) Update any tests in config.rs that construct ResolvedConfig or Profile to include the new field (use `..Default::default()` where possible).",
       "files": ["src/config.rs"],
-      "verify": "command:cargo check"
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Add cost fields to AgentConfig struct in agent.rs",
-      "instruction": "src/config.rs:489 — add after auto_commit_prefix field: `    /// Cost per 1M input tokens in USD (from profile config)\n    pub cost_per_mtok_input: Option<f64>,\n    /// Cost per 1M output tokens in USD (from profile config)\n    pub cost_per_mtok_output: Option<f64>,",
-      "files": ["src/agent.rs"],
-      "verify": "command:cargo check"
-    },
-    {
-      "description": "Add cost_per_mtok_output field to AppState struct in tui/mod.rs",
-      "instruction": "src/tui/mod.rs:425 — add after cost_per_mtok_input field: `      cost_per_mtok_output: Option<f64>,",
+      "description": "Add cost_per_mtok_output to AppState and wire from ResolvedConfig",
+      "instruction": "1) In src/tui/mod.rs, add `cost_per_mtok_output: Option<f64>` field to AppState struct (near line 435 where cost_per_mtok_input is). 2) In src/tui/mod.rs:1119, after `state.cost_per_mtok_input = resolved.cost_per_mtok_input;`, add `state.cost_per_mtok_output = resolved.cost_per_mtok_output;`",
       "files": ["src/tui/mod.rs"],
-      "verify": "command:cargo check"
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Pass cost fields to AgentConfig in launch_agent function",
-      "instruction": "src/tui/mod.rs:3244 — add to AgentConfig construction: `        cost_per_mtok_input: resolved.cost_per_mtok_input,\n        cost_per_mtok_output: resolved.cost_per_mtok_output,",
-      "files": ["src/tui/mod.rs"],
-      "verify": "command:cargo check"
+      "description": "Update cost_str to accept separate input/output rates",
+      "instruction": "In src/tui/stats_view.rs:56-66, change the `cost_str` signature to `fn cost_str(tokens_in: u32, tokens_out: u32, cost_per_mtok_input: Option<f64>, cost_per_mtok_output: Option<f64>) -> Option<String>`. Use cost_per_mtok_input for input tokens and cost_per_mtok_output (falling back to cost_per_mtok_input * 3.0 if None) for output tokens.",
+      "files": ["src/tui/stats_view.rs"],
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Pass cost fields to AgentConfig in launch_plan function",
-      "instruction": "src/tui/mod.rs:3469 — add to AgentConfig construction: `        cost_per_mtok_input: resolved.cost_per_mtok_input,\n        cost_per_mtok_output: resolved.cost_per_mtok_output,",
-      "files": ["src/tui/mod.rs"],
-      "verify": "command:cargo check"
+      "description": "Update all cost_str call sites to pass both rates",
+      "instruction": "In src/tui/stats_view.rs, update every call to `cost_str(...)` to pass `state.cost_per_mtok_input` AND `state.cost_per_mtok_output`. The draw() function at line 181 extracts `let cost = state.cost_per_mtok_input.map(|c| c as f64);` — change this to pass both fields. The aggregate_items function at line 108 takes a `cost_per_mtok` param — change it to take two params (input + output). Update all callers (lines 224, 250, 266, 191).",
+      "files": ["src/tui/stats_view.rs"],
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Pass cost fields to AppState in event_loop function",
-      "instruction": "src/tui/mod.rs:1118 — find AppState construction and add: `            cost_per_mtok_input: resolved.cost_per_mtok_input,\n            cost_per_mtok_output: resolved.cost_per_mtok_output,",
-      "files": ["src/tui/mod.rs"],
-      "verify": "command:cargo check"
+      "description": "Show cost_per_mtok_input and cost_per_mtok_output in config view",
+      "instruction": "In src/tui/config_view.rs, after the `git_context` kv row (around line 79), add lines showing `cost_per_mtok_input` and `cost_per_mtok_output` from state. Format: `kv(\"cost/1M in\", &state.cost_per_mtok_input.map(|c| format!(\"${:.2}\", c)).unwrap_or_else(|| \"(not set)\".to_string()))` and similarly for output. Read the AppState fields available in state.",
+      "files": ["src/tui/config_view.rs"],
+      "verify": "command:cargo check",
+      "tool_budget": 15
     },
     {
-      "description": "Display cost in stats bar based on token counts and cost rates",
-      "instruction": "src/tui/render.rs:418 — add cost calculation after token_str: calculate input_cost = total_input_tokens * cost_per_mtok_input / 1_000_000, output_cost similarly, then display as cost_str with format like \"$X.XX\"",
-      "files": ["src/tui/render.rs"],
-      "verify": "command:cargo check"
+      "description": "Update DEFAULT_CONFIG_TOML examples to mention cost_per_mtok_output",
+      "instruction": "In src/config.rs, in the DEFAULT_CONFIG_TOML string, add a commented-out `cost_per_mtok_output` line after the `cost_per_mtok_input` example (around line 305). E.g. `# cost_per_mtok_output = 15.0  # USD per 1M output tokens`.",
+      "files": ["src/config.rs"],
+      "verify": "command:cargo check",
+      "tool_budget": 15
+    },
+    {
+      "description": "Update config_view.rs draw to show cost settings from resolved config",
+      "instruction": "In src/tui/config_view.rs, ensure both cost_per_mtok_input and cost_per_mtok_output values are displayed in the Settings section. The AppState already has these fields — display them after the git_context line (around line 80) using the kv helper.",
+      "files": ["src/tui/config_view.rs"],
+      "verify": "command:cargo check",
+      "tool_budget": 15
     }
   ]
 }
