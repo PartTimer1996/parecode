@@ -78,10 +78,10 @@ pub struct SessionStats {
     pub inflight_output_tokens: u32,
     /// Tool calls executed so far in the currently-running task
     pub inflight_tool_calls: usize,
-    /// Timestamp (epoch secs) of last periodic telemetry flush for the current task
-    pub last_flush_ts: i64,
     /// Duration (secs) of the most recently completed task
     pub last_task_duration: u32,
+    /// Timestamp (epoch secs) of last periodic telemetry flush for the current task
+    pub last_flush_ts: i64,
 }
 
 impl SessionStats {

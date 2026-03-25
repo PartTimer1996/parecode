@@ -1,8 +1,8 @@
 {
   "paths": [
     {
-      "id": "run-quick-to-check-wiring-definition",
-      "name": "run_quick → check_wiring_definition",
+      "id": "run-quick-to-read-files-definition",
+      "name": "run_quick → read_files_definition",
       "entry_key": "src/agent.rs::run_quick",
       "steps": [
         "src/tools/mod.rs::all_definitions",
@@ -16,13 +16,13 @@
         "src/tools/pie_tool.rs::check_wiring_execute",
         "src/tools/pie_tool.rs::read_files_execute",
         "src/tools/mod.rs::dispatch",
-        "src/tools/pie_tool.rs::smart_read",
         "src/cache.rs::check",
         "src/tools/mod.rs::is_native",
         "src/mcp.rs::call",
         "src/tools/pie_tool.rs::orient_definition",
         "src/tools/pie_tool.rs::trace_calls_definition",
-        "src/tools/pie_tool.rs::check_wiring_definition"
+        "src/tools/pie_tool.rs::check_wiring_definition",
+        "src/tools/pie_tool.rs::read_files_definition"
       ],
       "keywords": [
         "args",
@@ -42,7 +42,6 @@
         "orient",
         "quick",
         "read",
-        "smart",
         "summary",
         "tool",
         "trace",
@@ -1070,5 +1069,5 @@
       ]
     }
   ],
-  "built_at": 1774399836
+  "built_at": 1774400607
 }
