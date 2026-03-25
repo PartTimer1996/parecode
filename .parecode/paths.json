@@ -1,8 +1,8 @@
 {
   "paths": [
     {
-      "id": "run-quick-to-orient-definition",
-      "name": "run_quick → orient_definition",
+      "id": "run-quick-to-check-wiring-definition",
+      "name": "run_quick → check_wiring_definition",
       "entry_key": "src/agent.rs::run_quick",
       "steps": [
         "src/tools/mod.rs::all_definitions",
@@ -12,21 +12,20 @@
         "src/agent.rs::dispatch_tool",
         "src/tools/mod.rs::all_tool_names",
         "src/tools/mod.rs::get_tool",
-        "src/agent.rs::bash_graph_intercept",
-        "src/tools/pie_tool.rs::trace_calls_execute",
-        "src/tools/pie_tool.rs::check_wiring_execute",
         "src/tools/pie_tool.rs::orient_execute",
+        "src/tools/pie_tool.rs::check_wiring_execute",
         "src/tools/pie_tool.rs::read_files_execute",
         "src/tools/mod.rs::dispatch",
         "src/tools/pie_tool.rs::smart_read",
         "src/cache.rs::check",
         "src/tools/mod.rs::is_native",
         "src/mcp.rs::call",
-        "src/tools/pie_tool.rs::orient_definition"
+        "src/tools/pie_tool.rs::orient_definition",
+        "src/tools/pie_tool.rs::trace_calls_definition",
+        "src/tools/pie_tool.rs::check_wiring_definition"
       ],
       "keywords": [
         "args",
-        "bash",
         "call",
         "calls",
         "chat",
@@ -38,8 +37,6 @@
         "execute",
         "files",
         "format",
-        "graph",
-        "intercept",
         "names",
         "native",
         "orient",
@@ -971,6 +968,25 @@
       ]
     },
     {
+      "id": "bash-graph-intercept-to-extract-grep-target-file",
+      "name": "bash_graph_intercept → extract_grep_target_file",
+      "entry_key": "src/agent.rs::bash_graph_intercept",
+      "steps": [
+        "src/agent.rs::extract_grep_pattern",
+        "src/agent.rs::extract_grep_target_file"
+      ],
+      "keywords": [
+        "bash",
+        "extract",
+        "file",
+        "graph",
+        "grep",
+        "intercept",
+        "pattern",
+        "target"
+      ]
+    },
+    {
       "id": "spawn-and-init-to-parse-tools",
       "name": "spawn_and_init → parse_tools",
       "entry_key": "src/mcp.rs::spawn_and_init",
@@ -1054,5 +1070,5 @@
       ]
     }
   ],
-  "built_at": 1774399651
+  "built_at": 1774399836
 }

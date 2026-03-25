@@ -80,6 +80,8 @@ pub struct SessionStats {
     pub inflight_tool_calls: usize,
     /// Timestamp (epoch secs) of last periodic telemetry flush for the current task
     pub last_flush_ts: i64,
+    /// Duration (secs) of the most recently completed task
+    pub last_task_duration: u32,
 }
 
 impl SessionStats {
@@ -103,6 +105,7 @@ impl SessionStats {
         self.total_output_tokens += output_tokens;
         self.total_tool_calls += tool_calls;
         self.total_compressed += compressed_count;
+        self.last_task_duration = duration_secs;
 
         let compression_ratio = if tool_calls > 0 {
             compressed_count as f32 / tool_calls as f32

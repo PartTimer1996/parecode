@@ -1025,41 +1025,31 @@ async fn dispatch_tool(
     config: &AgentConfig,
 ) -> String {
     match name {
-        "bash" => {
-            // Graph intercept: if the command is a plain grep/rg for a known symbol,
-            // return the indexed location instead of running the subprocess.
-            if let Some(intercept) = bash_graph_intercept(args, config) {
-                intercept
-            } else {
-                tools::bash::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]"))
-            }
-        }
+        // "bash" => {
+        //     // Graph intercept: if the command is a plain grep/rg for a known symbol,
+        //     // return the indexed location instead of running the subprocess.
+        //     if let Some(intercept) = bash_graph_intercept(args, config) {
+        //         intercept
+        //     } else {
+        //         tools::bash::execute(args).await.unwrap_or_else(|e| format!("[Tool error: {e}]"))
+        //     }
+        // }
 
         // ── find_symbol / trace_calls — in-memory graph lookups, zero disk reads
-        "find_symbol" => {
+        "orient" => {
             match &config.project_graph {
-                Some(g) => tools::pie_tool::execute(args, g),
-                None => "[find_symbol: no project graph available for this session]".to_string(),
+                Some(g) => tools::pie_tool::orient_execute(args, g, &mut tools::pie_tool::DeliveredRanges::new()),
+                None => "[orient: no project graph available for this session]".to_string(),
             }
-        }
-        "trace_calls" => {
-            match &config.project_graph {
-                Some(g) => tools::pie_tool::trace_calls_execute(args, g),
-                None => "[trace_calls: no project graph available for this session]".to_string(),
-            }
-        }
+        },
         "check_wiring" => {
             match &config.project_graph {
                 Some(g) => tools::pie_tool::check_wiring_execute(args, g),
                 None => "[check_wiring: no project graph available for this session]".to_string(),
             }
         }
-        "orient" => {
-            match &config.project_graph {
-                Some(g) => tools::pie_tool::orient_execute(args, g, &mut tools::pie_tool::DeliveredRanges::new()),
-                None => "[orient: no project graph available for this session]".to_string(),
-            }
-        }
+
+        
         // read_files — batched, graph-aware reads. Preferred over read_file when graph present.
         // Each entry gets smart_read (struct intercept + call graph overlay).
         // Per-call DeliveredRanges — no cross-call gating in agent mode (edits invalidate ranges).
