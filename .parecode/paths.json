@@ -1,8 +1,8 @@
 {
   "paths": [
     {
-      "id": "-should-skip-done-turn-to-is-native",
-      "name": "_should_skip_done_turn → is_native",
+      "id": "-should-skip-done-turn-to-smart-read",
+      "name": "_should_skip_done_turn → smart_read",
       "entry_key": "src/agent.rs::_should_skip_done_turn",
       "steps": [
         "src/agent.rs::build_user_message",
@@ -20,9 +20,9 @@
         "src/tools/pie_tool.rs::trace_calls_execute",
         "src/tools/pie_tool.rs::check_wiring_execute",
         "src/tools/pie_tool.rs::orient_execute",
-        "src/tools/pie_tool.rs::smart_read",
+        "src/tools/pie_tool.rs::read_files_execute",
         "src/tools/mod.rs::dispatch",
-        "src/tools/mod.rs::is_native"
+        "src/tools/pie_tool.rs::smart_read"
       ],
       "keywords": [
         "args",
@@ -41,13 +41,13 @@
         "edit",
         "evict",
         "execute",
+        "files",
         "format",
         "graph",
         "hooks",
         "intercept",
         "last",
         "message",
-        "native",
         "one",
         "orient",
         "prompt",
@@ -591,44 +591,6 @@
       ]
     },
     {
-      "id": "read-files-execute-to-split-top-level-commas",
-      "name": "read_files_execute → split_top_level_commas",
-      "entry_key": "src/tools/pie_tool.rs::read_files_execute",
-      "steps": [
-        "src/tools/pie_tool.rs::smart_read",
-        "src/tools/pie_tool.rs::build_compact_summary",
-        "src/tools/pie_tool.rs::find_field_in_sig",
-        "src/tools/pie_tool.rs::check_wiring_execute",
-        "src/tools/pie_tool.rs::expand_compact_sig",
-        "src/tools/pie_tool.rs::symbols_for_cluster",
-        "src/tools/pie_tool.rs::construction_snippet",
-        "src/tools/pie_tool.rs::split_top_level_commas"
-      ],
-      "keywords": [
-        "build",
-        "check",
-        "cluster",
-        "commas",
-        "compact",
-        "construction",
-        "execute",
-        "expand",
-        "field",
-        "files",
-        "find",
-        "level",
-        "read",
-        "sig",
-        "smart",
-        "snippet",
-        "split",
-        "summary",
-        "symbols",
-        "top",
-        "wiring"
-      ]
-    },
-    {
       "id": "truncate-to-lines-to-first-line",
       "name": "truncate_to_lines → first_line",
       "entry_key": "src/history.rs::truncate_to_lines",
@@ -737,5 +699,5 @@
       ]
     }
   ],
-  "built_at": 1774394979
+  "built_at": 1774398535
 }
