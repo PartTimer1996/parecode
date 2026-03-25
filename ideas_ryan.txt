@@ -11,3 +11,24 @@ Minor - hyper efficiency
 
 Good example for parecode - NOT Claude
 #src/agent.rs run_tui currently calculates input and output tokens and shows it to the user, can we configure this to work with actual cost also? So essentially we need to know which how much the users configured model costs in agent.rs::run_tui() agent.rs::AgentConfig config.rs::Profile config.rs::ConfigFile config.rs::ResolvedConfig config_view.rs::draw()
+
+
+New examples
+Good test case — something that exercises the full flow: a field that needs to propagate across the pipeline so check_wiring earns its keep, a function body to read, and a real edit.
+
+Task:
+
+Add a last_task_duration display to the stats bar — show how long the last task took (e.g. 14s). The duration is already in AgentDone but SessionStats doesn't track it and draw_stats_bar doesn't show it.
+
+Why it's a good test:
+
+check_wiring("duration_secs") will find it in AgentDone and show SessionStats as a gap
+orient covers SessionStats, AgentDone, draw_stats_bar in one call
+Two function bodies to read: apply_event (to see where AgentDone is handled) and draw_stats_bar (to see where to insert the display)
+Three edits: SessionStats struct, apply_event handler, draw_stats_bar render
+Symbols to attach:
+
+
+#src/tui/render.rs → draw_stats_bar
+#src/tui/mod.rs   → apply_event
+Those two give the model the function bodies it needs. orient covers the struct layouts. check_wiring maps the gap. Should land in 4-5 tool calls if the new flow works as intended.

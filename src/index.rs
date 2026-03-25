@@ -220,6 +220,22 @@ pub(crate) fn extract_symbols(content: &str, file: &str, out: &mut Vec<Symbol>) 
         let first = line.chars().next();
         let is_top_level = matches!(first, Some(c) if !c.is_whitespace());
         if !is_top_level {
+            // Capture impl methods: exactly 4-space indented `fn` lines in Rust.
+            // Methods inside `impl` blocks are always at one indent level and are
+            // critical for orient / symbol-picker / check_wiring to find (e.g. apply_event,
+            // new, push). We only go one level deep — 8+ spaces are closures or nested fns.
+            if ext == "rs" {
+                let indent = line.len() - line.trim_start_matches(' ').len();
+                if indent == 4 {
+                    let trimmed = line.trim();
+                    if let Some(mut sym) = extract_symbol_from_line(trimmed, &ext, i + 1, file) {
+                        if matches!(sym.kind, SymbolKind::Function) {
+                            sym.signature = extract_signature(&sym.kind, &ext, &lines, i);
+                            out.push(sym);
+                        }
+                    }
+                }
+            }
             continue;
         }
         let trimmed = line.trim();
@@ -608,6 +624,45 @@ mod tests {
             extract_python("class UserService:"),
             Some((SymbolKind::Class, "UserService".to_string()))
         );
+    }
+
+    #[test]
+    fn test_impl_methods_indexed() {
+        // Methods inside impl blocks (4-space indent) must appear in the symbol list.
+        // This was a gap: the column-0 filter silently dropped apply_event, new, push, etc.
+        let src = "\
+impl AppState {
+    pub fn new(resolved: &ResolvedConfig) -> Self {
+        todo!()
+    }
+    fn apply_event(&mut self, ev: UiEvent) {
+        todo!()
+    }
+    pub async fn launch(&self) {
+        todo!()
+    }
+}
+";
+        let mut symbols: Vec<Symbol> = Vec::new();
+        extract_symbols(src, "src/tui/mod.rs", &mut symbols);
+
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"AppState"), "impl block itself should be indexed");
+        assert!(names.contains(&"new"), "pub fn new should be indexed");
+        assert!(names.contains(&"apply_event"), "fn apply_event should be indexed");
+        assert!(names.contains(&"launch"), "pub async fn launch should be indexed");
+
+        // Deeply nested (8 spaces) should NOT be indexed — closures/nested fns
+        let src2 = "\
+fn outer() {
+        fn inner_deep() {
+        }
+}
+";
+        let mut symbols2: Vec<Symbol> = Vec::new();
+        extract_symbols(src2, "src/agent.rs", &mut symbols2);
+        let names2: Vec<&str> = symbols2.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names2.contains(&"inner_deep"), "8-space nested fn must not be indexed");
     }
 
     #[test]
