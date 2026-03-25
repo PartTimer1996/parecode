@@ -750,8 +750,8 @@
         "src/tui/stats_view.rs::divider",
         "src/tui/stats_view.rs::section_header",
         "src/tui/stats_view.rs::kv_row",
-        "src/tui/render.rs::fmt_k",
         "src/tui/stats_view.rs::fmt_k",
+        "src/tui/render.rs::fmt_k",
         "src/tui/stats_view.rs::cost_str",
         "src/tui/stats_view.rs::aggregate_items",
         "src/telemetry.rs::from_records",
@@ -1069,5 +1069,5 @@
       ]
     }
   ],
-  "built_at": 1774400765
+  "built_at": 1774400911
 }
