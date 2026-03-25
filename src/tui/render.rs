@@ -401,9 +401,10 @@ fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
     };
 
     // Only show meaningful data once at least one task has run
-    let (task_str, token_str, tool_str, ratio_str) = if s.tasks_completed == 0 {
+    let (task_str, token_str, tool_str, ratio_str, duration_str) = if s.tasks_completed == 0 {
         (
             String::from("no tasks yet"),
+            String::new(),
             String::new(),
             String::new(),
             String::new(),
@@ -412,6 +413,12 @@ fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
         let total_tok = s.total_tokens();
         let avg_tok = s.avg_tokens_per_task();
         let ratio = s.compression_ratio();
+
+        let duration_str = if s.last_task_duration > 0 {
+            format!("  {}s", s.last_task_duration)
+        } else {
+            String::new()
+        };
 
         (
             format!("{} task{}", s.tasks_completed, if s.tasks_completed == 1 { "" } else { "s" }),
@@ -422,6 +429,7 @@ fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
             } else {
                 String::new()
             },
+            duration_str,
         )
     };
 
@@ -471,6 +479,7 @@ fn draw_stats_bar(f: &mut Frame, state: &AppState, area: Rect) {
         Span::styled(inflight_str, Style::default().fg(Color::Cyan)),
         Span::styled(tool_str, Style::default().fg(Color::Rgb(70, 70, 110))),
         Span::styled(ratio_str, Style::default().fg(Color::Rgb(60, 100, 80))),
+        Span::styled(duration_str, Style::default().fg(Color::Rgb(100, 100, 100))),
         Span::styled(peak_str, Style::default().fg(peak_color)),
         Span::styled(budget_str, Style::default().fg(Color::Rgb(80, 70, 60))),
         Span::styled(pie_str, Style::default().fg(Color::Rgb(80, 70, 140))),

@@ -1080,11 +1080,9 @@ async fn dispatch_tool(
         }
 
         "read_file" => {
-            // Pre-edit hash fetcher — no gating, no blocking. Use freely.
-            // When graph available: smart_read adds struct intercept + hashes.
-            // When no graph: plain file read with hashes.
-               tools::dispatch(name, args).unwrap_or_else(|e| format!("[Tool error: {e}]"))
-            
+            // Pre-edit hash fetcher — must return live file content, not graph data.
+            // smart_read was wrong here: after editing a struct it returned stale index data.
+            tools::dispatch(name, args).unwrap_or_else(|e| format!("[Tool error: {e}]"))
         }
         "ask_user" => tools::ask::execute(args, ui_tx.clone()).await.unwrap_or_else(|e| e),
         "edit_file" | "write_file" | "patch_file" => {
