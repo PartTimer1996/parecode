@@ -104,12 +104,14 @@ pub fn tools_for_turn(turn: usize, has_graph: bool) -> Vec<Tool> {
 
     if has_graph {
         // Discovery-first ordering — position drives model behaviour.
-        // orient + check_wiring are free (in-memory graph), read_files is batched.
+        // orient + check_wiring are free (in-memory graph), read_files is batched discovery.
+        // read_file is reinstated for pre-edit hash fetches — use it freely before/after edits.
         t.push(def(pie_tool::orient_definition()));
         t.push(def(pie_tool::check_wiring_definition()));
         t.push(def(pie_tool::read_files_definition()));
+        t.push(def(read::definition()));
     } else {
-        // No graph — fall back to single-file reads
+        // No graph — single-file reads only
         t.push(def(read::definition()));
     }
 

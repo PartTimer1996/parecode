@@ -18,8 +18,7 @@ Good test case — something that exercises the full flow: a field that needs to
 
 Task:
 
-Add a last_task_duration display to the stats bar — show how long the last task took (e.g. 14s). The duration is already in AgentDone but SessionStats doesn't track it and draw_stats_bar doesn't show it.
-
+Add a last_task_duration display to the stats bar — show how long the last task took (e.g. 14s). The duration is already in AgentDone but SessionStats doesn't track it and draw_stats_bar doesn't show it. render.rs::draw_stats_bar() mod.rs::apply_event() telemetry.rs::SessionStats
 Why it's a good test:
 
 check_wiring("duration_secs") will find it in AgentDone and show SessionStats as a gap

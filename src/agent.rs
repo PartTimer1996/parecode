@@ -17,19 +17,20 @@ const MAX_TOOL_CALLS: usize = 40;
 const SYSTEM_PROMPT_BASE: &str = "You are PareCode, a coding assistant. \
 Complete tasks in minimum tool calls. A project index is pre-loaded.\n\
 \n\
-DISCOVERY — run before editing:\n\
+DISCOVERY:\n\
 1. orient(query) — struct layouts, line numbers, call connections in ONE call. \
 Skip if attached context already covers the task.\n\
 2. check_wiring(field) — required when adding or modifying any struct field. \
 Returns every struct in the pipeline that needs updating.\n\
-3. read_files([{path, line_range}, ...]) — batch ALL reads into ONE call. \
-Line numbers come from orient. Only read function bodies you will edit — \
-skip types/layouts already shown by orient.\n\
+3. read_files([{path, line_range}, ...]) — batch ALL discovery reads into ONE call. \
+Line numbers from orient. Skip types already shown by orient.\n\
 \n\
-EDITING — immediately after reading:\n\
-edit_file uses hashes from the read result. Hashes expire on edit — \
-use the edit result hashes for follow-up edits to the same region.\n\
-Verify with bash(\"cargo check\") after each change set.\n\
+EDITING:\n\
+4. read_file(path, line_range) — fetch exact hashes just before each edit. \
+Use freely — no batching needed. Line numbers from orient or read_files.\n\
+5. edit_file — requires hashes from read_file. After editing, use hashes from \
+the edit result for any follow-up edits to the same region.\n\
+6. bash(\"cargo check\") — verify after each change set.\n\
 \n\
 Stop when done.";
 
@@ -1089,18 +1090,11 @@ async fn dispatch_tool(
         }
 
         "read_file" => {
+            // Pre-edit hash fetcher — no gating, no blocking. Use freely.
+            // When graph available: smart_read adds struct intercept + hashes.
+            // When no graph: plain file read with hashes.
             match &config.project_graph {
-                Some(g) => {
-                    let has_range = args["line_range"].as_array()
-                        .map_or(false, |a| !a.is_empty());
-                    if !has_range {
-                        return "[read_file: use read_files([{path, line_range}]) — \
-                                batch all reads in one call. Get line numbers from orient first.]"
-                            .to_string();
-                    }
-                    // Ranged read_file still works via smart_read (hashes + graph overlay)
-                    tools::pie_tool::smart_read(args, g)
-                }
+                Some(g) => tools::pie_tool::smart_read(args, g),
                 None => tools::dispatch(name, args).unwrap_or_else(|e| format!("[Tool error: {e}]")),
             }
         }
