@@ -141,10 +141,7 @@ pub async fn run_tui(
     let mut total_output_tokens = 0u32;
     let mut tool_call_count = 0usize;
     let mut turn: usize = 0;
-    // Cache the tool list — only rebuild when the phase actually changes.
-    // Tool schemas are ~2,600 tokens; rebuilding every turn wastes nothing but
-    // the Vec alloc — the real saving is sending the same bytes as a pointer.
-    // More importantly this makes the phase key explicit and auditable.
+    // Cache tool list — rebuild only when phase key changes.
     let mut cached_tools: Option<(/*key:*/ (usize, bool), Vec<Tool>)> = None;
 
     let budget = Budget::new(config.context_tokens);
@@ -168,8 +165,6 @@ pub async fn run_tui(
     let system_tokens = crate::budget::estimate_tokens(system_prompt);
 
     // ── PIE context assembly ─────────────────────────────────────────────────
-    // One call builds everything: injection messages, user-message symbol prefix,
-    // flow-path match flag, and focus files. Consistent with the planner path.
     let pie_ctx = config.project_graph.as_ref()
         .map(|graph| crate::pie::build_pie_context(
             task,
@@ -185,9 +180,7 @@ pub async fn run_tui(
     messages.extend(pie_ctx.injection_messages);
 
     // ── Git checkpoint ────────────────────────────────────────────────────────
-    // Create a checkpoint before the task starts. If the tree is dirty, this
-    // commits all pending changes as a WIP checkpoint so /undo can restore them.
-    // Skips silently if not in a git repo or git_context is disabled.
+    // WIP checkpoint so /undo can restore dirty state.
     let checkpoint_hash: Option<String> = if config.git_context {
         std::env::current_dir().ok().and_then(|cwd| {
             crate::git::GitRepo::open(&cwd).and_then(|repo| {
@@ -206,9 +199,7 @@ pub async fn run_tui(
     };
 
     // ── Prior turn pairs ─────────────────────────────────────────────────────
-    // Inject the last few turns as lean user/assistant pairs so the model has
-    // session continuity for follow-up tasks. No tool results — just what was
-    // asked and what was answered. Capped to avoid token bloat.
+    // Inject recent turns as lean user/assistant pairs for session continuity.
     const MAX_PRIOR_TURNS: usize = 3;
     let prior_start = prior_turns.len().saturating_sub(MAX_PRIOR_TURNS);
     for turn in &prior_turns[prior_start..] {
@@ -254,9 +245,6 @@ pub async fn run_tui(
         });
 
         // ── Phase-adaptive tool selection ────────────────────────────────────
-        // Only rebuild the tool list when the phase key changes — saves ~50µs of
-        // Vec allocation per turn. The tool schemas themselves are not re-sent
-        // (HTTP body is built fresh each call); this just avoids redundant work.
         let has_graph = config.project_graph.is_some();
         let tool_key = (turn, has_graph);
         let tools = match &cached_tools {
